@@ -818,10 +818,10 @@ a:hover { text-decoration: underline; }
 #search .pagefind-ui__result-title { font-size: 0.9rem; }
 #search .pagefind-ui__result-excerpt { font-size: 0.8rem; color: var(--c-text-2); }
 
+/* サイドバーは左端に付ける。中央に寄せると、幅いっぱいの .top-nav と左端がずれて、
+   広い画面ではサイドバーの左に空白が出る。 */
 .layout {
   display: flex;
-  max-width: 1400px;
-  margin: 0 auto;
 }
 
 .sidebar {
@@ -843,9 +843,11 @@ a:hover { text-decoration: underline; }
 .sidebar summary { cursor: pointer; font-weight: 600; padding: 0.15rem 0; }
 .sidebar-dir { color: var(--c-text-2); font-size: 0.75em; font-weight: 400; margin-left: 0.5em; }
 
+/* 行が長くなりすぎないよう、本文の幅は前の中央寄せのとき (1400px - サイドバー) と同じにする。 */
 .content {
   flex: 1;
   min-width: 0;
+  max-width: 1120px;
   padding: 2rem;
 }
 
