@@ -1,0 +1,36 @@
+name: procon-judge
+
+# Ask hashiryo/procon-judge to re-measure. It clones this repository at HEAD on
+# every run, so a change here moves the key of every submission whose include
+# closure contains the changed header, and only those get re-run.
+#
+# Only neo/ can enter those closures, so pushes that touch nothing else are
+# not worth a run. Anything missed is picked up by procon-judge's nightly run.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "neo/**"
+  workflow_dispatch:
+
+# This is a signal, not a payload. Only the last push has to arrive.
+concurrency:
+  group: procon-judge-dispatch
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  dispatch:
+    # Forks do not have the secret.
+    if: github.repository == 'hashiryo/NeoLibrary'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Dispatch to procon-judge
+        env:
+          GH_TOKEN: ${{ secrets.JUDGE_DISPATCH_TOKEN }}
+        run: |
+          gh api repos/hashiryo/procon-judge/dispatches --method POST --input - <<JSON
+          {"event_type": "library-push", "client_payload": {"sha": "$GITHUB_SHA"}}
+          JSON

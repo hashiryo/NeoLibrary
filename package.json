@@ -1,0 +1,29 @@
+{
+  "name": "neolibrary",
+  "version": "1.0.0",
+  "description": "Hashiryo's NeoLibrary",
+  "main": "index.js",
+  "scripts": {
+    "build": "npx tsx scripts/build-site.ts && npx pagefind --site site/NeoLibrary --output-path site/NeoLibrary/pagefind",
+    "test:scripts": "node --test --import tsx scripts/tests/*.test.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@github.com.hashiryo:hashiryo/NeoLibrary.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@mdit/plugin-katex": "^0.25.2",
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^25.6.0",
+    "gray-matter": "^4.0.3",
+    "katex": "^0.16.44",
+    "markdown-it": "^14.1.1",
+    "pagefind": "^1.5.0",
+    "shiki": "^4.0.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}

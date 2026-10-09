@@ -1,0 +1,7 @@
+-std=gnu++23
+-Wall
+-Wextra
+-DUSE_SIMDE
+-DSIMDE_ENABLE_NATIVE_ALIASES
+-I.
+-I../procon-judge/third_party/simde

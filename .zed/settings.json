@@ -1,0 +1,13 @@
+// Zed のプロジェクト設定。保存時の整形は C++ だけにする。
+// Zed 1.21 の既定は off で、全体を on にすると md/ の Markdown と scripts/ の
+// TypeScript まで Prettier で書き換わる (このリポジトリに Prettier の設定は無い)。
+// 整形の中身は clangd がリポジトリ直下の .clang-format を読んで決める。
+{
+  "languages": {
+    "C++": {
+      "format_on_save": "on",
+      "tab_size": 1,
+      "hard_tabs": false
+    }
+  }
+}

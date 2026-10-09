@@ -1,0 +1,71 @@
+name: pr-check
+
+# PR の軽い検査。変わった neo/ のヘッダを 1 環境 (procon-judge の x64-gcc と同じ
+# g++-15、-std=gnu++23、土台の命令のオプション) で -fsyntax-only する。
+# テストデータもトークンも要らず、数分で終わる。CE は拾えるが WA は拾えない。
+# WA はマージ後に procon-judge が測って分かる (ヘッダページの Submissions)。
+# 正しさの証拠は procon-judge の記録で、これは PR で壊れたことに気づく最低限の口
+# (Library が 2026-09-22 に verify と test/ を畳んだときに残した形を引き継ぐ)。
+# 設計は algo-notes の「Library の verify を畳む設計」。
+
+on:
+  pull_request:
+    paths:
+      - "neo/**"
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # base との差分を取るので履歴が要る。
+          fetch-depth: 0
+
+      - name: 変わったヘッダを集める
+        run: |
+          python3 scripts/pr-syntax-targets.py \
+            "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}" > targets.txt
+          echo "対象 $(wc -l < targets.txt) 件"
+          cat targets.txt
+
+      # コンパイラとフラグは procon-judge の x64-gcc に揃える (g++-15、-std=gnu++23、
+      # 土台の命令の -march=x86-64-v3 -mpclmul -mvpclmulqdq)。測る環境より古いコンパイラや
+      # 規格で見ると、C++20 / 23 の機能を使ったヘッダが procon-judge では通るのにここだけ落ちる。
+      # 土台の命令はオプションで渡し、土台に無い命令 (AVX-512、GFNI) はヘッダがソースで宣言する
+      # (procon-judge は 2026-09-25 に -march を一度外し、同じ日に土台だけを戻した)。
+      # この検査は構文だけを見るので、土台に無い命令の宣言の書き忘れは見つけられない。
+      # 書き忘れの CE はインライン展開のときに出るので、見つけるのは procon-judge の記録。
+      # ubuntu-24.04 の既定の g++ は 13 なので、procon-judge の judge.yml と同じ PPA から入れる。
+      - name: g++-15 を入れる
+        run: |
+          if [ ! -s targets.txt ]; then
+            exit 0
+          fi
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y g++-15
+          g++-15 --version
+
+      # ヘッダは -include で読む。直接渡すと「#pragma once in main file」の警告が出るため。
+      - name: g++ -fsyntax-only
+        run: |
+          if [ ! -s targets.txt ]; then
+            echo "対象がありません"
+            exit 0
+          fi
+          check() {
+            local f="$1" err
+            err="/tmp/$(echo "$f" | tr / _).err"
+            if ! g++-15 -std=gnu++23 -march=x86-64-v3 -mpclmul -mvpclmulqdq -fsyntax-only -I. -include "$f" -x c++ - < /dev/null 2> "$err"; then
+              echo "::error file=$f::コンパイルできません"
+              cat "$err"
+              return 1
+            fi
+            echo "ok  $f"
+          }
+          export -f check
+          xargs -P 4 -I{} bash -c 'check "$@"' _ {} < targets.txt

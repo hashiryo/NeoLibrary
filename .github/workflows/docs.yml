@@ -1,0 +1,67 @@
+name: docs
+
+# NeoLibrary のサイトを建てて GitHub Pages に置く。
+#
+# 正しさの証拠は procon-judge の記録で、NeoLibrary 自身は test を走らせない
+# (Library が 2026-09-22 に verify と test/ を畳んだ形を引き継ぐ。設計は algo-notes の
+# 「Library の verify を畳む設計」)。
+# ヘッダの状態の印と Submissions の節は、サイトが表示時に judge の JSON を読んで付ける
+# ので、ここで judge の結果を待つ必要はない。
+#
+# push は build と deploy、pull request は build まで。
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build site
+        run: npm run build
+
+      - name: Setup Pages
+        if: github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/NeoLibrary
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
