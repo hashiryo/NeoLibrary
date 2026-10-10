@@ -6,13 +6,14 @@
 #include <string>
 #include <vector>
 // SA-IS による接尾辞配列。1 回目の induced sorting は libsais (Ilya Grebnov) の組み立て方を、文字の種類が少ない段で使い、
-// 最後の induced sorting は sais-lite (Yuta Mori) の符号の手で回す。procon-judge の yosupo-suffixarray で書き比べた sais_lr13 と同じ。
+// 最後の induced sorting は sais-lite (Yuta Mori) の符号の手で回す。procon-judge の yosupo-suffixarray で書き比べた sais_lr16 と同じ。
 namespace suffix_array_internal {
 constexpr int MARK= int(0x80000000u), POS= 0x7fffffff;
 // induced sorting の 2 回の走査 (L 型を前から、S 型を後ろから)。cnt[c] はバケット c の先頭、cnt[c + 1] は末尾の次。置く値の符号に
 // 「この接尾辞の 1 つ前を、今の走査で induce するか」を持たせ、L 型と S 型は隣の 2 文字から決める (sais-lite の手)。First は 1 回目
 // (LMS の部分文字列を並べる) で、読んだ値を 0 に戻し、LMS だけを負の値で残す。Table は最後の induced sorting で、バケットの位置を
-// レジスタに置かず、置くたびに表を読み書きする (置くたびにバケットが替わる入力で速い)。
+// レジスタに置かず、置くたびに表を読み書きする (置くたびにバケットが替わる入力で速い)。induce する接尾辞 u が 0 のときだけ、
+// s[u - 1] を読まずにまれな側の分岐で置く値を決める。
 template <bool First, bool Table, class C> inline void induce_scan(const C* s, int n, int K, const int* cnt, int* sa, int* bkt) {
  for(int c= 0; c < K; ++c) bkt[c]= cnt[c];
  if constexpr(Table) {
@@ -21,61 +22,60 @@ template <bool First, bool Table, class C> inline void induce_scan(const C* s, i
    sa[bkt[c]++]= j ^ -int((j > 0) & (int(s[j - (j > 0)]) < c));
   }
   for(int i= 0; i < n; ++i) {
-   int j= sa[i];
+   const int j= sa[i];
    sa[i]= ~j;
    if(j > 0) {
-    --j;
-    const int c= int(s[j]);
-    sa[bkt[c]++]= j ^ -int((j > 0) & (int(s[j - (j > 0)]) < c));
+    const size_t u= unsigned(j) - 1;
+    const unsigned c= unsigned(s[u]);
+    sa[bkt[c]++]= __builtin_expect(u != 0, 1) ? int(u) ^ -int(unsigned(s[u - 1]) < c) : 0;
    }
   }
   for(int c= 0; c < K; ++c) bkt[c]= cnt[c + 1];
   for(int i= n - 1; i >= 0; --i) {
-   int j= sa[i];
+   const int j= sa[i];
    if(j > 0) {
-    --j;
-    const int c= int(s[j]);
-    sa[--bkt[c]]= j ^ -int((j == 0) | (int(s[j - (j > 0)]) > c));
+    const size_t u= unsigned(j) - 1;
+    const unsigned c= unsigned(s[u]);
+    sa[--bkt[c]]= __builtin_expect(u != 0, 1) ? int(u) ^ -int(unsigned(s[u - 1]) > c) : -1;
    } else {
     sa[i]= ~j;
    }
   }
   return;
  }
- int c1= int(s[n - 1]);
+ unsigned c1= unsigned(s[n - 1]);
  int* b= sa + bkt[c1];
  {
   const int j= n - 1;  // 番兵から最後の文字の接尾辞を induce する
-  *b++= j ^ -int((j > 0) & (int(s[j - (j > 0)]) < c1));
+  *b++= j ^ -int((j > 0) & (unsigned(s[j - (j > 0)]) < c1));
  }
  for(int i= 0; i < n; ++i) {
-  int j= sa[i];
+  const int j= sa[i];
   sa[i]= First ? ~j & (j >> 31) : ~j;
   if(j > 0) {
-   --j;
-   const int c0= int(s[j]);
-   if(c0 != c1) bkt[c1]= int(b - sa), b= sa + bkt[c1= c0];
-   *b++= j ^ -int((j > 0) & (int(s[j - (j > 0)]) < c1));  // ~j は j ^ -1。j = 0 のときは s[0] を読んで捨てる
+   const size_t u= unsigned(j) - 1;
+   const unsigned c0= unsigned(s[u]);
+   if(__builtin_expect(c0 != c1, 0)) bkt[c1]= int(b - sa), b= sa + bkt[c1= c0];
+   *b++= __builtin_expect(u != 0, 1) ? int(u) ^ -int(unsigned(s[u - 1]) < c1) : 0;  // ~u は u ^ -1
   }
  }
  for(int c= 0; c < K; ++c) bkt[c]= cnt[c + 1];
  c1= 0;
  b= sa + bkt[0];
  for(int i= n - 1; i >= 0; --i) {
-  int j= sa[i];
+  const int j= sa[i];
   if(j > 0) {
    if constexpr(First) sa[i]= 0;
-   --j;
-   const int c0= int(s[j]);
-   if(c0 != c1) bkt[c1]= int(b - sa), b= sa + bkt[c1= c0];
-   const int lt= int(s[j - (j > 0)]) > c1;  // j - 1 が L 型
-   *--b= j ^ -(First ? int(j > 0) & lt : int(j == 0) | lt);
+   const size_t u= unsigned(j) - 1;
+   const unsigned c0= unsigned(s[u]);
+   if(__builtin_expect(c0 != c1, 0)) bkt[c1]= int(b - sa), b= sa + bkt[c1= c0];
+   *--b= __builtin_expect(u != 0, 1) ? int(u) ^ -int(unsigned(s[u - 1]) > c1) : (First ? 0 : -1);  // s[u - 1] > c1 なら u - 1 は L 型
   } else if constexpr(!First) {
    sa[i]= ~j;
   }
  }
 }
-// sa[0, m) に並んだ LMS を、その場でバケットの末尾へ移して最後の induced sorting をする (k 番目の LMS の行き先は k 以上)。
+// sa[0, m) に並んだ LMS を、その場で 1 個ずつバケットの末尾へ移して最後の induced sorting をする (k 番目の LMS の行き先は k 以上)。
 template <bool Table, class C> inline void induce_inplace(const C* s, int n, int K, const int* cnt, int m, int* sa, int* bkt) {
  std::fill(sa + m, sa + n, 0);
  for(int c= 0; c < K; ++c) bkt[c]= cnt[c + 1];
@@ -86,20 +86,37 @@ template <bool Table, class C> inline void induce_inplace(const C* s, int n, int
  }
  induce_scan<false, Table>(s, n, K, cnt, sa, bkt);
 }
+// sa[0, m) に並んだ LMS を、文字ごとの塊にまとめてバケットの末尾へ写し、空きを 0 にして最後の induced sorting をする (libsais と同じ
+// 移し方)。lmsc[c] は文字 c で始まる LMS の数で、bkt と同じ領域でよい。1 個ずつ移すと、同じ文字の LMS が続く入力で表の読み書きを待つ。
+template <bool Table, class C> inline void induce_placed(const C* s, int n, int K, const int* cnt, const int* lmsc, int m, int* sa, int* bkt) {
+ int j= n;  // sa[j, n) は決まった所
+ for(int c= K - 1; c >= 0; --c) {
+  const int l= lmsc[c];
+  if(l == 0) continue;
+  const int i= cnt[c + 1];
+  std::fill(sa + i, sa + j, 0);
+  std::copy_backward(sa + m - l, sa + m, sa + i);
+  j= i - l, m-= l;
+ }
+ std::fill(sa, sa + j, 0);
+ induce_scan<false, Table>(s, n, K, cnt, sa, bkt);
+}
 // LMS の位置を後ろからの走査で見つけて bits に印を付け、その数を返す。Four なら位置 p ごとに
-// q[4 * s[p] + 2 * (p が L 型) + (p - 1 が L 型)] を、そうでなければ q[s[p] + 1] を数える。
+// q[4 * s[p] + 2 * (p が L 型) + (p - 1 が L 型)] を、そうでなければ q[s[p] + 1] を数える。p - 1 の種類は比べた結果の and と or で決め、
+// 前の種類を待つのは 2 段だけにする。
 template <bool Four, class C> inline int gather_lms(const C* s, int n, uint64_t* bits, int* q) {
- int m= 0, c0= int(s[n - 1]), f0= 1;  // 末尾の番兵は最も小さいので、最後の文字は L 型
+ int m= 0;
+ unsigned c0= unsigned(s[n - 1]), f0= 1;  // 末尾の番兵は最も小さいので、最後の文字は L 型
  uint64_t w= 0;
  for(int p= n - 1; p > 0; --p) {  // 位置 p の種類 f0 と、p - 1 の種類 f1
-  const int c1= int(s[p - 1]), f1= c1 > c0 - f0, is= f1 & (f0 ^ 1);
+  const unsigned c1= unsigned(s[p - 1]), f1= unsigned(c1 > c0) | (unsigned(c1 == c0) & f0), is= f1 & (f0 ^ 1);
   ++q[Four ? 4 * c0 + 2 * f0 + f1 : c0 + 1];
-  w|= uint64_t(is) << (p & 63), m+= is;
+  w= w << 1 | is, m+= int(is);
   if((p & 63) == 0) bits[p >> 6]= w, w= 0;
   c0= c1, f0= f1;
  }
  ++q[Four ? 4 * c0 + 2 * f0 : c0 + 1];
- bits[0]= w;  // 位置 0 は LMS にならない
+ bits[0]= w << 1;  // 位置 0 は LMS にならない
  return m;
 }
 // 印を付けた LMS の位置を、位置の順に dst に書く。
@@ -109,14 +126,17 @@ inline void expand_lms(const uint64_t* bits, int n, int* dst) {
 }
 // sort_lms_lr の区画の 1 回の走査 (Up なら前から読んで前から置く)。読んだ要素の 1 つ前を置き先 ptr[2c + t] (t は置く要素の 1 つ前が
 // L 型なら 1) に置き、元の要素の組 (d、印を読むたびに増える) が同じ置き先の前の要素と違えば印を付ける。直前の置き先の位置と組は
-// レジスタに置く。
-template <bool Up, class C> inline int scan_lr(const C* s, int* sa, int from, int to, int* ptr, int* D, int d, int lv) {
+// レジスタに置く。Count なら、置き先が替わった回数を sw に足す。
+template <bool Up, bool Count, class C> inline int scan_lr(const C* s, int* sa, int from, int to, int* ptr, int* D, int d, int lv, int& sw) {
  int *lb= sa + ptr[lv], ld= D[lv];
  for(int i= from; Up ? i < to : i > to; Up ? ++i : --i) {
   const int x= sa[i];
   d+= x < 0;
   const int p= (x & POS) - 1, c= int(s[p]), v= 2 * c + (Up ? int(s[p - 1]) >= c : int(s[p - 1]) > c);
-  if(v != lv) ptr[lv]= int(lb - sa), D[lv]= ld, lv= v, lb= sa + ptr[v], ld= D[v];
+  if(v != lv) {
+   if constexpr(Count) ++sw;
+   ptr[lv]= int(lb - sa), D[lv]= ld, lv= v, lb= sa + ptr[v], ld= D[v];
+  }
   const int y= p | int(unsigned(ld != d) << 31);
   if constexpr(Up) *lb++= y;
   else *--lb= y;
@@ -124,6 +144,27 @@ template <bool Up, class C> inline int scan_lr(const C* s, int* sa, int from, in
  }
  ptr[lv]= int(lb - sa), D[lv]= ld;
  return d;
+}
+// scan_lr と同じ走査を、置き先の位置と組を置くたびに表で読み書きする形で回す (置き先が毎回替わる入力で速い)。
+template <bool Up, class C> inline int scan_lr_table(const C* s, int* sa, int from, int to, int* ptr, int* D, int d) {
+ for(int i= from; Up ? i < to : i > to; Up ? ++i : --i) {
+  const int x= sa[i];
+  d+= x < 0;
+  const int p= (x & POS) - 1, c= int(s[p]), v= 2 * c + (Up ? int(s[p - 1]) >= c : int(s[p - 1]) > c);
+  const int y= p | int(unsigned(D[v] != d) << 31);
+  D[v]= d;
+  if constexpr(Up) sa[ptr[v]++]= y;
+  else sa[--ptr[v]]= y;
+ }
+ return d;
+}
+// 初めの 4096 個をレジスタの形で回して置き先が替わった回数を数え、半分を超えたら残りを表の形で回す。
+template <bool Up, class C> inline int scan_lr_auto(const C* s, int* sa, int from, int to, int* ptr, int* D, int d, int lv) {
+ const int head= std::min(Up ? to - from : from - to, 4096), mid= Up ? from + head : from - head;
+ int sw= 0;
+ d= scan_lr<Up, true>(s, sa, from, mid, ptr, D, d, lv, sw);
+ if(2 * sw > head) return scan_lr_table<Up>(s, sa, mid, to, ptr, D, d);
+ return scan_lr<Up, false>(s, sa, mid, to, ptr, D, d, 0, sw);
 }
 // 文字の種類が少ない段で、LMS の部分文字列を並べて名前を付ける (libsais の組み立て方)。位置を (L 型か、1 つ前が L 型か) の 4 種類に
 // 分けて文字ごとに数え、前から読む走査で読む要素を左の区画に、後ろから読む走査で読む要素を右の区画に隙間なく置くので、走査に分岐が
@@ -154,7 +195,7 @@ template <class C> inline int sort_lms_lr(const C* s, int n, int K, int* q, cons
  std::fill(D, D + 2 * K, 0);
  const int c= int(s[n - 1]), lv= 2 * c + (int(s[n - 2]) >= c);  // 番兵から最後の文字の接尾辞を induce する
  sa[lp[lv]++]= (n - 1) | MARK, D[lv]= 1;
- const int d= scan_lr<true>(s, sa, 0, left, lp, D, 1, lv);
+ const int d= scan_lr_auto<true>(s, sa, 0, left, lp, D, 1, lv);
  for(int c= 0; c < K; ++c) {
   int f= MARK;
   for(int i= lp[2 * c] - 1, lo= c ? rp[2 * c - 2] : left + 1; i >= lo; --i) {
@@ -162,7 +203,7 @@ template <class C> inline int sort_lms_lr(const C* s, int n, int K, int* q, cons
    f^= y, sa[i]= x ^ y;
   }
  }
- scan_lr<false>(s, sa, n - first - 1, left, rp, D, d, 0);
+ scan_lr_auto<false>(s, sa, n - first - 1, left, rp, D, d, 0);
  std::fill(sa + m, sa + m + (n >> 1), 0);
  int names= 0;
  for(int k= 0; k < m; ++k) {
@@ -216,6 +257,7 @@ template <class C> void sa_is(const C* s, int n, int K, int* sa) {
   expand_lms(bits.get(), n, lms.get());
   names= sort_lms_wide(s, n, K, cnt.data(), bkt.data(), lms.get(), m, sa);
  } else {
+  for(int c= 0; c < K; ++c) bkt[c]= q[4 * c + 1];  // 文字 c で始まる LMS の数。最後の induced sorting で LMS を移すまで残す
   expand_lms(bits.get(), n, sa + n - m);
   names= sort_lms_lr(s, n, K, q.data(), sa + n - m, m, sa);
  }
@@ -233,8 +275,14 @@ template <class C> void sa_is(const C* s, int n, int K, int* sa) {
  // 最後の induced sorting の形を、並んだ LMS の隣どうしで 1 つ前の文字が違う割合 (置くたびにバケットが替わる割合の見積もり) で選ぶ。
  int switched= 0;
  for(int k= 0; k < std::min(m - 1, 4096); ++k) switched+= s[sa[k] - 1] != s[sa[k + 1] - 1];
- if(2 * switched > std::min(m - 1, 4096)) induce_inplace<true>(s, n, K, cnt.data(), m, sa, bkt.data());
- else induce_inplace<false>(s, n, K, cnt.data(), m, sa, bkt.data());
+ const bool table= 2 * switched > std::min(m - 1, 4096);
+ if(wide) {
+  if(table) induce_inplace<true>(s, n, K, cnt.data(), m, sa, bkt.data());
+  else induce_inplace<false>(s, n, K, cnt.data(), m, sa, bkt.data());
+ } else {
+  if(table) induce_placed<true>(s, n, K, cnt.data(), bkt.data(), m, sa, bkt.data());
+  else induce_placed<false>(s, n, K, cnt.data(), bkt.data(), m, sa, bkt.data());
+ }
 }
 }
 // 文字列 s の接尾辞配列 (辞書順で i 番目の接尾辞の開始位置) を返す。文字は unsigned char として比べる。
