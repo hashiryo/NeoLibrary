@@ -38,4 +38,4 @@ int size() const;
 
 最初の `flow` は push-relabel で流します。高さが最大の頂点から余りを流し、同じ高さの中では先に入れたものから取り出します。gap と global relabel も使います。前流の段 (t へ流し、届かなかった余りは途中に残す) で値を返し、余りを s へ戻す段は、辺ごとの流量か最小カットを初めて聞かれたときまで遅らせます。値だけの使い方では、この段の費用がかかりません。2 回目からの `flow` は Dinic で流します。容量を少し変えて少しだけ流し直す使い方では、呼ぶたびにグラフ全体を BFS でなめる push-relabel より速いためです。
 
-方式は procon-judge の問題で比べて選びました。self-flow-maxflow には、性質の違う 7 つのグラフの族が並んでいます。同じ方式で値だけを求める版 (容量を int にしたもの) は、最大のケースが EPYC 9V45 の x64-gcc で 264 ms でした。今の Library の push-relabel だと 1057 ms、Dinic だと 2.6 秒です。密なグラフの loj-127 では 80 ms ほどでした。容量を変えながら流し直す aoj-2803、aoj-2313、aoj-2835 では、Dinic で流す今の Library と同じくらいの速さです。記録は algo-notes の notes/network-flow.md にあります。
+方式は procon-judge の問題で比べて選びました。self-flow-maxflow には、性質の違う 7 つのグラフの族が並んでいます。この `MaxFlow` で値を求めると、最大のケースが EPYC 9V45 の x64-gcc で 347 ms でした。同じ回で、今の Library の push-relabel は 891 ms、Dinic は 2.1 秒です。密なグラフの loj-127 では、EPYC 7763 で 110 ms でした。ここだけは今の Library の push-relabel (89 ms) より 2 割ほど遅くなります。容量を変えながら流し直す問題で、Dinic で流す今の Library と比べた時間は次のとおりです。aoj-2803 は 6.3 ms と 4.1 ms (EPYC 9V45)、aoj-2313 は 71 ms と 50 ms、aoj-2835 は 37 ms と 51 ms (どちらも EPYC 9V74) でした。記録は algo-notes の notes/network-flow.md にあります。
