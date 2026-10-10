@@ -5,20 +5,61 @@
 #include <simde/x86/avx2.h>
 #endif
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <optional>
 #include <type_traits>
 #include <vector>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 // int の順序付き集合。B+ 木で、葉はキーを 63 個まで昇順に持って前後の葉とつなぎ、内部の節点は子を 63 個まで持って、子ごとに
 // 部分木のキーの最大を持つ。キーで下りるときは、最大の列のうち x 未満 (または x 以下) のものの数を AVX2 で 8 個ずつ比べて
 // 数え、子を選ぶ。入れて 64 個になった節点は半分に割り、除いて空になった節点は親から外す (隣と併せることはしない)。
 // Counted = true なら k 番目と x 以下の個数も引ける。内部の節点は子ごとの部分木の個数と、子を 8 個ずつに分けた組の累積を
 // 持ち、k 番目は組の累積を 1 回比べて組を選んでから組の中の累積をレジスタで作って選び、x 以下の個数は組の累積に組の中の
 // 手前の和を足す。どちらも分岐を使わない。入れるときと除くときは、子の個数 1 つと組の累積 8 個を足し引きする。
-// Counted = false はこれらを持たず、その分だけ入れる・除くが安い。procon-judge の yosupo-ordered-set で書き比べた
-// bptree_c8b を写したもの。
+// Counted = false はこれらを持たず、その分だけ入れる・除くが安い。葉と節点の配列のうち 2 MB 以上のものは、Linux では
+// 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼む。procon-judge の yosupo-ordered-set で書き比べた bptree_c8b を写したもの。
 namespace ordered_set_internal {
 constexpr int B= 64, FILL= 48;
+// 葉と節点の vector の allocator。2 MB 未満の配列と Linux 以外は std::allocator に任せる。頼まない領域を 4 KB のページに
+// 置く判定機 (AtCoder) で、ばらばらの葉を読むときの TLB の外れを減らすため。
+template <class T> struct HugeAlloc {
+ using value_type= T;
+ static constexpr std::size_t H= std::size_t(1) << 21, P= 4096;
+ HugeAlloc()= default;
+ template <class U> HugeAlloc(const HugeAlloc<U>&) {}
+ T* allocate(std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   const std::size_t bytes= (n * sizeof(T) + P - 1) & ~(P - 1);
+   void* m= mmap(nullptr, bytes + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if(m == MAP_FAILED) throw std::bad_alloc();
+   char *p= static_cast<char*>(m), *a= reinterpret_cast<char*>((reinterpret_cast<std::uintptr_t>(p) + H - 1) & ~(H - 1));
+   if(a != p) munmap(p, a - p);
+   munmap(a + bytes, p + H - a);
+   madvise(a, bytes, MADV_HUGEPAGE);
+   return reinterpret_cast<T*>(a);
+  }
+#endif
+  return std::allocator<T>().allocate(n);
+ }
+ void deallocate(T* p, std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   munmap(p, (n * sizeof(T) + P - 1) & ~(P - 1));
+   return;
+  }
+#endif
+  std::allocator<T>().deallocate(p, n);
+ }
+ template <class U> bool operator==(const HugeAlloc<U>&) const { return true; }
+ template <class U> bool operator!=(const HugeAlloc<U>&) const { return false; }
+};
 struct alignas(64) Leaf {
  int key[B];
  int n, prv, nxt;
@@ -96,8 +137,8 @@ template <bool Counted= true> class OrderedSet {
  using Leaf= ordered_set_internal::Leaf;
  using Inner= std::conditional_t<Counted, ordered_set_internal::InnerC, ordered_set_internal::InnerN>;
  static constexpr int B= ordered_set_internal::B, FILL= ordered_set_internal::FILL;
- std::vector<Leaf> lf;
- std::vector<Inner> in;
+ std::vector<Leaf, ordered_set_internal::HugeAlloc<Leaf>> lf;
+ std::vector<Inner, ordered_set_internal::HugeAlloc<Inner>> in;
  std::vector<int> flf, fin;  // 空いた葉と節点
  int root, h, total;         // h は根の高さ (0 なら根が葉)
  int path[16], pos[16];      // 段 d の通った節点と、その中で選んだ子
