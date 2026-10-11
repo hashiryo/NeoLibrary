@@ -284,6 +284,24 @@ template <class C> void sa_is(const C* s, int n, int K, int* sa) {
   else induce_placed<false>(s, n, K, cnt.data(), bkt.data(), m, sa, bkt.data());
  }
 }
+// s[0, n) とその接尾辞配列 sa から、LCP 配列を Φ 配列を経由する方法 (Kärkkäinen、Manzini、Puglisi 2009) で求める。plcp[sa[i]] =
+// sa[i - 1] を置いてから、文字列の順に plcp[i] を i とその接尾辞の LCP に書き換え (LCP は 1 つ進むごとに高々 1 しか減らないので、
+// 比べる文字は合わせて 2n 以下)、最後に lcp[i] = plcp[sa[i + 1]] と並べ替える。sa[0] には n を置き、比べる長さの上限を 0 にする。
+// Kasai の方法より、飛び飛びに読み書きする回数が 1 つ少ない。
+template <class S> std::vector<int> lcp_phi(const S& s, int n, const int* sa) {
+ if(n < 2) return {};
+ std::vector<int> plcp(n);
+ plcp[sa[0]]= n;
+ for(int i= 1; i < n; ++i) plcp[sa[i]]= sa[i - 1];
+ for(int i= 0, h= 0; i < n; ++i) {
+  const int k= plcp[i], m= n - std::max(i, k);
+  while(h < m && s[i + h] == s[k + h]) ++h;
+  plcp[i]= h, h-= h > 0;
+ }
+ std::vector<int> lcp(n - 1);
+ for(int i= 0; i + 1 < n; ++i) lcp[i]= plcp[sa[i + 1]];
+ return lcp;
+}
 }
 // 文字列 s の接尾辞配列 (辞書順で i 番目の接尾辞の開始位置) を返す。文字は unsigned char として比べる。
 inline std::vector<int> suffix_array(const std::string& s) {
@@ -307,3 +325,7 @@ template <class T> std::vector<int> suffix_array(const std::vector<T>& s) {
  for(int i= 0; i < n; ++i) t[idx[i]]= K+= i && s[idx[i - 1]] < s[idx[i]];
  return suffix_array(t, K + 1);
 }
+// 文字列 s とその接尾辞配列 sa から、LCP 配列 (lcp[i] は sa[i] と sa[i + 1] の接尾辞の LCP、長さ n - 1) を返す。
+inline std::vector<int> lcp_array(const std::string& s, const std::vector<int>& sa) { return suffix_array_internal::lcp_phi(reinterpret_cast<const unsigned char*>(s.data()), int(s.size()), sa.data()); }
+// 比べられる値の列 s とその接尾辞配列 sa から、LCP 配列を返す。値は == で比べる。
+template <class T> std::vector<int> lcp_array(const std::vector<T>& s, const std::vector<int>& sa) { return suffix_array_internal::lcp_phi(s, int(s.size()), sa.data()); }
