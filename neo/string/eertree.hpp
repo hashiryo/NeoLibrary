@@ -66,7 +66,7 @@ template <class T> inline void reserve_huge(std::vector<T>& v, std::size_t n) {
 #endif
 }
 struct Out {
- std::vector<int> len, par, link, last;
+ std::vector<int> par, link, last;
 };
 // 幅 k の表で持つ形。
 struct DenseNode {
@@ -102,7 +102,7 @@ template <class T, class Code> void dense(const T* t, int n, int k, Code code, O
     l= nx[std::size_t(v) * k + c];
    }
    nd[w]= {L, l};
-   out.len.push_back(L), out.par.push_back(u), out.link.push_back(l);
+   out.par.push_back(u), out.link.push_back(l);
    e= w;
   }
   last= e;
@@ -163,7 +163,7 @@ template <class T, class Code> void sparse(const T* t, int n, Code code, Out& ou
     l= child(v, c);
    }
    nd[w]= {L, l, 0, NONE};
-   out.len.push_back(L), out.par.push_back(u), out.link.push_back(l);
+   out.par.push_back(u), out.link.push_back(l);
    SparseNode& f= nd[u];
    if((f.oc & NONE) == NONE) {
     f.ow= w, f.oc= (f.oc & MULTI) | c;
@@ -179,18 +179,19 @@ template <class T, class Code> void sparse(const T* t, int n, Code code, Out& ou
 }
 template <class T, class Code> void run(const T* t, int n, int k, Code code, Out& out) {
  const std::size_t cap= std::size_t(n) + 2;
- reserve_huge(out.len, cap), reserve_huge(out.par, cap), reserve_huge(out.link, cap), reserve_huge(out.last, n);
- out.len= {-1, 0}, out.par= {0, 0}, out.link= {0, 0};
+ reserve_huge(out.par, cap), reserve_huge(out.link, cap), reserve_huge(out.last, n);
+ out.par= {0, 0}, out.link= {0, 0};
  out.last.resize(n);
  if(k <= 32) dense(t, n, std::max(k, 1), code, out);
  else sparse(t, n, code, out);
 }
 }
-// 回文木。頂点 0 は長さ -1 の根、頂点 1 は長さ 0 の根で、頂点 2 以降が異なる回文 (初めて現れて終わる位置の順)。len[v] は長さ、par[v] は
-// 両端の文字を除いた回文の頂点 (長さ 1 の回文なら 0)、link[v] は suffix link (自分より短い最長の回文接尾辞の頂点、長さ 1 なら 1)。根の
-// par と link は 0。last[i] は s[0, i] の最長の回文接尾辞の頂点。
+// 回文木。頂点 0 は長さ -1 の根、頂点 1 は長さ 0 の根で、頂点 2 以降が異なる回文 (初めて現れて終わる位置の順)。par[v] は両端の文字を
+// 除いた回文の頂点 (長さ 1 の回文なら 0、par[v] < v)、link[v] は suffix link (自分より短い最長の回文接尾辞の頂点、長さ 1 なら 1)。根の
+// par と link は 0。last[i] は s[0, i] の最長の回文接尾辞の頂点。長さは len[0] = -1、len[1] = 0、len[v] = len[par[v]] + 2 で求まる
+// (列で返すと、頂点が 10^6 個の入力で 4 MB を初めて書く分、EPYC 7763 で 1 ms ほど遅くなった)。
 struct Eertree {
- std::vector<int> len, par, link, last;
+ std::vector<int> par, link, last;
 };
 // 文字列 s の回文木。文字は unsigned char として比べる。O(n)。
 inline Eertree eertree(const std::string& s) {
@@ -204,7 +205,7 @@ inline Eertree eertree(const std::string& s) {
   if(used[c]) code[c]= (unsigned char)k++;
  eertree_internal::Out out;
  eertree_internal::run(t, n, k, [&](int i) { return int(code[t[i]]); }, out);
- return {std::move(out.len), std::move(out.par), std::move(out.link), std::move(out.last)};
+ return {std::move(out.par), std::move(out.link), std::move(out.last)};
 }
 // 列 s の回文木。値は == と < で比べる。O(n log n) (番号の振り直しの整列)。
 template <class T> Eertree eertree(const std::vector<T>& s) {
@@ -221,5 +222,5 @@ template <class T> Eertree eertree(const std::vector<T>& s) {
  if(n > 0) ++k;
  eertree_internal::Out out;
  eertree_internal::run(s.data(), n, k, [&](int i) { return int(code[i]); }, out);
- return {std::move(out.len), std::move(out.par), std::move(out.link), std::move(out.last)};
+ return {std::move(out.par), std::move(out.link), std::move(out.last)};
 }
