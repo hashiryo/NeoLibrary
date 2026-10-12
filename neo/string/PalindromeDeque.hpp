@@ -75,7 +75,7 @@ template <int K= 26> class PalindromeDeque {
  int* dl(int v) const { return dlt + std::size_t(v) * K; }
  // u から c で伸ばした回文の頂点を返す (無ければ作る)。ext(w) は、回文 w の出現の外側の文字が c か。pc(L) は、新しい頂点の中で長さ L
  // の回文の接尾辞 (接頭辞) の外側に隣る文字。
- template <class Ext, class Pc> int grow(int u, int c, Ext ext, Pc pc) {
+ template <class Ext, class Pc> [[gnu::always_inline]] int grow(int u, int c, Ext ext, Pc pc) {
   int& e= nx(u)[c];
   if(e) return e;
   const int x= m++;
@@ -105,7 +105,8 @@ public:
  }
  PalindromeDeque(const PalindromeDeque&)= delete;
  PalindromeDeque& operator=(const PalindromeDeque&)= delete;
- void push_back(int c) {
+ // 操作は呼ぶ側のループに展開させる。展開されないと、状態を呼び出しの境でメモリに置くので、EPYC 7763 の x64-gcc で dq_tk2 より 7% 遅かった。
+ [[gnu::always_inline]] void push_back(int c) {
   const int e= end;
   const int v= start == end ? EVEN : suf[e - 1];
   auto ext= [&](int w) {
@@ -120,7 +121,7 @@ public:
   if(nd[lx].len >= 1 && suf[lq] == lx) suf[lq]= EVEN;
   ++nd[x].cnt;
  }
- void push_front(int c) {
+ [[gnu::always_inline]] void push_front(int c) {
   const int b= start - 1;
   const int v= start == end ? EVEN : pre[start];
   auto ext= [&](int w) {
@@ -136,7 +137,7 @@ public:
   ++nd[x].cnt;
  }
  // 空でない列で呼ぶ。
- void pop_back() {
+ [[gnu::always_inline]] void pop_back() {
   const int e= end - 1, v= suf[e];
   if(nd[v].linkcnt == 0 && nd[v].cnt == 1) nx(nd[v].par)[nd[v].ch]= 0, --nd[nd[v].link].linkcnt, --live;
   --nd[v].cnt;
@@ -146,7 +147,7 @@ public:
   end= e;
  }
  // 空でない列で呼ぶ。
- void pop_front() {
+ [[gnu::always_inline]] void pop_front() {
   const int b= start, v= pre[b];
   if(nd[v].linkcnt == 0 && nd[v].cnt == 1) nx(nd[v].par)[nd[v].ch]= 0, --nd[nd[v].link].linkcnt, --live;
   --nd[v].cnt;
