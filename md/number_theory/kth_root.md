@@ -18,4 +18,4 @@ $0 \le a < 2^{64}$ と $1 \le k \le 64$ を受け、$k$ が範囲の外なら as
 - $k \ge 4$ は、表と 2 次の多項式で log2 と exp2 を出します。
 - $k \ge 5$ は答えが 7132 以下なので、$r^k$ の表を引いて確かめます。
 
-表は初めて呼んだときに作ります (1 万項ほど)。procon-judge の yosupo-kth-root-integer ($5 \times 10^5$ 問) では、x64 の CI のランナーで最大 4 ms ほどでした。std::pow で見積もる yosupo の最速提出の写しの 2.5 倍ほどの速さです。
+表はコンパイル時に作ります ($r^k$ の表は 1 万項ほど)。procon-judge の yosupo-kth-root-integer ($5 \times 10^5$ 問) では、x64 の CI のランナーで最大 4 ms ほどでした。std::pow で見積もる yosupo の最速提出の写しの 2.5 倍ほどの速さです。
