@@ -17,19 +17,22 @@ using u64= unsigned long long;
 using i64= long long;
 using u128= unsigned __int128;
 // 表はどれもコンパイル時に作る (log2 は atanh の級数、立方根と平方根は Newton 法、2^{j/64} は 2^{1/64} の冪)。
+// constexpr の評価の上限 (AtCoder に合わせた gcc の 2^21 回、clang の 2^19 歩) に収まるよう、Newton 法は初めの値を近くに
+// 置いて 12 回で止め、r^k の表は k - 1 の表に r を掛けて作る。
 constexpr double c_log2(double c) {  // 1 ≤ c < 2
  const double t= (c - 1) / (c + 1), t2= t * t;
  double s= 0, p= t;
- for(int n= 1; n < 60; n+= 2) s+= p / n, p*= t2;
+ for(int n= 1; n < 40; n+= 2) s+= p / n, p*= t2;
  return 2 * s / 0.6931471805599453;
 }
-constexpr double c_newton_root(double x, int k) {  // x^{1/k} (x ≥ 1、k = 2, 3)
- double y= x;
- for(int i= 0; i < 80; ++i) {
-  double yk= 1;
-  for(int t= 1; t < k; ++t) yk*= y;
-  y= ((k - 1) * y + x / yk) / k;
- }
+constexpr double c_sqrt(double x) {  // 1 ≤ x ≤ 2
+ double y= (x + 1) / 2;
+ for(int i= 0; i < 12; ++i) y= (y + x / y) / 2;
+ return y;
+}
+constexpr double c_cbrt(double x) {  // 1 ≤ x < 8
+ double y= (x + 2) / 3;
+ for(int i= 0; i < 12; ++i) y= (2 * y + x / (y * y)) / 3;
  return y;
 }
 struct Tables {
@@ -40,43 +43,43 @@ inline constexpr Tables TAB= [] {
  for(int j= 0; j < 128; ++j) {
   const double c= 1.0 + (j + 0.5) / 128;
   T.lg[j]= c_log2(c), T.inv[j]= 1.0 / c;
-  for(int s= 0; s < 3; ++s) T.cb[s][j]= c_newton_root(c * (1 << s), 3);
+  for(int s= 0; s < 3; ++s) T.cb[s][j]= c_cbrt(c * (1 << s));
  }
  double b= 2;
- for(int i= 0; i < 6; ++i) b= c_newton_root(b, 2);  // 2^{1/64}
+ for(int i= 0; i < 6; ++i) b= c_sqrt(b);  // 2^{1/64}
  double e= 1;
  for(int j= 0; j < 64; ++j) T.ex[j]= e, e*= b;
  for(int k= 1; k <= 64; ++k) T.invk[k]= 1.0 / k;
  return T;
 }();
-// k ≥ 5 の r^k - 1 の表 (r = 0, 1, ..., r^k ≥ 2^64 になる最初の r まで。その r と次の 1 項は 2^64 - 1)
-constexpr int pw_count(int k) {
- int n= 0;
- for(u64 r= 0;; ++r) {
+// r^k < 2^64 となる最大の r (二分探索)
+constexpr u64 max_root(int k) {
+ u64 lo= 1, hi= (1ull << ((64 + k - 1) / k)) + 1;
+ while(hi - lo > 1) {
+  const u64 mid= (lo + hi) / 2;
   u128 p= 1;
-  bool sat= false;
-  for(int i= 0; i < k && !sat; ++i) p*= r, sat= (p >> 64) != 0;
-  ++n;
-  if(sat) return n + 1;
+  bool over= false;
+  for(int i= 0; i < k && !over; ++i) p*= mid, over= (p >> 64) != 0;
+  (over ? hi : lo)= mid;
  }
+ return lo;
 }
+// k ≥ 5 の r^k - 1 の表。r = 0, 1, ..., max_root(k) の後に 2^64 - 1 を 2 つ置く (r + 1 を引いても範囲内)
 inline constexpr auto OFF= [] {
  std::array<u32, 66> o{};
- for(int k= 5; k <= 64; ++k) o[k + 1]= o[k] + pw_count(k);
+ for(int k= 5; k <= 64; ++k) o[k + 1]= o[k] + u32(max_root(k)) + 3;
  return o;
 }();
 inline constexpr auto PW= [] {
  std::array<u64, OFF[65]> a{};
  for(int k= 5; k <= 64; ++k) {
-  u32 o= OFF[k];
-  for(u64 r= 0;; ++r) {
-   u128 p= 1;
-   bool sat= false;
-   for(int i= 0; i < k && !sat; ++i) p*= r, sat= (p >> 64) != 0;
-   a[o++]= sat ? ~0ull : u64(p) - 1;
-   if(sat) break;
+  const u32 o= OFF[k], m= OFF[k + 1] - 3;  // r ≤ m - o が r^k < 2^64
+  for(u32 r= 0; o + r <= m; ++r) {
+   const u64 x= r;
+   // k = 5 は x^5 を掛け算で、k ≥ 6 は k - 1 の表の r^{k-1} = a + 1 に r を掛ける
+   a[o + r]= (k == 5 ? x * x * x * x * x : (a[OFF[k - 1] + r] + 1) * x) - 1;
   }
-  a[o]= ~0ull;
+  a[m + 1]= a[m + 2]= ~0ull;
  }
  return a;
 }();
