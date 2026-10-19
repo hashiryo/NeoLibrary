@@ -170,3 +170,85 @@ inline std::array<unsigned, 4> sb_range(unsigned a, unsigned b) {
  const u32 g= (x & ~m) | ((b - y) & m), f= (y & ~m) | ((a - x) & m);
  return {f, g, a - f, b - g};
 }
+namespace stern_brocot_internal {
+// sb_approx の連 t 歩。動く端 (mx, my) に止まった端 (fx, fy) の t 倍を足す。連を全部進めた先 (の次の中間数) が n を
+// 超えるなら、超えない最後まで進めて答えを書き、true を返す。low は動く端が下の端か、sw は x と y を入れ替えて解いているか
+// (入れ替えたときは分子と分母、下と上を入れ替えて書く。書く位置は添字で決め、分岐にしない)。x ≥ y で解くので、
+// 端と節点はどれも分子が分母以上で、n を超えるかは分子だけで分かる。
+template <bool low> [[gnu::always_inline]] inline bool approx_advance(u32 q, u32 r, u64& mx, u64& my, u64 fx, u64 fy, u64 n, u32 sw, unsigned* out) {
+ const u64 t= q - (r == 0);
+ if(mx + (t + 1) * fx <= n) {
+  mx+= t * fx, my+= t * fy;
+  if(r != 0) return false;
+  const u32 X= u32(mx + fx), Y= u32(my + fy), m= 0u - sw, A= X ^ ((X ^ Y) & m), B= X ^ Y ^ A;
+  out[0]= out[2]= A, out[1]= out[3]= B;
+  return true;
+ }
+ const u64 c= (n - mx) / fx;
+ mx+= c * fx, my+= c * fy;
+ const u32 lo0= u32(low ? mx : fx), lo1= u32(low ? my : fy), hi0= u32(low ? fx : mx), hi1= u32(low ? fy : my);
+ out[3 * sw]= lo0, out[1 + sw]= lo1, out[2 - sw]= hi0, out[3 - 3 * sw]= hi1;
+ return true;
+}
+// 商が 2 以下の段の 1 歩 (a > b)。商 3 以上なら何も進めずに 2 を返す。答えが決まったら 1、続けるなら 0
+template <bool low> [[gnu::always_inline]] inline int approx_small(u32& a, u32& b, u64& mx, u64& my, u64 fx, u64 fy, u64 n, u32 sw, unsigned* out) {
+ u32 d= a - b, ge;
+#ifdef __x86_64__
+ asm("xorl %k1, %k1\n\tcmpl %k2, %k0\n\tsetae %b1\n\tcmovae %k3, %k0" : "+r"(d), "=&r"(ge) : "r"(b), "r"(d - b) : "cc");
+#else
+ ge= d >= b;
+ d= ge ? d - b : d;
+#endif
+ if(d >= b) [[unlikely]] return 2;
+ if(d == 0) [[unlikely]] return approx_advance<low>(1 + ge, d, mx, my, fx, fy, n, sw, out), 1;
+ const u64 m= 0ull - ge, nx= mx + fx + (fx & m);
+ if(nx + fx > n) [[unlikely]] return approx_advance<low>(1 + ge, d, mx, my, fx, fy, n, sw, out), 1;
+ mx= nx, my+= fy + (fy & m);
+ a= b, b= d;
+ return 0;
+}
+// 割り算の 1 歩。答えが決まったら true
+template <bool low> [[gnu::always_inline]] inline bool approx_div(u32& a, u32& b, u64& mx, u64& my, u64 fx, u64 fy, u64 n, u32 sw, unsigned* out) {
+ const u32 q= a / b, r= a % b;
+ if(approx_advance<low>(q, r, mx, my, fx, fy, n, sw, out)) return true;
+ a= b, b= r;
+ return false;
+}
+}
+// 分子と分母がどちらも n 以下の正の既約分数のうち、x/y 以下で最大のもの a/b (無ければ 0/1) と、x/y 以上で最小のもの c/d
+// (無ければ 1/0) を {a, b, c, d} で返す。1 ≤ n, x, y < 2^32 で、x/y は既約でなくてよい。
+// x/y への道を連分数の連ごとに下り、今いる節点 (端の中間数) が n を超えたところの端が答え。連を全部進めても n 以下かは
+// 掛け算と比べで分かるので、超える連でだけ割り算で歩数を出す。x < y なら x/y と y/x を入れ替えて解く。整数部分の次からは、
+// 商 2 以下の段を引き算と cmov で進め (隣り合う Fibonacci 数の比のように商の小さい分数で速い)、商 3 以上が出たら残りを
+// 割り算で進める (一様な分数は 2 項ほどで移る)。
+inline std::array<unsigned, 4> sb_approx(unsigned n, unsigned x, unsigned y) {
+ using namespace stern_brocot_internal;
+ std::array<unsigned, 4> res;
+ unsigned* out= res.data();
+ const u32 sw= x < y;
+ u32 a= sw ? y : x, b= sw ? x : y;
+ u64 lx= 0, ly= 1, rx= 1, ry= 0;
+ if(approx_div<true>(a, b, lx, ly, rx, ry, n, sw, out)) return res;
+ bool next_l;  // 割り算の道に移ったとき、次が L の連か
+ while(true) {
+  if(int s= approx_small<false>(a, b, rx, ry, lx, ly, n, sw, out); s) {
+   if(s == 1) return res;
+   asm volatile("");  // clang がこの割り算を毎段計算して選ぶ形にしないように
+   if(approx_div<false>(a, b, rx, ry, lx, ly, n, sw, out)) return res;
+   next_l= false;
+   break;
+  }
+  if(int s= approx_small<true>(a, b, lx, ly, rx, ry, n, sw, out); s) {
+   if(s == 1) return res;
+   asm volatile("");
+   if(approx_div<true>(a, b, lx, ly, rx, ry, n, sw, out)) return res;
+   next_l= true;
+   break;
+  }
+ }
+ if(next_l && approx_div<false>(a, b, rx, ry, lx, ly, n, sw, out)) return res;
+ while(true) {
+  if(approx_div<true>(a, b, lx, ly, rx, ry, n, sw, out)) return res;
+  if(approx_div<false>(a, b, rx, ry, lx, ly, n, sw, out)) return res;
+ }
+}
