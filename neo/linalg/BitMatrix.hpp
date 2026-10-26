@@ -12,7 +12,12 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <memory>
+#include <new>
 #include <vector>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 // GF(2) の行列。行を 64 bit の語の列に詰めて持つ (行 i の j 列目は、行 i の語 j / 64 の bit j % 64)。行の語の数は ⌈w / 64⌉
 // で、w 列目より後ろの bit はいつも 0 にしておく。
 // 積 A B は Four Russians の方法で求める。C の列を 1024 bit の帯に分け、帯ごとに、B の 64 行分 (A の 1 語分) を 8 行ずつ
@@ -34,6 +39,41 @@
 namespace bit_matrix_internal {
 using u32= unsigned;
 using u64= unsigned long long;
+// 行列と作業領域の vector の allocator。2 MB 以上なら、Linux では 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼む。頼まない
+// 領域を 4 KB のページに置く判定機では、大きな行列を初めて触るときのページ 1 枚ごとの費用が重いため。
+template <class T> struct HugeAlloc {
+ using value_type= T;
+ static constexpr std::size_t H= std::size_t(1) << 21, P= 4096;
+ HugeAlloc()= default;
+ template <class U> HugeAlloc(const HugeAlloc<U>&) {}
+ T* allocate(std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   const std::size_t bytes= (n * sizeof(T) + P - 1) & ~(P - 1);
+   void* m= mmap(nullptr, bytes + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if(m == MAP_FAILED) throw std::bad_alloc();
+   char *p= static_cast<char*>(m), *a= reinterpret_cast<char*>((reinterpret_cast<std::uintptr_t>(p) + H - 1) & ~(H - 1));
+   if(a != p) munmap(p, a - p);
+   munmap(a + bytes, p + H - a);
+   madvise(a, bytes, MADV_HUGEPAGE);
+   return reinterpret_cast<T*>(a);
+  }
+#endif
+  return std::allocator<T>().allocate(n);
+ }
+ void deallocate(T* p, std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   munmap(p, (n * sizeof(T) + P - 1) & ~(P - 1));
+   return;
+  }
+#endif
+  std::allocator<T>().deallocate(p, n);
+ }
+ template <class U> bool operator==(const HugeAlloc<U>&) const { return true; }
+ template <class U> bool operator!=(const HugeAlloc<U>&) const { return false; }
+};
+using Words= std::vector<u64, HugeAlloc<u64>>;
 constexpr int K= 16;  // 1 組の要の数
 inline int round4(int x) { return (x + 3) & ~3; }
 // x[w, W) ^= y[w, W)、x[w, W) ^= y ^ z、x[w, W) = y ^ z、x[w, W) = y。W は 4 の倍数で、w は 4 の倍数とは限らない。
@@ -92,10 +132,10 @@ inline void transpose64(u64* x) {
 // n 行、語の数 W (4 の倍数) の行列の前進消去。要は列の順に探し、その列で bit が立っている最初の行を選ぶ。
 struct Elim {
  int n, W;
- std::vector<u64> a;           // n × W
+ Words a;                      // n × W
  std::vector<int> rem;         // まだ要にしていない行
  std::vector<int> prow, pcol;  // 要にした行と列 (要にした順)
- std::vector<u64> U;           // 要の行 (要にした順に W 語ずつ)。前の要で消したあとの値で、要の列の語より左は 0
+ Words U;                      // 要の行 (要にした順に W 語ずつ)。前の要で消したあとの値で、要の列の語より左は 0
  // aug >= 0 なら、列 aug から右に単位行列を付けたものとして消す。単位行列の列は置かずに、行を t 番目の要にしたとき、その行の
  // 単位行列の 1 を列 aug + t に置く。すると要が t 本の間、右の部分の値は列 aug + t より左にしかなく、そこまでを読み書きすれば
  // よい。最後に右の部分の列 aug + t は元の行 prow[t] を表す。
@@ -122,7 +162,7 @@ struct Elim {
  // v の OR から、この語の中で次に 1 のある列まで飛ぶ。
  bool run(int lim, bool stop) {
   U.assign((size_t)std::min(n, lim) * W, 0);
-  std::vector<u64> v(n), f(n), T1, T2;
+  Words v(n), f(n), T1, T2;
   const u64* Ub[K];
   int nr= n, col= 0, cwi= -1, bt= 0;
   while(col < lim && nr) {
@@ -205,13 +245,13 @@ struct Elim {
   for(int i= 0; i < nr; ++i) v[i]= a[(size_t)rem[i] * W + wi] ^ t1[f[i] & 255] ^ t2[f[i] >> 8];
  }
  // T の行 m (1 <= m < 2^cnt) を、Ub[s0 + i] (m の bit i が立つもの) の XOR にする。語 [w0, we) だけ。
- void build(std::vector<u64>& T, const u64* const* Ub, int s0, int cnt, int w0, int we) const {
+ void build(Words& T, const u64* const* Ub, int s0, int cnt, int w0, int we) const {
   std::fill(T.begin() + w0, T.begin() + we, 0);
   for(int m= 1; m < (1 << cnt); ++m) xor_to(&T[(size_t)m * W], &T[(size_t)(m & (m - 1)) * W], Ub[s0 + __builtin_ctz(m)], w0, we);
  }
  // 行 rows(i) = {x, m} (i < cnt) の語 [w0, we) に、要の行 Ub[s] (m の bit s が立つもの) を足す。行が 64 本以下なら、表を
  // 作らずに要の行を 1 本ずつ足す。
- template <class R> void apply(int cnt, R&& rows, const u64* const* Ub, int bt, int w0, int we, std::vector<u64>& T1, std::vector<u64>& T2) {
+ template <class R> void apply(int cnt, R&& rows, const u64* const* Ub, int bt, int w0, int we, Words& T1, Words& T2) {
   if(cnt <= 64) {
    for(int i= 0; i < cnt; ++i) {
     auto [x, m]= rows(i);
@@ -230,7 +270,7 @@ struct Elim {
   }
  }
  // 貯めた bt 本の要の更新を、残りの行の語 [wb, end_of(rank())) に足す。
- void flush(const u64* const* Ub, int bt, int wb, int nr, u64* f, std::vector<u64>& T1, std::vector<u64>& T2) {
+ void flush(const u64* const* Ub, int bt, int wb, int nr, u64* f, Words& T1, Words& T2) {
   apply(
       nr,
       [&](int i) {
@@ -244,7 +284,7 @@ struct Elim {
  // 組にし、組の中を下から消してから、組の要の行の 2 枚の表で、それより上の要の行の組の要の列を消す。
  void back() {
   const int r= prow.size();
-  std::vector<u64> T1, T2;
+  Words T1, T2;
   for(int t1= r; t1 > 0; t1-= K) {
    // 下の組を足したあとの上の要の行は、右の部分が要の数 r の分まで広がるので、語は end_of(r) まで読み書きする。
    const int t0= std::max(0, t1 - K), bt= t1 - t0, w0= pcol[t0] >> 6, e1= end_of(r);
@@ -326,7 +366,7 @@ template <int NV> void mul_band(const u64* A, int MW, int n, int m, const u64* B
 class BitMatrix {
  using u64= unsigned long long;
  int h= 0, w= 0, W= 0;  // W は行の語の数
- std::vector<u64> a;
+ bit_matrix_internal::Words a;
  // 前進消去と RREF のあとの e から核の基底を作る。要の行 t を行 pcol[t] に、自由な列 g の行に e_g を置いた w × w の行列 Z の
  // 列 g が、g に対する基底のベクトル。Z を 64 × 64 の小行列ごとに転置して行で取り出す。Z の行 j は列 j より左が 0 なので、
  // 行の塊が列の塊より下の小行列は 0 で、要の行のない行の塊は対角の小行列のほかは 0 なので、それらは飛ばす。
@@ -368,6 +408,32 @@ public:
    assert((int)s[i].size() == w);
    bit_matrix_internal::pack_row(s[i].data(), w, (*this)[i]);
   }
+ }
+ // 各行を '0' と '1' の文字列で与えた行列の転置を作る (階数は転置しても変わらないので、行が多く列が少ない行列の階数を、行の
+ // 少ない形で持って求めるときに使う)。文字列の 64 行 × 64 列ごとに、列が 16 未満なら 1 文字ずつ、そうでなければ行を語に
+ // 詰めてから 64 × 64 の転置で書く。
+ static BitMatrix transposed_from(const std::vector<std::string>& s) {
+  const int n= s.size(), m= n ? s[0].size() : 0;
+  BitMatrix t(m, n);
+  u64 x[64];
+  for(int bi= 0; bi < n; bi+= 64) {
+   const int rn= std::min(64, n - bi);
+   for(int q= 0; q * 64 < m; ++q) {
+    const int cn= std::min(64, m - q * 64);
+    std::fill(x, x + 64, 0);
+    if(cn < 16) {
+     for(int r= 0; r < rn; ++r) {
+      const char* c= s[bi + r].data() + q * 64;
+      for(int j= 0; j < cn; ++j) x[j]|= u64(c[j] & 1) << r;
+     }
+    } else {
+     for(int r= 0; r < rn; ++r) bit_matrix_internal::pack_row(s[bi + r].data() + q * 64, cn, x + r);
+     bit_matrix_internal::transpose64(x);
+    }
+    for(int c= 0; c < cn; ++c) t[q * 64 + c][bi >> 6]= x[c];
+   }
+  }
+  return t;
  }
  static BitMatrix identity(int n) {
   BitMatrix r(n, n);
@@ -440,7 +506,8 @@ public:
   }
   // C の行の語の数を 4 の倍数にした作業領域で求め、違えば最後に詰める。
   const int CW= round4(KW);
-  std::vector<u64> buf(CW == KW ? 0 : (size_t)n * CW), T((size_t)8 * 256 * 16);
+  bit_matrix_internal::Words buf(CW == KW ? 0 : (size_t)n * CW);
+  std::vector<u64> T((size_t)8 * 256 * 16);
   u64* C= CW == KW ? c.a.data() : buf.data();
   for(int p= 0; p < KW; p+= 16) {
    const int bw= std::min(16, KW - p);

@@ -33,12 +33,12 @@ SquareMatrix<MinPlus<int>, 3> d;   // 全部 INF
 
 ## 中身
 
-一般の `T` では、積は i-k-j の順に要素の演算子で足します。
+一般の `T` では、$N \le 8$ なら成分ごとの内積をレジスタにためて求め、それより大きければ i-k-j の順に要素の演算子で足します。i-k-j のままだと、積を 1 つ足すたびに和をメモリに読み書きします。
 
 `T` が `ZMod` なら、積の成分ごとに $N$ 個の積を u64 の和にためてから、1 回だけ還元します。値は表現のまま ($2M$ 未満) 掛け、$N$ 個の和が u64 を溢れうるとき (法が $2^{30}$ に近ければ $N > 4$) だけ $M$ 未満に直してから掛けます。$N > 16$ なら、17 個目からは 8 段ごとに和の $2^{32}$ の位を $2^{32} \bmod M$ に掛けて畳みます。ベクトルとの積も同じです。
 
 procon-judge の atcoder-abc246-h は、3 × 3 の行列をセグメント木に載せる問題です。EPYC 9V45 の x64-gcc で、この形の zmod_fixed_acc は 40.30 ms、積と和のたびに還元する zmod_fixed は 63.95 ms でした。速さの比は x64-gcc で 1.6 倍、x64-clang で 1.9 倍です。大きさを実行時に決める形より 2.7 倍から 5 倍速く、今の Library の Matrix の 4.9 倍です。`SquareMatrix<ZMod<998244353>, 3>` を載せた lib-neo の提出は、手元の M2 で 43.7 ms から 45.2 ms でした。zmod_fixed_acc (42.6 ms から 43.1 ms) と並びます。
 
-cf-1609-e (min-plus の 3 × 3) では、`SquareMatrix<MinPlus<int>, 3>` の lib-neo が手元の M2 で 50 ms から 59 ms でした。INF を足すときの扱いだけが違う minplus_fixed は 42 ms から 44 ms です。`MinPlus` の積は、片方が INF なら INF のまま返すための比べを 2 回多くします。
+cf-1609-e は min-plus の 3 × 3 の問題です。`SquareMatrix<MinPlus<int>, 3>` の lib-neo は、EPYC 7763 の x64-gcc で 86.67 ms でした (run 40306505343)。`MinPlus` の積の INF の比べが分岐になっていました。比べは分岐のない形 (semiring.md の「中身」) にし、行列の積は内積の形にしました。直したあとの手元の M2 では 43.9 ms で、minplus_fixed は 39.8 ms です。x64 では測り直していません。
 
 C++20 以上が要ります。

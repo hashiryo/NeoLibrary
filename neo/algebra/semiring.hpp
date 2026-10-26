@@ -25,10 +25,12 @@ template <class T> struct MinPlus {
  constexpr MinPlus& operator+=(MinPlus r) { return x= r.x < x ? r.x : x, *this; }
  constexpr MinPlus& operator*=(MinPlus r) {
   if constexpr(std::is_floating_point_v<T>) x+= r.x;
-  else if(x >= INF || r.x >= INF) x= INF;
   else {
-   const T s= x + r.x;
-   x= s < INF ? s : INF;
+   // max(x, r.x, x + r.x) >= INF なら INF。GCC は条件式の選択を分岐にするので、和は符号なしで求め、マスクで選ぶ。
+   using U= std::make_unsigned_t<T>;
+   const T s= T(U(x) + U(r.x)), t= x > r.x ? x : r.x;
+   const U m= U(0) - U((t > s ? t : s) >= INF);
+   x= T((U(s) & ~m) | (U(INF) & m));
   }
   return *this;
  }
@@ -47,10 +49,11 @@ template <class T> struct MaxPlus {
  constexpr MaxPlus& operator+=(MaxPlus r) { return x= r.x > x ? r.x : x, *this; }
  constexpr MaxPlus& operator*=(MaxPlus r) {
   if constexpr(std::is_floating_point_v<T>) x+= r.x;
-  else if(x <= -INF || r.x <= -INF) x= -INF;
   else {
-   const T s= x + r.x;
-   x= s > -INF ? s : -INF;
+   using U= std::make_unsigned_t<T>;
+   const T s= T(U(x) + U(r.x)), t= x < r.x ? x : r.x;
+   const U m= U(0) - U((t < s ? t : s) <= -INF);
+   x= T((U(s) & ~m) | (U(-INF) & m));
   }
   return *this;
  }

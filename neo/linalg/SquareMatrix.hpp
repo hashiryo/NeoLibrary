@@ -83,12 +83,19 @@ template <class T, int N> struct SquareMatrix {
   for(auto& x: r.a) x= c * x;
   return r;
  }
- // 行列の積。ZMod なら成分ごとの内積を 1 回で還元し、ほかは i-k-j の順に足す。
+ // 行列の積。ZMod なら成分ごとの内積を 1 回で還元する。ほかは N <= 8 なら成分ごとの内積、それより大きければ i-k-j の順に足す。
  friend constexpr SquareMatrix operator*(const SquareMatrix& l, const SquareMatrix& r) {
   SquareMatrix c;
   if constexpr(square_matrix_internal::mod_param<T>::value >= 0) {
    for(int i= 0; i < N; ++i)
     for(int j= 0; j < N; ++j) c.a[i * N + j]= square_matrix_internal::dot<T, N, N>(&l.a[i * N], &r.a[j]);
+  } else if constexpr(N <= 8) {  // 成分ごとの和をレジスタに持つ (i-k-j だと和の読み書きが積ごとにメモリを通る)
+   for(int i= 0; i < N; ++i)
+    for(int j= 0; j < N; ++j) {
+     T s= l.a[i * N] * r.a[j];
+     for(int k= 1; k < N; ++k) s+= l.a[i * N + k] * r.a[k * N + j];
+     c.a[i * N + j]= s;
+    }
   } else {
    for(int i= 0; i < N; ++i)
     for(int k= 0; k < N; ++k) {
