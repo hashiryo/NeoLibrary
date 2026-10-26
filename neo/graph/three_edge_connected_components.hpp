@@ -213,20 +213,24 @@ inline ThreeEdgeConnectedComponents three_edge_connected_components(int n, const
  }
  // 成分の番号。核の頂点は行きがけ順に、吸収した祖先の番号を写す (吸収する祖先は先に訪れている)。DFS に載らない 2-core の頂点と剥がした
  // 頂点は 1 頂点の成分。番号は off に置く (off は使い終わった)。
+ // どの走査も、新しい番号を振るかどうかは値で決まって予測が外れやすいので、マスクの算術で分岐なしに選ぶ。
  u32* cn= off;
  u32 k= 0;
  for(u32 t= 0; t < cnt; ++t) {
-  const u32 x= ord[t], y= st[x].par;
-  cn[x]= y == x ? k++ : cn[y];
+  const u32 x= ord[t], y= st[x].par, c= -u32(y == x);
+  cn[x]= (k & c) | (cn[y] & ~c), k-= c;
  }
- for(u32 x= 0; x < n2; ++x)
-  if(st[x].in >= CM) cn[x]= k++;
+ for(u32 x= 0; x < n2; ++x) {
+  const u32 c= -u32(st[x].in >= CM);
+  cn[x]= (k & c) | (cn[x] & ~c), k-= c;
+ }
+ cn[n2]= 0;
  ThreeEdgeConnectedComponents res;
  reserve_huge(res.comp, N);
  res.comp.assign(N, 0);
  for(u32 v= 0; v < N; ++v) {
-  const u32 x= id[v];
-  res.comp[v]= int(x == NIL ? k++ : cn[x]);
+  const u32 x= id[v], c= -u32(x == NIL);
+  res.comp[v]= int((k & c) | (cn[std::min(x, n2)] & ~c)), k-= c;
  }
  res.count= int(k);
  return res;
