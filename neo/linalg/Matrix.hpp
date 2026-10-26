@@ -697,6 +697,24 @@ template <class T> struct Matrix {
   Matrix c(l.h, r.w);
   if constexpr(linalg_internal::is_zmod_v<T>) linalg_internal::zmat::mul(l.a.data(), r.a.data(), c.a.data(), l.h, l.w, r.w);
   else {
+   // T が速い道 (neo/algebra/semiring.hpp の MinPlus と MaxPlus の fast_range と fast_mul) を持ち、両方の値がその範囲にあれば、
+   // 積を fast_mul にする (INF の比べを省いた積で、範囲の中では同じ値)。
+   if constexpr(requires {
+                 T::fast_mul(l.a[0], r.a[0]);
+                 T::fast_range(l.a.data(), r.a.data(), size_t(0));
+                }) {
+    if(T::fast_range(l.a.data(), l.a.data(), l.a.size()) && T::fast_range(r.a.data(), r.a.data(), r.a.size())) {
+     for(int i= 0; i < l.h; ++i) {
+      T* ci= c[i];
+      for(int k= 0; k < l.w; ++k) {
+       const T x= l[i][k];
+       const T* rk= r[k];
+       for(int j= 0; j < r.w; ++j) ci[j]+= T::fast_mul(x, rk[j]);
+      }
+     }
+     return c;
+    }
+   }
    for(int i= 0; i < l.h; ++i) {
     T* ci= c[i];
     for(int k= 0; k < l.w; ++k) {

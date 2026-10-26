@@ -20,6 +20,19 @@ struct OrAnd;                        // 和は or、積は and。0 は false、1
 
 INF の扱いのほかに丸めはしないので、有限の値どうしの和が `T` の範囲を出ないように型を選んでください。
 
+負の重みがあると、INF に丸めるせいで、積の結合法則は成り立たないことがあります。$(A B) C$ と $A (B C)$ で、途中で INF を超えた和に負の重みを足す順が変わるためです。
+
+```cpp
+static constexpr bool fast_range(const MinPlus* p, const MinPlus* q, std::size_t n);
+static constexpr MinPlus fast_mul(MinPlus l, MinPlus r);   // MaxPlus にも同じもの
+```
+
+行列の積の速い道です。`fast_range` は、p と q の n 個の値が、INF の比べを省いた積 `fast_mul` でも同じ値になる範囲 (`MinPlus` は 0 以上 INF 以下、`MaxPlus` は -INF 以上 0 以下) にあるかを返します。`Matrix` と `SquareMatrix` の積は、両方の行列がこの範囲にあれば `fast_mul` で掛けます。
+
 ## 中身
 
-整数の `MinPlus` の積は、$\max(x, y, x + y) \ge \mathrm{INF}$ なら INF、そうでなければ $x + y$ です。和は符号なしの算術で先に求め、INF にするかはマスクの算術で選びます。比べを条件式で書くと、x64 の GCC 15 はデータで向きの変わる分岐にしていました。procon-judge の cf-1609-e は、3 × 3 の min-plus の行列をセグメント木に載せる問題です。分岐のあった形の lib-neo は、run 40306505343 (EPYC 7763) の x64-gcc で 86.67 ms でした。INF の扱いを持たない minplus_fixed (38.67 ms) の 2.2 倍です。`MaxPlus` も符号を逆にして同じ形です。
+整数の `MinPlus` の積は、$\max(x, y, x + y) \ge \mathrm{INF}$ なら INF、そうでなければ $x + y$ です。和は符号なしの算術で先に求め、INF にするかはマスクの算術で選びます。比べを条件式で書くと、x64 の GCC 15 はデータで向きの変わる分岐にしていました。`MaxPlus` も符号を逆にして同じ形です。
+
+この形でも、x64 の GCC 15 は 3 × 3 の積をベクトル化しません。INF の比べを持たない `min(x + y, INF)` なら、i-k-j の列の向きを 2 個と 1 個に分けて vpaddd と vpminsd で掛けます。llvm-mca の Zen 3 の見積もりでは、3 × 3 の積 1 回が 27 サイクルと 70 サイクルの差でした。そこで、値がすべて 0 以上 INF 以下なら、`min(x + y, INF)` が比べのある積と同じ値になることを使います。INF は $2^k - 1$ の形なので、範囲に入るかは値の or 1 回で分かります。`fast_range` と `fast_mul` はこのための関数です。
+
+procon-judge の cf-1609-e は、3 × 3 の min-plus の行列をセグメント木に載せる問題です。EPYC 7763 の x64-gcc で、比べを分岐で書いていた形の lib-neo は 86.67 ms (run 40306505343)、分岐なしにした形は 68.06 ms (run 40310861931) でした。INF の比べを持たない minplus_fixed は 39.32 ms です。速い道を足したあとの手元の M2 では、lib-neo と minplus_fixed が 38.8 ms から 40.2 ms と 37.3 ms で並びます。x64 では測り直していません。

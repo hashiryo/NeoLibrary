@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 #include "neo/algebra/ZMod.hpp"
@@ -83,13 +84,38 @@ template <class T, int N> struct SquareMatrix {
   for(auto& x: r.a) x= c * x;
   return r;
  }
- // 行列の積。ZMod なら成分ごとの内積を 1 回で還元する。ほかは N <= 8 なら成分ごとの内積、それより大きければ i-k-j の順に足す。
+ // 行列の積。ZMod なら成分ごとの内積を 1 回で還元する。T が速い道 (fast_range と fast_mul。neo/algebra/semiring.hpp の MinPlus と
+ // MaxPlus) を持ち、両方の値がその範囲にあれば、積を fast_mul にした i-k-j で掛ける (GCC が列の向きをベクトル化する)。
+ // それ以外は mul_slow。
  friend constexpr SquareMatrix operator*(const SquareMatrix& l, const SquareMatrix& r) {
-  SquareMatrix c;
   if constexpr(square_matrix_internal::mod_param<T>::value >= 0) {
+   SquareMatrix c;
    for(int i= 0; i < N; ++i)
     for(int j= 0; j < N; ++j) c.a[i * N + j]= square_matrix_internal::dot<T, N, N>(&l.a[i * N], &r.a[j]);
-  } else if constexpr(N <= 8) {  // 成分ごとの和をレジスタに持つ (i-k-j だと和の読み書きが積ごとにメモリを通る)
+   return c;
+  } else {
+   if constexpr(requires {
+                 T::fast_mul(l.a[0], r.a[0]);
+                 T::fast_range(l.a.data(), r.a.data(), std::size_t(N));
+                }) {
+    if(T::fast_range(l.a.data(), r.a.data(), N * N)) {
+     SquareMatrix c;
+     for(int i= 0; i < N; ++i)
+      for(int k= 0; k < N; ++k) {
+       const T x= l.a[i * N + k];
+       for(int j= 0; j < N; ++j) c.a[i * N + j]+= T::fast_mul(x, r.a[k * N + j]);
+      }
+     return c;
+    }
+   }
+   return mul_slow(l, r);
+  }
+ }
+ // 要素の演算子だけで掛ける。N <= 8 なら成分ごとの和をレジスタに持ち (i-k-j だと和の読み書きが積ごとにメモリを通る)、
+ // それより大きければ i-k-j の順に足す。
+ static constexpr SquareMatrix mul_slow(const SquareMatrix& l, const SquareMatrix& r) {
+  SquareMatrix c;
+  if constexpr(N <= 8) {
    for(int i= 0; i < N; ++i)
     for(int j= 0; j < N; ++j) {
      T s= l.a[i * N] * r.a[j];

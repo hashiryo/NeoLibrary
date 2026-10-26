@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <limits>
 #include <type_traits>
 // 半環の値の型。和と積と 0 と 1 (静的メンバ関数 zero() と one()) を持ち、行列 (neo/linalg/Matrix.hpp、SquareMatrix.hpp) の
@@ -22,6 +23,21 @@ template <class T> struct MinPlus {
  constexpr MinPlus(T x): x(x) {}
  static constexpr MinPlus zero() { return MinPlus(INF); }
  static constexpr MinPlus one() { return MinPlus(T(0)); }
+ // 行列の積の速い道。p と q の値がすべて 0 以上 INF 以下なら、積は min(x + y, INF) と同じになる (INF に 0 以上を足しても INF
+ // 以上)。INF は 2^k - 1 の形なので、範囲に入るかは値の or が INF の外の bit を持たないかで分かる。
+ static constexpr bool fast_range(const MinPlus* p, const MinPlus* q, std::size_t n) {
+  if constexpr(std::is_floating_point_v<T>) return false;
+  else {
+   using U= std::make_unsigned_t<T>;
+   U o= 0;
+   for(std::size_t i= 0; i < n; ++i) o|= U(p[i].x) | U(q[i].x);
+   return !(o & ~U(INF));
+  }
+ }
+ static constexpr MinPlus fast_mul(MinPlus l, MinPlus r) {
+  const T s= l.x + r.x;
+  return MinPlus(s < INF ? s : INF);
+ }
  constexpr MinPlus& operator+=(MinPlus r) { return x= r.x < x ? r.x : x, *this; }
  constexpr MinPlus& operator*=(MinPlus r) {
   if constexpr(std::is_floating_point_v<T>) x+= r.x;
@@ -46,6 +62,20 @@ template <class T> struct MaxPlus {
  constexpr MaxPlus(T x): x(x) {}
  static constexpr MaxPlus zero() { return MaxPlus(-INF); }
  static constexpr MaxPlus one() { return MaxPlus(T(0)); }
+ // 行列の積の速い道。p と q の値がすべて -INF 以上 0 以下なら、積は max(x + y, -INF) と同じになる。
+ static constexpr bool fast_range(const MaxPlus* p, const MaxPlus* q, std::size_t n) {
+  if constexpr(std::is_floating_point_v<T>) return false;
+  else {
+   using U= std::make_unsigned_t<T>;
+   U o= 0;
+   for(std::size_t i= 0; i < n; ++i) o|= (U(0) - U(p[i].x)) | (U(0) - U(q[i].x));
+   return !(o & ~U(INF));
+  }
+ }
+ static constexpr MaxPlus fast_mul(MaxPlus l, MaxPlus r) {
+  const T s= l.x + r.x;
+  return MaxPlus(s > -INF ? s : -INF);
+ }
  constexpr MaxPlus& operator+=(MaxPlus r) { return x= r.x > x ? r.x : x, *this; }
  constexpr MaxPlus& operator*=(MaxPlus r) {
   if constexpr(std::is_floating_point_v<T>) x+= r.x;
