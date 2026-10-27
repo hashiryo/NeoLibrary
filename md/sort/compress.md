@@ -13,4 +13,4 @@ template <class T> std::vector<T> compress(std::vector<T>& a);
 
 値と添字を値の上の桁で振り分け、塊の中を u32 の鍵の AVX2 のソーティングネットワークで並べて、並べたその場で順位を数えて `a` に書きます。塊は値の順に並んでいて、違う塊の値は必ず違うので、順位は塊をまたいで数え続ければよく、並べた列を書いてから読み直す手間が要りません。4 byte の値は値と添字を 64 bit に詰め、8 byte の値は値と添字を別の配列に振り分けます。値の種類が 1024 個以下ならハッシュ表で順位を引き、桁より下の bit が全要素で同じなら振り分けずに塊の番号から順位を引きます。
 
-写し元の提出の速さは、procon-judge の self-sort-compress-u32 (一様な u32 を $10^6$ 個) の x64-gcc で 5〜22 ms ほどでした。Library の compress と同じ手順 (写しを `std::sort` と `std::unique` で並べ、各要素を `std::lower_bound` で引く) の 9〜31 倍です。i64 の self-sort-compress-i64 では 16〜41 ms ほどで、同じ手順の 5〜13 倍です。
+procon-judge の self-sort-compress-u32 (一様な u32 を $10^6$ 個) では、EPYC 9V45 の x64-gcc で最大 6.3 ms ほどでした。Library の compress と同じ手順 (写しを `std::sort` と `std::unique` で並べ、各要素を `std::lower_bound` で引く) の 179 ms に対して 29 倍です。i64 の self-sort-compress-i64 では、同じ CPU で 13.7 ms ほど (同じ手順の 14 倍) でした。Intel の Xeon での数は、まだ写し元の提出のもの (u32 で 13〜22 ms ほど) しかありません。

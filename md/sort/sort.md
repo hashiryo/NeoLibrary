@@ -18,4 +18,14 @@ template <class T> void sort(std::vector<T>& a);
 
 Intel の CPU では、振り分けの散らばった書き込みが重くなります。procon-judge の self-sort-u32 (一様な u32 を $10^6$ 個) では、Xeon 8573C と 8370C で LSD がクイックソートの 1.3〜1.5 倍かかりました。AMD の EPYC では逆に、クイックソートが LSD の 1.4〜1.9 倍かかります。作業用の配列は、512 KB 以上なら Linux では huge page を頼みます。
 
-写し元の提出の速さは、self-sort-u32 の x64-gcc で 2.5〜8.7 ms ほどで、`std::sort` の 7〜22 倍でした。8 byte の self-sort-u64 と self-sort-i64 では 5〜21 ms ほどで、`std::sort` の 3〜11 倍です。
+procon-judge で測った x64-gcc の最大は次のとおりです (2026-10-27、どれも AMD の EPYC)。
+
+| 問題 | 列 | CPU | この関数 | `std::sort` |
+| --- | --- | --- | --- | --- |
+| self-sort-u32 | 一様な u32 を $10^6$ 個 | 9V45 | 2.4 ms | 57.5 ms |
+| self-sort-small-u32 | 長さ 1 から 64 の u32 の配列 65536 本 | 7763 | 4.3 ms | 38.9 ms |
+| self-sort-large-u32 | 一様な u32 を $10^7$ 個 | 7763 | 88 ms | 778 ms |
+| self-sort-u64 | 一様な u64 を $10^6$ 個 | 7763 | 9.3 ms | 66.7 ms |
+| self-sort-i64 | 一様な i64 を $10^6$ 個 | 9V45 | 7.1 ms | 59.6 ms |
+
+Intel の Xeon での数は、まだ写し元の提出のものしかありません (self-sort-u32 で 7〜9 ms ほど)。$10^7$ 個の列は、AMD の 9V74 と 9V45 では、上の 8 bit で振り分けてから塊ごとに LSD を回す形の方が 1.5〜1.9 倍速く出ています。この大きさの道はまだ詰めていません。
