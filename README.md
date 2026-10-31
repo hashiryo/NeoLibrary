@@ -5,3 +5,5 @@
 ![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/hashiryo/NeoLibrary?style=flat-square)
 
 競技プログラミング用の C++ ライブラリです。[Library](https://github.com/hashiryo/Library) を作り直している途中なので、中身や名前は予告なく変わります。
+
+コードは生成 AI を使って書いています。AtCoder の ABC、ARC、AGC の開催中にこのコードを写して使うときは、[生成 AI 対策ルール](https://info.atcoder.jp/entry/llm-rules-ja)に従って、提出するソースコードにこのリポジトリの URL を書いてください。
