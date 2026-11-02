@@ -15,4 +15,4 @@ template <class I = int, class T> std::vector<I> argsort(const std::vector<T>& a
 
 振り分け方は CPU で変えます。Intel 以外の CPU では、桁を塊の平均が 16 個以下になる幅 (16 bit まで) にして、振り分けを 1 回で済ませます。Intel の CPU では書き先が 65536 か所に散らばる振り分けが重いので、上の 8 bit で振り分けてから、1 段目の塊を 1 つずつ、L1 に載る小さい配列へもう 1 回振り分けます。procon-judge の self-sort-argsort-u32 (一様な u32 を $10^6$ 個) で比べると、Intel の Xeon では 2 段の形が 1.3〜1.45 倍速く出ました。AMD の EPYC では 1 回の形が 0〜4 割速く出ます。
 
-self-sort-argsort-u32 では、EPYC 9V74 の x64-gcc で最大 7.7 ms ほどでした。添字の列を `std::stable_sort` で並べる形 (91.5 ms) の 12 倍です。Intel の Xeon での数は、まだ写し元の提出のもの (9〜15 ms ほど) しかありません。作業用に $8N$ byte の配列を使います。
+self-sort-argsort-u32 では、EPYC 9V74 の x64-gcc で最大 7.7 ms ほどでした。添字の列を `std::stable_sort` で並べる形 (91.5 ms) の 12 倍です。Intel の Xeon では、8573C で 13.8 ms、8370C で 14.4 ms、6973P-C で 10.0 ms ほどで、どれも同じ回の提出の中で最も速く出ました。作業用に $8N$ byte の配列を使います。
