@@ -23,7 +23,7 @@ std::optional<T> min_gt(int l, int r, T x) const; // x より大きい最小
 
 T は整数の型で、負の値も 64 bit の値も使えます。区間は $0 \le l \le r \le N$ で使います。空の区間を渡すと、個数が 0、前後の値が nullopt になります。計算量は、構築が $O(N \log \sigma)$、1 回の操作が $O(\log \sigma)$ です ($\sigma$ は異なる値の数)。前後の値は、個数と k 番目を 1 回ずつ引いて求めます。
 
-`Compress = false` のときは、値を詰めず、そのまま順位として使います。値はどれも 0 以上 $2^{31}$ 未満にしてください。$\sigma$ は値の最大 + 1 になり、段の数もこれで決まります。前に同じ値が出た位置の列のように、値がもともと 0 以上 $N$ 以下の列で使うと、作るときに値を詰める手間と、クエリのたびに値から順位を引く手間が省けます。
+`Compress = false` のときは、値を詰めず、そのまま順位として使います。値はどれも 0 以上 $2^{31}$ 未満にしてください。$\sigma$ は値の最大 + 1 になり、段の数もこれで決まります。前に同じ値が出た位置の列のように、値がもともと 0 以上 $N$ 以下の列で使うと、作るときに値を詰める手間と、クエリのたびに値から順位を引く手間が省けます。procon-judge の yosupo-static-range-count-distinct では、前に出た位置 + 1 の列をこの形で渡す提出が、Xeon 8573C の x64-gcc で 98.4 ms ほどでした。同じ回の写し元の提出 (wm4) は 104.8 ms です。値を詰め直す形では、wm4 の 1.3 倍ほどかかっていました。
 
 ## 使い分け
 
@@ -41,4 +41,4 @@ x 未満の最大と x 以上の最小を両方引くなら、`count_lt` で x �
 
 1 段で 2 bit ずつ分ける 4 分の形です。順位の上の 2 bit から段ごとに、その 2 bit (0 から 3 の記号) の順に安定に分けるので、段の数は 2 分の形の半分です。段ごとに 64 個ずつのブロックを、記号の上の bit の列と下の bit の列と、ブロックより前の記号ごとの数の 32 byte に詰めます。区間の記号ごとの数は、両端のブロックを 1 つずつ読み、popcount で求めます。k 番目は、記号ごとの累計と k を比べたマスクで記号を選び、分岐を使いません。2 MB 以上の配列は、Linux では 2 MB 境界に取って huge page を頼みます。
 
-方式は procon-judge の yosupo-range-kth-smallest などで比べて選びました。yosupo-range-kth-smallest ($N, Q \le 2 \times 10^5$) の最大は、EPYC 9V45 の x64-gcc で 25.9 ms ほどです。今の Library の WaveletMatrix の 3 分の 1 にあたります。1 段で 1 bit ずつ分ける形より 2 割速く出ました。前後の値の aoj-1549、範囲の個数の aoj-2674、yosupo-static-range-count-distinct でも、今の Library の 1.8 倍から 4.3 倍の速さでした。記録は algo-notes の notes/wavelet-matrix.md にあります。
+方式は procon-judge の yosupo-range-kth-smallest などで比べて選びました。yosupo-range-kth-smallest ($N, Q \le 2 \times 10^5$) の最大は、EPYC 9V74 の x64-gcc で 40.8 ms ほどです。同じ回の写し元の提出 (wm4) は 42.0 ms、今の Library の WaveletMatrix は 93.4 ms でした。1 段で 1 bit ずつ分ける形 (54.2 ms) より 2 割速く出ています。前後の値の aoj-1549、範囲の個数の aoj-2674、yosupo-static-range-count-distinct でも、今の Library の 1.8 倍から 4.3 倍の速さでした。記録は algo-notes の notes/wavelet-matrix.md にあります。

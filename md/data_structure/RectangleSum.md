@@ -18,4 +18,4 @@ T は整数の型で、負の値も 64 bit の値も使えます。W は足し�
 
 点を x の順に並べ、並べた順の y の列と重みの列から [WaveletMatrixSum](WaveletMatrixSum.md) を作ります。x の範囲は、[RectangleCount](RectangleCount.md) と同じ表で位置の範囲に直します。並べ方も同じで、添字の並べ替えの `argsort` (neo/sort/argsort.hpp) を使います。
 
-方式は procon-judge の yosupo-rectangle-sum ($N, Q \le 2 \times 10^5$) で比べて選びました。写し元の提出 (wm_sep_brtbl) の x64-gcc の最大は、EPYC 9V45 で 119.1 ms ほどでした。同じ回で、x の範囲を `std::lower_bound` で引く形は 139.0 ms ほどかかりました。記録は algo-notes の notes/wavelet-matrix.md にあります。
+方式は procon-judge の yosupo-rectangle-sum ($N, Q \le 2 \times 10^5$) で比べて選びました。この型を使う提出の x64-gcc の最大は、EPYC 9V74 で 157.6 ms ほどで、同じ回の写し元の提出 (wm_sep_brtbl) の 229.7 ms より速く出ました。x64-clang では逆に 210.5 ms と 176.7 ms で、写し元の方が速く出ています。x の範囲を `std::lower_bound` で引いていたときは、EPYC 9V45 の x64-gcc で 139.0 ms ほどかかり、wm_sep_brtbl (119.1 ms) の 1.17 倍でした。記録は algo-notes の notes/wavelet-matrix.md にあります。
