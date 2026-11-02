@@ -10,18 +10,98 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <memory>
+#include <new>
 #include <type_traits>
 #include <utility>
 #include <vector>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 #include "neo/algebra/ZMod.hpp"
-// 行列。大きさを実行時に決め、行優先の 1 本の配列 a に持つ (a[i * w + j] が i 行 j 列)。要素の型 T は和 (+)、積 (*)、0、1 を
+// 行列。大きさを実行時に決め、行優先の 1 本の配列 a に持つ (a[i * w + j] が i 行 j 列)。a は 2 MB 以上なら、Linux では
+// 2 MB 境界の mmap に置いて huge page を頼む (linalg_internal::HugeAlloc)。要素の型 T は和 (+)、積 (*)、0、1 を
 // 持てばよい (半環)。0 と 1 は、T に静的メンバ関数 zero() と one() があればそれを、なければ T(0) と T(1) を使う
 // (neo/algebra/semiring.hpp の MinPlus などは前者)。引き算とスカラー倍は、T がそれを持つときだけ使える。
 // T が ZMod なら、行列の積、ベクトルとの積、累乗は linalg_internal::zmat の核を使う。積は値を M 未満に直して u64 の和にため、
 // 最後に 1 回だけ還元する。小さい行列はスカラーで、ほかは AVX2 の 4 行 × 8 列のタイルで掛け、1 辺を 2 の冪に広げても
-// 無駄の少ない大きい積 (法が奇数) は Strassen の再帰にする。累乗は、法が素数で辺と指数が大きければ Frobenius 標準形を経由し、
+// 無駄の少ない大きい積 (法が奇数) は Strassen の再帰 (Winograd の形) にする。累乗は、法が素数で辺と指数が大きければ Frobenius 標準形を経由し、
 // それ以外は二分累乗。
 namespace linalg_internal {
+// vector の allocator。2^19 byte 以上なら、Linux では 2 MB 境界の mmap (2 MB の倍数に切り上げる) に置いて MADV_HUGEPAGE を
+// 頼む。頼まない領域を 4 KB のページに置く判定機では、大きな行列を初めて触るときのページ 1 枚ごとの費用 (1 枚 1.7 us ほど) が
+// 重いため (n = 500 の u64 の行列で 0.85 ms)。
+template <class T> struct HugeAlloc {
+ using value_type= T;
+ static constexpr std::size_t H= std::size_t(1) << 21, L= std::size_t(1) << 19;
+ HugeAlloc()= default;
+ template <class U> HugeAlloc(const HugeAlloc<U>&) {}
+ T* allocate(std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= L) {
+   const std::size_t bytes= (n * sizeof(T) + H - 1) & ~(H - 1);
+   void* m= mmap(nullptr, bytes + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if(m == MAP_FAILED) throw std::bad_alloc();
+   char *p= static_cast<char*>(m), *a= reinterpret_cast<char*>((reinterpret_cast<std::uintptr_t>(p) + H - 1) & ~(H - 1));
+   if(a != p) munmap(p, a - p);
+   munmap(a + bytes, p + H - a);
+   madvise(a, bytes, MADV_HUGEPAGE);
+   return reinterpret_cast<T*>(a);
+  }
+#endif
+  return std::allocator<T>().allocate(n);
+ }
+ void deallocate(T* p, std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= L) {
+   munmap(p, (n * sizeof(T) + H - 1) & ~(H - 1));
+   return;
+  }
+#endif
+  std::allocator<T>().deallocate(p, n);
+ }
+ template <class U> bool operator==(const HugeAlloc<U>&) const { return true; }
+ template <class U> bool operator!=(const HugeAlloc<U>&) const { return false; }
+};
+// 大きな作業の配列 (掃き出しの行列など) に使う vector。
+template <class T> using hvec= std::vector<T, HugeAlloc<T>>;
+// n 個の u32 の作業の領域。0 では埋めない。Linux で 2^19 byte 以上なら、2 MB 境界の mmap に置いて huge page を頼み、先に
+// ページを用意させる (MADV_POPULATE_WRITE、Linux 5.14 から。古い kernel では何もしない)。
+struct Region {
+ unsigned* p= nullptr;
+ std::size_t mapped= 0;
+ explicit Region(std::size_t n) {
+#ifdef __linux__
+  constexpr std::size_t H= std::size_t(1) << 21;
+  if(n * sizeof(unsigned) >= (std::size_t(1) << 19)) {
+   const std::size_t bytes= (n * sizeof(unsigned) + H - 1) & ~(H - 1);
+   void* m= mmap(nullptr, bytes + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if(m != MAP_FAILED) {
+    char *q= static_cast<char*>(m), *a= reinterpret_cast<char*>((reinterpret_cast<std::uintptr_t>(q) + H - 1) & ~(H - 1));
+    if(a != q) munmap(q, a - q);
+    munmap(a + bytes, q + H - a);
+    madvise(a, bytes, MADV_HUGEPAGE);
+    madvise(a, bytes, 23);
+    p= reinterpret_cast<unsigned*>(a), mapped= bytes;
+    return;
+   }
+  }
+#endif
+  p= static_cast<unsigned*>(::operator new(n * sizeof(unsigned)));
+ }
+ ~Region() {
+#ifdef __linux__
+  if(mapped) {
+   munmap(p, mapped);
+   return;
+  }
+#endif
+  ::operator delete(p);
+ }
+ Region(const Region&)= delete;
+ Region& operator=(const Region&)= delete;
+};
 template <class T> constexpr T zero() {
  if constexpr(requires { T::zero(); }) return T::zero();
  else return T(0);
@@ -29,6 +109,11 @@ template <class T> constexpr T zero() {
 template <class T> constexpr T one() {
  if constexpr(requires { T::one(); }) return T::one();
  else return T(1);
+}
+// 行列の積の速い道の 1 行分 c[j] += T::fast_mul(x, r[j]) (j < n)。c と r が重ならないことを伝えないと、x64 の GCC 15 は
+// 64 bit の値の min のループをベクトル化しない。
+template <class T> [[gnu::always_inline]] inline void fast_axpy(T* __restrict c, const T* __restrict r, T x, int n) {
+ for(int j= 0; j < n; ++j) c[j]+= T::fast_mul(x, r[j]);
 }
 template <class T> struct is_zmod: std::false_type {};
 template <unsigned M> struct is_zmod<ZMod<M>>: std::true_type {};
@@ -212,7 +297,9 @@ template <class Z> void small_mul(const Z* A, const Z* B, Z* C, int n, int m, in
 }
 // Strassen の再帰。1 辺 64 のブロックを Morton 順に並べ、ブロックの積 c = a b 2^{-32} を 4 行 × 8 列のタイルで求める。
 // 再帰の中は足し算と引き算だけなので、どのブロックも同じ 2^{-32} 倍を持ち、最後に 2^64 mod M を掛けて戻す。値は M 未満。
-// procon-judge の yosupo-matrix-product の zmod_strassen (_strassen.hpp) の法を実行時の奇数に広げたもの。
+// 7 回の積は Winograd の形で、1 段の足し算と引き算は 15 回 (並べ方は Boyer、Dumas、Pernet、Zhou (2009) の表 1 の、作業の
+// 領域 X、Y の 2 つで C = A B を求める順)。作業の配列は 1 つの領域にまとめて huge page を頼む (Region)。
+// procon-judge の yosupo-matrix-product の zmod_winograd_hpo (_strassen_hp.hpp) の法を実行時の奇数に広げたもの。
 constexpr int SB= 64;
 [[gnu::noinline]] inline void s_kernel(const u32* __restrict a, const u32* __restrict b, u32* __restrict c, const Mod& md) {
  const __m256i M1= _mm256_set1_epi32(md.m), M2= _mm256_set1_epi32(2 * md.m), TOP= _mm256_set1_epi64x((long long)(1ull << 63));
@@ -249,22 +336,25 @@ inline void s_add(u32* x, const u32* y, const u32* z, std::size_t d, __m256i m) 
 inline void s_sub(u32* x, const u32* y, const u32* z, std::size_t d, __m256i m) {
  for(std::size_t i= 0; i < d; i+= 8) _mm256_storeu_si256((__m256i*)(x + i), dilt(_mm256_sub_epi32(_mm256_loadu_si256((const __m256i*)(y + i)), _mm256_loadu_si256((const __m256i*)(z + i))), m));
 }
-// 1 辺 n のブロック列 (Morton 順) の積 c = a b 2^{-32}。c の後ろの n^2 / 3 ほどと、aa、bb (象限の和を置く作業領域) を使う。
-inline void s_mul(const u32* a, const u32* b, u32* c, std::size_t n, u32* aa, u32* bb, const Mod& md) {
+// 1 辺 n のブロック列 (Morton 順) の積 c = a b 2^{-32}。S1 = A21 + A22、S2 = S1 - A11、S3 = A11 - A21、S4 = A12 - S2、
+// T1 = B12 - B11、T2 = B22 - T1、T3 = B22 - B12、T4 = T2 - B21、P1 = A11 B11、P2 = A12 B21、P3 = S4 B22、P4 = A22 T4、
+// P5 = S1 T1、P6 = S2 T2、P7 = S3 T3、U2 = P1 + P6、U3 = U2 + P7、U4 = U2 + P5 として C11 = P1 + P2、C12 = U4 + P3、
+// C21 = U3 - P4、C22 = U3 + P5。X、Y は 1 辺 n / 2 の作業の領域で、深い段はその後ろを使う (どちらも n^2 / 3 ほど)。
+inline void s_mul(const u32* a, const u32* b, u32* c, std::size_t n, u32* X, u32* Y, const Mod& md) {
  if(n == SB) return s_kernel(a, b, c, md);
  const __m256i m= _mm256_set1_epi32(md.m);
  const std::size_t h= n / 2, d= h * h;
- const u32 *a00= a, *a01= a + d, *a10= a + 2 * d, *a11= a + 3 * d;
- const u32 *b00= b, *b01= b + d, *b10= b + 2 * d, *b11= b + 3 * d;
- u32 *c00= c, *c01= c + d, *c10= c + 2 * d, *c11= c + 3 * d, *cc= c + n * n;
- // C00 = M7 - M5 + M4 + M1、C01 = M5 + M3、C10 = M4 + M2、C11 = M6 - M2 + M1 + M3。7 回の積を上から M7、M5、M4、M6、M2、M1、M3 の順に。
- s_sub(aa, a01, a11, d, m), s_add(bb, b10, b11, d, m), s_mul(aa, bb, c00, h, aa + d, bb + d, md);
- s_add(aa, a00, a01, d, m), s_mul(aa, b11, c01, h, aa + d, bb + d, md), s_sub(c00, c00, c01, d, m);
- s_sub(bb, b10, b00, d, m), s_mul(a11, bb, c10, h, aa + d, bb + d, md), s_add(c00, c00, c10, d, m);
- s_sub(aa, a10, a00, d, m), s_add(bb, b00, b01, d, m), s_mul(aa, bb, c11, h, aa + d, bb + d, md);
- s_add(aa, a10, a11, d, m), s_mul(aa, b00, cc, h, aa + d, bb + d, md), s_add(c10, c10, cc, d, m), s_sub(c11, c11, cc, d, m);
- s_add(aa, a00, a11, d, m), s_add(bb, b00, b11, d, m), s_mul(aa, bb, cc, h, aa + d, bb + d, md), s_add(c00, c00, cc, d, m), s_add(c11, c11, cc, d, m);
- s_sub(bb, b01, b11, d, m), s_mul(a00, bb, cc, h, aa + d, bb + d, md), s_add(c01, c01, cc, d, m), s_add(c11, c11, cc, d, m);
+ const u32 *a11= a, *a12= a + d, *a21= a + 2 * d, *a22= a + 3 * d;
+ const u32 *b11= b, *b12= b + d, *b21= b + 2 * d, *b22= b + 3 * d;
+ u32 *c11= c, *c12= c + d, *c21= c + 2 * d, *c22= c + 3 * d, *X2= X + d, *Y2= Y + d;
+ s_sub(X, a11, a21, d, m), s_sub(Y, b22, b12, d, m), s_mul(X, Y, c21, h, X2, Y2, md);  // C21 = P7
+ s_add(X, a21, a22, d, m), s_sub(Y, b12, b11, d, m), s_mul(X, Y, c22, h, X2, Y2, md);  // C22 = P5
+ s_sub(X, X, a11, d, m), s_sub(Y, b22, Y, d, m), s_mul(X, Y, c12, h, X2, Y2, md);  // X = S2、Y = T2、C12 = P6
+ s_sub(X, a12, X, d, m), s_mul(X, b22, c11, h, X2, Y2, md);  // X = S4、C11 = P3
+ s_mul(a11, b11, X, h, X2, Y2, md);  // X = P1
+ s_add(c12, X, c12, d, m), s_add(c21, c12, c21, d, m), s_add(c12, c12, c22, d, m), s_add(c22, c21, c22, d, m), s_add(c12, c12, c11, d, m);
+ s_sub(Y, Y, b21, d, m), s_mul(a22, Y, c11, h, X2, Y2, md), s_sub(c21, c21, c11, d, m);  // Y = T4、C11 = P4、C21 = U6
+ s_mul(a12, b21, c11, h, X2, Y2, md), s_add(c11, X, c11, d, m);  // C11 = P2、U1
 }
 // 行 rows、列 cols の行列 src (行の間隔 ld) の値を M 未満に直し、1 辺 n のブロック列 (Morton 順) に写す。範囲の外は 0。
 template <class Z> void s_place(const Z* src, int rows, int cols, std::size_t ld, std::size_t n, u32* dst) {
@@ -317,10 +407,11 @@ inline std::size_t strassen_side(int n, int m, int p) {
 }
 template <class Z> void strassen_mul(const Z* a, const Z* b, Z* c, int n, int m, int p, std::size_t N, const Mod& md) {
  const std::size_t NN= N * N, W= NN / 3 + SB * SB;
- std::vector<u32> A(NN + W), B(NN + W), C(NN + W);
- s_place(a, n, m, m, N, A.data()), s_place(b, m, p, p, N, B.data());
- s_mul(A.data(), B.data(), C.data(), N, A.data() + NN, B.data() + NN, md);
- s_unplace(C.data(), n, p, p, N, c, md);
+ Region R(3 * NN + 2 * W);  // A、B、C、X、Y
+ u32 *A= R.p, *B= A + NN, *C= B + NN, *X= C + NN, *Y= X + W;
+ s_place(a, n, m, m, N, A), s_place(b, m, p, p, N, B);
+ s_mul(A, B, C, N, X, Y, md);
+ s_unplace(C, n, p, p, N, c, md);
 }
 // C = A B (A は n × m、B は m × p、C は n × p)。
 template <class Z> void mul(const Z* A, const Z* B, Z* C, int n, int m, int p) {
@@ -651,7 +742,7 @@ template <class Z> void pow(const Z* A, int n, u64 K, Z* R) {
 }
 template <class T> struct Matrix {
  int h= 0, w= 0;
- std::vector<T> a;
+ std::vector<T, linalg_internal::HugeAlloc<T>> a;
  Matrix()= default;
  Matrix(int h, int w): h(h), w(w), a((size_t)h * w, linalg_internal::zero<T>()) {}
  Matrix(int h, int w, const T& v): h(h), w(w), a((size_t)h * w, v) {}
@@ -697,20 +788,21 @@ template <class T> struct Matrix {
   Matrix c(l.h, r.w);
   if constexpr(linalg_internal::is_zmod_v<T>) linalg_internal::zmat::mul(l.a.data(), r.a.data(), c.a.data(), l.h, l.w, r.w);
   else {
-   // T が速い道 (neo/algebra/semiring.hpp の MinPlus と MaxPlus の fast_range と fast_mul) を持ち、両方の値がその範囲にあれば、
-   // 積を fast_mul にする (INF の比べを省いた積で、範囲の中では同じ値)。
+   // T が速い道 (neo/algebra/semiring.hpp の MinPlus と MaxPlus の fast_one_sided、fast_bounded、fast_mul、fast_fix) を持ち、
+   // 両方の行列の値が同じ範囲にあれば、積を fast_mul (INF の比べのない和) にして足し、行ごとに fast_fix で直す (範囲の中では
+   // 厳密な積と同じ値)。片側の範囲に入れば、fast_bounded は調べない。
    if constexpr(requires {
                  T::fast_mul(l.a[0], r.a[0]);
-                 T::fast_range(l.a.data(), r.a.data(), size_t(0));
+                 T::fast_one_sided(l.a.data(), size_t(0));
+                 T::fast_bounded(l.a.data(), size_t(0));
+                 T::fast_fix(l.a[0], false);
                 }) {
-    if(T::fast_range(l.a.data(), l.a.data(), l.a.size()) && T::fast_range(r.a.data(), r.a.data(), r.a.size())) {
+    const bool one= T::fast_one_sided(l.a.data(), l.a.size()) && T::fast_one_sided(r.a.data(), r.a.size());
+    if(one || (T::fast_bounded(l.a.data(), l.a.size()) && T::fast_bounded(r.a.data(), r.a.size()))) {
      for(int i= 0; i < l.h; ++i) {
       T* ci= c[i];
-      for(int k= 0; k < l.w; ++k) {
-       const T x= l[i][k];
-       const T* rk= r[k];
-       for(int j= 0; j < r.w; ++j) ci[j]+= T::fast_mul(x, rk[j]);
-      }
+      for(int k= 0; k < l.w; ++k) linalg_internal::fast_axpy(ci, r[k], l[i][k], r.w);
+      for(int j= 0; j < r.w; ++j) ci[j]= T::fast_fix(ci[j], !one);
      }
      return c;
     }

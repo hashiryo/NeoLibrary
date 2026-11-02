@@ -84,32 +84,46 @@ template <class T, int N> struct SquareMatrix {
   for(auto& x: r.a) x= c * x;
   return r;
  }
- // 行列の積。ZMod なら成分ごとの内積を 1 回で還元する。T が速い道 (fast_range と fast_mul。neo/algebra/semiring.hpp の MinPlus と
- // MaxPlus) を持ち、両方の値がその範囲にあれば、積を fast_mul にした i-k-j で掛ける (GCC が列の向きをベクトル化する)。
- // それ以外は mul_slow。
+ // 行列の積。ZMod なら成分ごとの内積を 1 回で還元する。T が速い道 (neo/algebra/semiring.hpp の MinPlus と MaxPlus の
+ // fast_one_sided、fast_bounded、fast_mul、fast_fix) を持ち、両方の値が同じ範囲にあれば、INF の比べのない i-k-j で掛ける
+ // (GCC が列の向きをベクトル化する)。片側の範囲では項ごとに fast_fix(fast_mul(x, y)) (min(x + y, INF)) を足し、両側の範囲では
+ // fast_mul (和 x + y) を足してから成分ごとに fast_fix で直す。片側の範囲で和を最後に直す形は、手元 (arm の clang) の
+ // cf-1609-e で 15% 遅かった。それ以外は mul_slow。片側の範囲の積だけを呼び出し元に展開し、両側の範囲を調べる道は展開しない
+ // 関数 (mul_other) に分ける (全部を 1 つにすると GCC が展開しなくなり、cf-1609-e の 3 × 3 の積が手元で 3 割遅かった)。
+ static constexpr bool has_fast= requires(const T* p, T x) {
+  T::fast_mul(x, x);
+  T::fast_one_sided(p, p, std::size_t(N));
+  T::fast_bounded(p, std::size_t(N));
+  T::fast_fix(x, false);
+ };
+ template <bool B> [[gnu::always_inline]] static constexpr SquareMatrix fast_product(const SquareMatrix& l, const SquareMatrix& r) {
+  SquareMatrix c;
+  for(int i= 0; i < N; ++i)
+   for(int k= 0; k < N; ++k) {
+    const T x= l.a[i * N + k];
+    for(int j= 0; j < N; ++j) {
+     if constexpr(B) c.a[i * N + j]+= T::fast_mul(x, r.a[k * N + j]);
+     else c.a[i * N + j]+= T::fast_fix(T::fast_mul(x, r.a[k * N + j]), false);
+    }
+   }
+  if constexpr(B)
+   for(auto& v: c.a) v= T::fast_fix(v, true);
+  return c;
+ }
+ [[gnu::noinline]] static constexpr SquareMatrix mul_other(const SquareMatrix& l, const SquareMatrix& r) {
+  if(T::fast_bounded(l.a.data(), N * N) && T::fast_bounded(r.a.data(), N * N)) return fast_product<true>(l, r);
+  return mul_slow(l, r);
+ }
  friend constexpr SquareMatrix operator*(const SquareMatrix& l, const SquareMatrix& r) {
   if constexpr(square_matrix_internal::mod_param<T>::value >= 0) {
    SquareMatrix c;
    for(int i= 0; i < N; ++i)
     for(int j= 0; j < N; ++j) c.a[i * N + j]= square_matrix_internal::dot<T, N, N>(&l.a[i * N], &r.a[j]);
    return c;
-  } else {
-   if constexpr(requires {
-                 T::fast_mul(l.a[0], r.a[0]);
-                 T::fast_range(l.a.data(), r.a.data(), std::size_t(N));
-                }) {
-    if(T::fast_range(l.a.data(), r.a.data(), N * N)) {
-     SquareMatrix c;
-     for(int i= 0; i < N; ++i)
-      for(int k= 0; k < N; ++k) {
-       const T x= l.a[i * N + k];
-       for(int j= 0; j < N; ++j) c.a[i * N + j]+= T::fast_mul(x, r.a[k * N + j]);
-      }
-     return c;
-    }
-   }
-   return mul_slow(l, r);
-  }
+  } else if constexpr(has_fast) {
+   if(T::fast_one_sided(l.a.data(), r.a.data(), N * N)) return fast_product<false>(l, r);
+   return mul_other(l, r);
+  } else return mul_slow(l, r);
  }
  // 要素の演算子だけで掛ける。N <= 8 なら成分ごとの和をレジスタに持ち (i-k-j だと和の読み書きが積ごとにメモリを通る)、
  // それより大きければ i-k-j の順に足す。

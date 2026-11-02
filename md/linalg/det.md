@@ -17,4 +17,6 @@ template <class T> T det(Matrix<T> A);
 
 $n > 16$ では、行を u64 で持ち、要を 8 本ずつ貯めます。8 本たまったら残りの各行を 1 回だけ読み書きして、8 本分の積をまとめて足します (遅らせた更新)。積は $M^2 < 2^{60}$ なので、$2^{62} + 2^{32}$ 未満の値に 8 本足しても u64 に収まります。足したあとは、$2^{32}$ の位を $2^{32} \bmod M$ に掛けて畳みます。要を探す列の値は、貯めている分をその場で足してから $M$ 未満に直します。$n \le 16$ では準備をせず、行を u64 で持って要の行の倍数を足すだけにします。1 行に足すのは 15 回以下なので、畳まなくても u64 に収まります。
 
-procon-judge の yosupo-matrix-det と yosupo-matrix-det-arbitrary-mod で書き比べた zmod_det_blk8 を写しました。写し元は x64-gcc の EPYC 7763 で 7.03 ms (matrix-det)、Xeon 8370C で 6.43 ms (arbitrary-mod) で、どちらも首位でした。今の Library の 9 倍から 200 倍の速さです。lib-neo の提出は、手元の M2 で写し元と 2% 以内の差でした。記録は algo-notes の notes/linear-algebra.md にあります。
+法が奇数の素数なら、要を探す列、要の行、行ごとの掛ける数を AVX2 で 4 個ずつ求めます。組の初めに、残りの行の次の 8 列を列ごとの配列へ $4 \times 4$ の転置で写し、要を探す列はそこから読みます。行ごとの掛ける数も、残りの行の並びの順で列ごとの配列へ置きます。値は $2^{32}$ の位を畳んでから Montgomery の還元で $M$ 未満に直し、要の行を $2^{-32}$ 倍、掛ける数を $2^{32}$ 倍で持つので、積は本当の値の積になります。選ぶ要は変わりません。行列は、Linux では 2 MB 境界の mmap に置いて huge page を頼みます。$n = 500$ の u64 の行列は 2 MB あり、4 KB のページで初めて触る分が 0.9 ms ほどになるためです。
+
+procon-judge の yosupo-matrix-det と yosupo-matrix-det-arbitrary-mod で書き比べた zmod_det_blk8 を写しました。法が奇数の素数の道は、行列を huge page に置いて要を探す列をベクトル化した zmod_det_hpv の形です。EPYC 9V45 の x64-gcc (run 41414562027) で、zmod_det_hpv は 2.93 ms、zmod_det_blk8 は 4.61 ms でした。Library Checker の首位の写しは 6.86 ms、今の Library は 47.65 ms です。記録は algo-notes の notes/linear-algebra.md にあります。

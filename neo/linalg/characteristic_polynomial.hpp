@@ -101,7 +101,8 @@ template <class Z> std::vector<Z> zmod(const Matrix<Z>& A) {
   return x >= M2 ? x - M2 : x;
  };
  const int w= (n + 7) & ~7;
- std::vector<u32> H((size_t)n * w), f(w);
+ linalg_internal::hvec<u32> H((size_t)n * w);
+ std::vector<u32> f(w);
  for(int i= 0; i < n; ++i)
   for(int j= 0; j < n; ++j) H[(size_t)i * w + j]= A[i][j].val();
  auto row= [&](int i) { return &H[(size_t)i * w]; };
@@ -139,12 +140,14 @@ template <class Z> std::vector<Z> zmod(const Matrix<Z>& A) {
   std::fill(f.begin() + k + 2, f.end(), 0);
  }
  const int wp= (n + 1 + 3) & ~3;
- std::vector<u64> Pl((size_t)(n + 1) * wp), acc(wp), zero(wp);
+ linalg_internal::hvec<u64> Pl((size_t)(n + 1) * wp);
+ std::vector<u64> acc(wp), zero(wp);
  Pl[0]= 1;
  for(int k= 0; k < n; ++k) {
   const u64* pk= &Pl[(size_t)k * wp];
   const u32 hk= val(row(k)[k]), c= hk ? M - hk : 0;
-  for(int j= 0; j < wp; ++j) acc[j]= (j ? pk[j - 1] : 0) + u64(c) * pk[j];
+  acc[0]= u64(c) * pk[0];  // j = 0 を外に出す (条件式のままだと GCC が pk[-1] を指す選択つきの読み込みにする)
+  for(int j= 1; j < wp; ++j) acc[j]= pk[j - 1] + u64(c) * pk[j];
   const u64* Ub[K];
   u32 cf[K];
   int q= 0;

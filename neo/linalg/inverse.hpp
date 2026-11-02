@@ -86,7 +86,7 @@ inline void block_update(u64* __restrict acc, const u64* __restrict X, const u32
 // 単位行列の列 pos2row[q] を付け替えたもの。
 template <class Z> struct Elim {
  int n, w;
- std::vector<u64> a, U;  // a は n × w (2^62 + 2^32 未満)。U は要の行を M 未満に直したもの (要にした順に w 個ずつ)
+ linalg_internal::hvec<u64> a, U;  // a は n × w (2^62 + 2^32 未満)。U は要の行を M 未満に直したもの (要にした順に w 個ずつ)
  std::vector<int> rem, prow, pcol, pos2row, row2pos;
  std::vector<u32> pval;
  explicit Elim(const Matrix<Z>& A): n(A.h), w((2 * A.h + 3) & ~3), a((size_t)n * w), rem(n), pos2row(n), row2pos(n) {
@@ -175,12 +175,13 @@ template <class Z> struct Elim {
 // 前進消去のあと、要の列が作る上三角の行列 T (T[t][s] = U_t[pcol[s]]) で T X = Y を解く。Y の行 t は U_t の列 cols。
 // X は要の数 × wx (wx は cols の数を 4 の倍数に切り上げたもの) で、M 未満の値を u64 で持つ。下から 8 行ずつの組にして、
 // 組より下の行の分は block_update で 8 行まとめて足し、組の中は下の行から順に update_row で足す (neo/linalg/solve.hpp の写し)。
-template <class Z> std::vector<u64> tri_solve(const Elim<Z>& e, const std::vector<int>& cols, int& wx) {
+template <class Z> linalg_internal::hvec<u64> tri_solve(const Elim<Z>& e, const std::vector<int>& cols, int& wx) {
  const u32 M= Z::mod();
  const u64 R= (u64(1) << 32) % M;
  const int r= e.prow.size(), nc= cols.size();
  wx= (nc + 3) & ~3;
- std::vector<u64> X((size_t)r * wx), acc((size_t)K * wx), zero(wx);
+ linalg_internal::hvec<u64> X((size_t)r * wx);
+ std::vector<u64> acc((size_t)K * wx), zero(wx);
  std::vector<u32> c((size_t)r * K);
  for(int t1= r; t1 > 0; t1-= K) {
   const int t0= std::max(0, t1 - K), bs= t1 - t0, ns= r - t1;

@@ -10,6 +10,9 @@
 //   OrAnd: 和は or、積は and (到達)。
 // 整数の INF は T の最大の半分で、積は片方が INF (MaxPlus は -INF) ならそのまま INF にし、和が INF を超えれば INF に丸める。
 // 負の重みがあっても INF は INF のまま。浮動小数点数の INF は infinity。
+// 整数の MinPlus と MaxPlus は、行列の積の速い道を持つ。積を INF の比べのない和 x + y (fast_mul) にして和 (min か max) で足し、
+// 最後に成分ごとに fast_fix で INF に直す。掛ける 2 つの行列の値がどれも fast_one_sided の範囲 (MinPlus は 0 以上 INF 以下、
+// MaxPlus は -INF 以上 0 以下) か、どれも fast_bounded の範囲 (±INF か、絶対値が INF / 4 以下) にあれば、厳密な積と同じ値になる。
 namespace semiring_internal {
 template <class T> constexpr T inf() {
  if constexpr(std::is_floating_point_v<T>) return std::numeric_limits<T>::infinity();
@@ -23,9 +26,12 @@ template <class T> struct MinPlus {
  constexpr MinPlus(T x): x(x) {}
  static constexpr MinPlus zero() { return MinPlus(INF); }
  static constexpr MinPlus one() { return MinPlus(T(0)); }
- // 行列の積の速い道。p と q の値がすべて 0 以上 INF 以下なら、積は min(x + y, INF) と同じになる (INF に 0 以上を足しても INF
- // 以上)。INF は 2^k - 1 の形なので、範囲に入るかは値の or が INF の外の bit を持たないかで分かる。
- static constexpr bool fast_range(const MinPlus* p, const MinPlus* q, std::size_t n) {
+ // 行列の積の速い道。fast_one_sided は p の値がすべて 0 以上 INF 以下か。このとき積は min(x + y, INF) と同じで (INF に 0 以上を
+ // 足しても INF 以上)、min は単調なので、和 x + y の min を取ってから INF 以上を INF にしてよい。INF は 2^k - 1 の形なので、
+ // 範囲に入るかは値の or が INF の外の bit を持たないかで分かる。
+ static constexpr bool fast_one_sided(const MinPlus* p, std::size_t n) { return fast_one_sided(p, p, n); }
+ // p と q の n 個ずつを 1 本のループで調べる (大きさを型で決める行列の積で、判定を 1 回の or の畳み込みにする)。
+ static constexpr bool fast_one_sided(const MinPlus* p, const MinPlus* q, std::size_t n) {
   if constexpr(std::is_floating_point_v<T>) return false;
   else {
    using U= std::make_unsigned_t<T>;
@@ -34,9 +40,24 @@ template <class T> struct MinPlus {
    return !(o & ~U(INF));
   }
  }
- static constexpr MinPlus fast_mul(MinPlus l, MinPlus r) {
-  const T s= l.x + r.x;
-  return MinPlus(s < INF ? s : INF);
+ // fast_bounded は p の値がすべて INF か、絶対値が L = INF / 4 以下か。このとき有限の値どうしの和は絶対値が INF / 2 未満で、
+ // INF を含む和は INF - L 以上 (2 INF 以下なので溢れない) なので、和の min を取ってから INF / 2 以上を INF にすれば、厳密な積の
+ // min と同じになる。
+ static constexpr bool fast_bounded(const MinPlus* p, std::size_t n) {
+  if constexpr(std::is_floating_point_v<T> || !std::is_signed_v<T>) return false;
+  else {
+   using U= std::make_unsigned_t<T>;
+   constexpr U L= U(INF) >> 2;
+   bool ok= true;
+   for(std::size_t i= 0; i < n; ++i) ok&= (U(p[i].x) == U(INF)) | (U(U(p[i].x) + L) <= 2 * L);
+   return ok;
+  }
+ }
+ static constexpr MinPlus fast_mul(MinPlus l, MinPlus r) { return MinPlus(T(l.x + r.x)); }
+ // 速い道で足した和を直す。bounded は fast_bounded の範囲で掛けたか。
+ static constexpr MinPlus fast_fix(MinPlus v, bool bounded) {
+  const T t= bounded ? T(INF >> 1) : INF;
+  return MinPlus(v.x >= t ? INF : v.x);
  }
  constexpr MinPlus& operator+=(MinPlus r) { return x= r.x < x ? r.x : x, *this; }
  constexpr MinPlus& operator*=(MinPlus r) {
@@ -62,9 +83,11 @@ template <class T> struct MaxPlus {
  constexpr MaxPlus(T x): x(x) {}
  static constexpr MaxPlus zero() { return MaxPlus(-INF); }
  static constexpr MaxPlus one() { return MaxPlus(T(0)); }
- // 行列の積の速い道。p と q の値がすべて -INF 以上 0 以下なら、積は max(x + y, -INF) と同じになる。
- static constexpr bool fast_range(const MaxPlus* p, const MaxPlus* q, std::size_t n) {
-  if constexpr(std::is_floating_point_v<T>) return false;
+ // 行列の積の速い道。MinPlus の符号を逆にしたもので、fast_one_sided は p の値がすべて -INF 以上 0 以下か、fast_bounded は
+ // すべて -INF か、絶対値が INF / 4 以下か。
+ static constexpr bool fast_one_sided(const MaxPlus* p, std::size_t n) { return fast_one_sided(p, p, n); }
+ static constexpr bool fast_one_sided(const MaxPlus* p, const MaxPlus* q, std::size_t n) {
+  if constexpr(std::is_floating_point_v<T> || !std::is_signed_v<T>) return false;
   else {
    using U= std::make_unsigned_t<T>;
    U o= 0;
@@ -72,9 +95,20 @@ template <class T> struct MaxPlus {
    return !(o & ~U(INF));
   }
  }
- static constexpr MaxPlus fast_mul(MaxPlus l, MaxPlus r) {
-  const T s= l.x + r.x;
-  return MaxPlus(s > -INF ? s : -INF);
+ static constexpr bool fast_bounded(const MaxPlus* p, std::size_t n) {
+  if constexpr(std::is_floating_point_v<T> || !std::is_signed_v<T>) return false;
+  else {
+   using U= std::make_unsigned_t<T>;
+   constexpr U L= U(INF) >> 2;
+   bool ok= true;
+   for(std::size_t i= 0; i < n; ++i) ok&= (U(p[i].x) == U(-INF)) | (U(U(p[i].x) + L) <= 2 * L);
+   return ok;
+  }
+ }
+ static constexpr MaxPlus fast_mul(MaxPlus l, MaxPlus r) { return MaxPlus(T(l.x + r.x)); }
+ static constexpr MaxPlus fast_fix(MaxPlus v, bool bounded) {
+  const T t= bounded ? T(INF >> 1) : INF;
+  return MaxPlus(v.x <= -t ? -INF : v.x);
  }
  constexpr MaxPlus& operator+=(MaxPlus r) { return x= r.x > x ? r.x : x, *this; }
  constexpr MaxPlus& operator*=(MaxPlus r) {

@@ -50,7 +50,8 @@ template <class Z> Z zmod(const Matrix<Z>& A) {
  const int n= A.h, w= (n + 3) & ~3;
  const u32 M= Z::mod();
  const u64 R= (u64(1) << 32) % M;
- std::vector<u64> a((size_t)n * w), U((size_t)K * w), zero(w);
+ linalg_internal::hvec<u64> a((size_t)n * w);
+ std::vector<u64> U((size_t)K * w), zero(w);
  for(int i= 0; i < n; ++i)
   for(int j= 0; j < n; ++j) a[(size_t)i * w + j]= A[i][j].val();
  std::vector<int> pos(n);  // pos[t] は位置 t にある行

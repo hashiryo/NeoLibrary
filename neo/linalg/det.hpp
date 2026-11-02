@@ -23,7 +23,10 @@
 // 2^32 mod M に掛けて畳む。要を探す列の値は、貯めている分をその場で足してから M 未満に直す。
 // n <= 16 では準備をせず、行を u64 で持って要の行を足すだけにする。1 行に足すのは 15 回以下なので、畳まなくても u64 に収まる。
 // 浮動小数点数は絶対値が最大の要を選ぶ。ほかの体は 0 でない最初の要で割る。
-// procon-judge の yosupo-matrix-det と yosupo-matrix-det-arbitrary-mod で書き比べた zmod_det_blk8 を写したもの。
+// 法が奇数の素数なら、要を探す列、要の行、行ごとの掛ける数を AVX2 で 4 個ずつ求める (large_v、neo/linalg/rank.hpp の
+// eliminate_v と同じ形)。行列は 2 MB 境界の mmap に置いて huge page を頼む (hvec)。
+// procon-judge の yosupo-matrix-det と yosupo-matrix-det-arbitrary-mod で書き比べた zmod_det_blk8 を写し、行列を huge page に
+// 置いた zmod_det_hp と、要を探す列をベクトル化した zmod_det_hpv の形にしたもの。
 namespace det_internal {
 using u32= unsigned;
 using u64= unsigned long long;
@@ -138,11 +141,136 @@ template <class Z> Z small(const Matrix<Z>& A) {
  return neg ? -d : d;
 }
 // n > 16。要を 8 本ずつ貯める。残りの行の並び rem は、要を抜くたびに末尾の行で埋める。
+// 4 個の u64 (2^63 未満) を、2^32 の位を R = 2^32 mod M に掛けて畳んでから Montgomery の還元で 2^{-32} 倍し、M 未満に直す。
+struct Mont {
+ __m256i R, LO, NIV, M, M32;
+ explicit Mont(u32 m) {
+  u32 x= m;
+  for(int i= 0; i < 5; ++i) x*= 2 - m * x;
+  R= _mm256_set1_epi64x((u64(1) << 32) % m), LO= _mm256_set1_epi64x(0xffffffffll), NIV= _mm256_set1_epi64x(u32(-x));
+  M= _mm256_set1_epi64x(m), M32= _mm256_set1_epi32(m);
+ }
+ [[gnu::always_inline]] __m256i redc(__m256i x) const {
+  x= _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(x, 32), R), _mm256_and_si256(x, LO));
+  const __m256i t= _mm256_srli_epi64(_mm256_add_epi64(x, _mm256_mul_epu32(_mm256_mul_epu32(x, NIV), M)), 32);
+  return _mm256_min_epu32(t, _mm256_sub_epi32(t, M32));  // 上の 32 bit は 0 のまま (0 - M は大きいので min で 0)
+ }
+};
+[[gnu::always_inline]] inline __m128i pack_lo(__m256i x) { return _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 2, 4, 6, 0, 0, 0, 0))); }
+// 法が奇数の素数のときの前進消去。組の初めに残りの行の次の 8 列を列ごとの配列 (残りの行の並びの順) に 4 × 4 の転置で写し、
+// 要を探す列はそこから読む。行ごとの掛ける数も残りの行の並びの順に列ごとに持ち、要の行を抜くときは末尾の行の分をその位置へ
+// 移す。値は 2^32 の位を畳んでから Montgomery の還元で M 未満に直し、要の行を 2^{-32} 倍、掛ける数を 2^32 倍で持つ。要の値は
+// 2^{-32} 倍で貯めて、最後に 2^{32n} を掛ける。選ぶ要は large と同じ (残りの行の並びで値が 0 でない最初の行)。
+template <class Z> Z large_v(const Matrix<Z>& A) {
+ const int n= A.h, w= (n + 3) & ~3, n4= w;
+ const u32 Mod= Z::mod();
+ const u64 R= (u64(1) << 32) % Mod;
+ const Mont mt(Mod);
+ linalg_internal::hvec<u64> a((size_t)n * w + 8);
+ for(int i= 0; i < n; ++i)
+  for(int j= 0; j < n; ++j) a[(size_t)i * w + j]= A[i][j].val();
+ std::vector<int> rem(n), prow;
+ std::iota(rem.begin(), rem.end(), 0);
+ prow.reserve(n);
+ std::vector<u64> C((size_t)K * n4), U((size_t)K * w + 8), zero(w + 8);
+ std::vector<u32> F((size_t)K * n4), V(n4);
+ const u64* Ub[K];
+ Z d= Z::raw(1);
+ auto row= [&](int r) { return a.data() + (size_t)r * w; };
+ auto fill_cache= [&](int c0) {
+  const int nr= rem.size();
+  for(int i= 0; i < nr; i+= 4) {
+   const u64* r0= row(rem[i]) + c0;
+   const u64* r1= i + 1 < nr ? row(rem[i + 1]) + c0 : zero.data();
+   const u64* r2= i + 2 < nr ? row(rem[i + 2]) + c0 : zero.data();
+   const u64* r3= i + 3 < nr ? row(rem[i + 3]) + c0 : zero.data();
+   for(int h= 0; h < 8; h+= 4) {
+    const __m256i x0= _mm256_loadu_si256((const __m256i*)(r0 + h)), x1= _mm256_loadu_si256((const __m256i*)(r1 + h));
+    const __m256i x2= _mm256_loadu_si256((const __m256i*)(r2 + h)), x3= _mm256_loadu_si256((const __m256i*)(r3 + h));
+    const __m256i t0= _mm256_unpacklo_epi64(x0, x1), t1= _mm256_unpackhi_epi64(x0, x1);
+    const __m256i t2= _mm256_unpacklo_epi64(x2, x3), t3= _mm256_unpackhi_epi64(x2, x3);
+    _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 0) * n4 + i], _mm256_permute2x128_si256(t0, t2, 0x20));
+    _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 1) * n4 + i], _mm256_permute2x128_si256(t1, t3, 0x20));
+    _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 2) * n4 + i], _mm256_permute2x128_si256(t0, t2, 0x31));
+    _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 3) * n4 + i], _mm256_permute2x128_si256(t1, t3, 0x31));
+   }
+  }
+ };
+ int col= 0;
+ while(col < n) {
+  int bt= 0, c0= col;
+  fill_cache(c0);
+  for(; bt < K && col < n; ++col) {
+   if(col == c0 + 8) fill_cache(c0= col);
+   const int nr= rem.size(), nr4= (nr + 3) & ~3;
+   const u64* cc= &C[(size_t)(col - c0) * n4];
+   __m256i us[K];
+   for(int s= 0; s < bt; ++s) us[s]= _mm256_set1_epi64x(Ub[s][col]);
+   int pi= -1;
+   for(int i= 0; i < nr4; i+= 4) {
+    __m256i x= _mm256_loadu_si256((const __m256i*)(cc + i));
+    for(int s= 0; s < bt; ++s) x= _mm256_add_epi64(x, _mm256_mul_epu32(_mm256_cvtepu32_epi64(_mm_loadu_si128((const __m128i*)&F[(size_t)s * n4 + i])), us[s]));
+    const __m256i y= mt.redc(x);
+    _mm_storeu_si128((__m128i*)&V[i], pack_lo(y));
+    if(pi < 0) {
+     const int nz= ~_mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(y, _mm256_setzero_si256()))) & 15;
+     if(nz) pi= i + __builtin_ctz(nz);
+    }
+   }
+   if(pi < 0 || pi >= nr) return Z();
+   const int p= rem[pi];
+   u64* up= &U[(size_t)bt * w];
+   {
+    __m256i fs[K];
+    for(int s= 0; s < bt; ++s) fs[s]= _mm256_set1_epi64x(F[(size_t)s * n4 + pi]);
+    const u64* ap= row(p);
+    for(int j= col & ~3; j < w; j+= 4) {
+     __m256i x= _mm256_loadu_si256((const __m256i*)(ap + j));
+     for(int s= 0; s < bt; ++s) x= _mm256_add_epi64(x, _mm256_mul_epu32(_mm256_loadu_si256((const __m256i*)(Ub[s] + j)), fs[s]));
+     _mm256_storeu_si256((__m256i*)(up + j), mt.redc(x));
+    }
+   }
+   {
+    const u32 c= (Z::raw(V[pi]).inv() * Z::raw(u32(R))).val(), cs= u32((u64(c) << 32) / Mod);
+    const __m256i Cv= _mm256_set1_epi64x(c), CS= _mm256_set1_epi64x(cs);
+    u32* fb= &F[(size_t)bt * n4];
+    for(int i= 0; i < nr4; i+= 4) {
+     const __m256i vv= _mm256_cvtepu32_epi64(_mm_loadu_si128((const __m128i*)&V[i]));
+     const __m256i q= _mm256_srli_epi64(_mm256_mul_epu32(vv, CS), 32);
+     __m256i t= _mm256_sub_epi64(_mm256_mul_epu32(vv, Cv), _mm256_mul_epu32(q, mt.M));
+     t= _mm256_min_epu32(t, _mm256_sub_epi32(t, mt.M32));
+     t= _mm256_sub_epi32(mt.M32, t);
+     t= _mm256_min_epu32(t, _mm256_sub_epi32(t, mt.M32));
+     _mm_storeu_si128((__m128i*)(fb + i), pack_lo(t));
+    }
+   }
+   d*= Z::raw(V[pi]);
+   prow.push_back(p);
+   Ub[bt++]= up;
+   const int last= nr - 1;
+   rem[pi]= rem[last], rem.pop_back();
+   for(int s= 0; s < bt; ++s) F[(size_t)s * n4 + pi]= F[(size_t)s * n4 + last], F[(size_t)s * n4 + last]= 0;
+   for(int q= 0; q < K; ++q) C[(size_t)q * n4 + pi]= C[(size_t)q * n4 + last], C[(size_t)q * n4 + last]= 0;
+  }
+  if(col >= n) break;
+  for(int s= bt; s < K; ++s) Ub[s]= zero.data();
+  const int jb= col & ~3, nr= rem.size();
+  for(int i= 0; i < nr; ++i) {
+   u32 f[K], any= 0;
+   for(int s= 0; s < K; ++s) any|= (f[s]= s < bt ? F[(size_t)s * n4 + i] : 0);
+   if(any) update_row(row(rem[i]), Ub, f, jb, w, R);
+  }
+  for(int s= 0; s < bt; ++s) std::fill(&F[(size_t)s * n4], &F[(size_t)s * n4] + n4, 0u);
+ }
+ d*= Z(R).pow(n);
+ return odd_perm(prow) ? -d : d;
+}
 template <class Z> Z large(const Matrix<Z>& A) {
  const int n= A.h, w= (n + 3) & ~3;
  const u32 M= Z::mod();
  const u64 R= (u64(1) << 32) % M;
- std::vector<u64> a((size_t)n * w), U((size_t)K * w), zero(w);
+ linalg_internal::hvec<u64> a((size_t)n * w);
+ std::vector<u64> U((size_t)K * w), zero(w);
  for(int i= 0; i < n; ++i)
   for(int j= 0; j < n; ++j) a[(size_t)i * w + j]= A[i][j].val();
  std::vector<int> rem(n), prow;
@@ -249,6 +377,7 @@ template <class T> T det(Matrix<T> A) {
  assert(A.h == A.w);
  if constexpr(linalg_internal::is_zmod_v<T>) {
   if(A.h <= 16) return det_internal::small(A);
+  if((T::mod() & 1) && linalg_internal::zmat::prime_mod<T>()) return det_internal::large_v(A);
   return det_internal::large(A);
  } else return det_internal::field(std::move(A));
 }
