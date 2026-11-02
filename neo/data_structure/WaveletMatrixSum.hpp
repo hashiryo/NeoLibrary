@@ -4,15 +4,15 @@
 // 小さい方 (大きい方) から k 個の重みの和、k 番目を引く。重みを渡さなければ値そのものを重みにする。
 // 1 段で 1 bit ずつ分ける 2 分の形で、段ごとに、分けたあとの並びの重みの累積を持つ。和は、値の上限の bit が 1 の段
 // だけ累積を読む (分岐で飛ばす)。4 分の形より、和の配列の読み出しが少ない。bit 列は 64 bit の語の列と語ごとの累積の
-// 列。値は WaveletMatrix と同じく順位に詰め、値から順位への変換も同じ表で引く。2 MB 以上の配列は、Linux では
-// 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼む。procon-judge の yosupo-static-range-sum-with-upper-bound などで
-// 書き比べた wm_sep_brtbl と、atcoder-abc281-e の wm_sep を写したもの。
-template <class T= int, class W= long long> class WaveletMatrixSum {
+// 列。値は WaveletMatrix と同じく順位に詰め (Compress = false ならそのまま順位として使う)、値から順位への変換も同じ表で
+// 引く。2 MB 以上の配列は、Linux では 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼む。procon-judge の
+// yosupo-static-range-sum-with-upper-bound などで書き比べた wm_sep_brtbl と、atcoder-abc281-e の wm_sep を写したもの。
+template <class T= int, class W= long long, bool Compress= true> class WaveletMatrixSum {
  using u32= unsigned;
  using u64= unsigned long long;
  int n= 0, lg= 1, nw= 0;
  u32 sigma= 0;
- wavelet_matrix_internal::Values<T> val;
+ wavelet_matrix_internal::Ranks<T, Compress> val;
  wavelet_matrix_internal::Vec<u64> bw;  // 段 h の語 j は bw[h * nw + j]
  wavelet_matrix_internal::Vec<u32> bc;  // 語より前の 1 の数
  std::vector<int> zero;                 // 段 h の 0 の数
@@ -22,14 +22,14 @@ template <class T= int, class W= long long> class WaveletMatrixSum {
   return bc[o] + __builtin_popcountll(bw[o] & ((u64(1) << (i & 63)) - 1));
  }
  [[gnu::always_inline]] const W* S(int h) const { return sums.data() + std::size_t(h) * (n + 1); }
- void build(const std::vector<T>& a, const std::vector<W>& w) {
-  std::vector<u32> cur= val.build(a), nxt(n);
-  sigma= val.vals.size();
+ // cur は順位の列。
+ template <class R> void build(std::vector<R> cur, std::vector<W> cw) {
+  std::vector<R> nxt(n);
   while((u32(1) << lg) < sigma) ++lg;
   nw= n / 64 + 1;
   bw.assign(std::size_t(nw) * lg, 0), bc.assign(std::size_t(nw) * lg, 0), zero.assign(lg, 0);
   sums.assign(std::size_t(lg + 1) * (n + 1), W());
-  std::vector<W> cw(w), nx(n);
+  std::vector<W> nx(n);
   W* top= sums.data() + std::size_t(lg) * (n + 1);
   for(int i= 0; i < n; ++i) top[i + 1]= top[i] + cw[i];
   for(int h= lg - 1; h >= 0; --h) {
@@ -38,7 +38,7 @@ template <class T= int, class W= long long> class WaveletMatrixSum {
    for(int j= 0; j * 64 < n; ++j) {
     const int m= std::min(64, n - j * 64);
     u64 x= 0;
-    for(int t= 0; t < m; ++t) x|= u64(cur[j * 64 + t] >> h & 1) << t;
+    for(int t= 0; t < m; ++t) x|= u64(u32(cur[j * 64 + t]) >> h & 1) << t;
     B[j]= x;
    }
    u32 ones= 0;
@@ -47,7 +47,7 @@ template <class T= int, class W= long long> class WaveletMatrixSum {
    zero[h]= z;
    int i0= 0, i1= z;
    for(int i= 0; i < n; ++i) {
-    const u32 bit= cur[i] >> h & 1;
+    const u32 bit= u32(cur[i]) >> h & 1;
     const int j= bit ? i1 : i0;
     nxt[j]= cur[i], nx[j]= cw[i];
     i1+= bit, i0+= bit ^ 1;
@@ -73,10 +73,14 @@ template <class T= int, class W= long long> class WaveletMatrixSum {
  }
 public:
  WaveletMatrixSum(): WaveletMatrixSum(std::vector<T>()) {}
- // 値そのものを重みにする。
- explicit WaveletMatrixSum(const std::vector<T>& a): n(a.size()) { build(a, std::vector<W>(a.begin(), a.end())); }
+ // 値そのものを重みにする。Compress = false なら、a の値はどれも 0 以上 2^31 未満。
+ explicit WaveletMatrixSum(const std::vector<T>& a): WaveletMatrixSum(a, std::vector<W>(a.begin(), a.end())) {}
  // a[i] の重みを w[i] にする。
- WaveletMatrixSum(const std::vector<T>& a, const std::vector<W>& w): n(a.size()) { build(a, w); }
+ WaveletMatrixSum(std::vector<T> a, std::vector<W> w): n(a.size()) {
+  val.build(a);
+  sigma= val.sigma;
+  build(wavelet_matrix_internal::rank_list(std::move(a)), std::move(w));
+ }
  int size() const { return n; }
  // [l, r) の重みの和。
  [[gnu::always_inline]] W sum(int l, int r) const { return S(lg)[r] - S(lg)[l]; }
@@ -85,7 +89,7 @@ public:
  // [l, r) のうち値が x 以下のものの個数と重みの和。
  [[gnu::always_inline]] std::pair<int, W> count_sum_le(int l, int r, T x) const { return count_sum_rank(l, r, val.template rank<true>(x)); }
  // [l, r) のうち値が [lo, hi) に入るものの個数と重みの和。lo >= hi なら {0, 0}。
- std::pair<int, W> count_sum(int l, int r, T lo, T hi) const {
+ [[gnu::always_inline]] std::pair<int, W> count_sum(int l, int r, T lo, T hi) const {
   if(!(lo < hi)) return {0, W()};
   const auto [c1, s1]= count_sum_lt(l, r, hi);
   const auto [c0, s0]= count_sum_lt(l, r, lo);
@@ -113,7 +117,7 @@ public:
    if(k >= z) k-= z, res|= u32(1) << h, l= zero[h] + l1, r= zero[h] + r1;
    else l-= l1, r-= r1;
   }
-  return val.vals[res];
+  return val.value(res);
  }
  // [l, r) の大きい方から k 番目 (0 始まり)。0 <= k < r - l。
  [[gnu::always_inline]] T kth_largest(int l, int r, int k) const { return kth_smallest(l, r, r - l - 1 - k); }

@@ -6,9 +6,9 @@ documentation_of: ../../neo/data_structure/WaveletMatrixSum.hpp
 静的な整数の列について、区間で値の範囲に入るものの個数と重みの和、小さい方 (大きい方) から k 個の重みの和を答えます。列は作ったあと変えられません。
 
 ```cpp
-template <class T = int, class W = long long> class WaveletMatrixSum;
-explicit WaveletMatrixSum(const std::vector<T>& a);                    // 値そのものを重みにする
-WaveletMatrixSum(const std::vector<T>& a, const std::vector<W>& w);    // a[i] の重みを w[i] にする
+template <class T = int, class W = long long, bool Compress = true> class WaveletMatrixSum;
+explicit WaveletMatrixSum(const std::vector<T>& a);       // 値そのものを重みにする
+WaveletMatrixSum(std::vector<T> a, std::vector<W> w);     // a[i] の重みを w[i] にする
 int size() const;
 W sum(int l, int r) const;                                    // a[l, r) の重みの和
 std::pair<int, W> count_sum_lt(int l, int r, T x) const;      // 値が x 未満のものの個数と重みの和
@@ -20,13 +20,13 @@ T kth_smallest(int l, int r, int k) const;                    // 小さい方か
 T kth_largest(int l, int r, int k) const;
 ```
 
-T は整数の型で、負の値も 64 bit の値も使えます。W は足し引きのできる型です。同じ値が複数あるとき、小さい方から k 個に入るのは位置の前のものからです。計算量は、構築が $O(N \log \sigma)$、1 回の操作が $O(\log \sigma)$ です。
+T は整数の型で、負の値も 64 bit の値も使えます。W は足し引きのできる型です。同じ値が複数あるとき、小さい方から k 個に入るのは位置の前のものからです。計算量は、構築が $O(N \log \sigma)$、1 回の操作が $O(\log \sigma)$ です。`Compress = false` の意味は [WaveletMatrix](WaveletMatrix.md) と同じで、値 (0 以上 $2^{31}$ 未満) をそのまま順位として使います。
 
 ## 使い分け
 
 和の要らない k 番目、個数、前後の値は、[WaveletMatrix](WaveletMatrix.md) の方が速く動きます。この型は段の数が 2 倍で、累積の配列 (段ごとに $N + 1$ 個の W) を持つので、メモリも多く使います。
 
-2 次元の点の重みの和は、点を x の順に並べ、y の列と重みの列からこの型を作って、x の範囲を二分探索で位置の範囲に直してから `count_sum` で引きます。
+2 次元の点の長方形に入る重みの和は [RectangleSum](RectangleSum.md) で引けます。点を x の順に並べた y の列と重みの列からこの型を作り、x の範囲を位置の範囲に直す表を添えたものです。
 
 ## 中身
 

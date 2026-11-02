@@ -12,8 +12,10 @@
 #ifdef __linux__
 #include <sys/mman.h>
 #endif
+#include "neo/sort/compress.hpp"
 // 静的な整数の列の wavelet matrix。区間の k 番目、値が x 未満の個数、[lo, hi) の個数、ちょうど x の個数、
-// x 未満の最大と x 以上の最小を引く。値は内部で順位に詰める (32 bit の整数は基数ソート、ほかは std::sort)。
+// x 未満の最大と x 以上の最小を引く。値は内部で順位に詰める (neo/sort/compress.hpp の compress)。Compress = false なら、
+// 値 (0 以上 2^31 未満) をそのまま順位として使い、詰める手間と、クエリのたびに値から順位を引く手間を省く。
 // 1 段で 2 bit ずつ分ける 4 分の形で、段の数は 2 分の半分になる。段ごとに 64 個ずつのブロックを、記号 (0 から 3) の
 // 上の bit の列と下の bit の列と、ブロックより前の記号ごとの数の 32 byte に詰める。k 番目は、記号ごとの数と k を
 // 比べたマスクで記号を選ぶ (分岐なし)。値から順位への変換は、値の範囲を最大 65536 個の区間に分けた表で狭めてから
@@ -78,67 +80,73 @@ template <bool LE, class T> [[gnu::always_inline]] inline int lower_cm(const T* 
  }
  return int(b - v) + (LE ? !(x < *b) : *b < x);
 }
-// 列の値を順位に詰めたもの。vals は異なる値の昇順で、値から順位への変換を表で引く。
-template <class T> struct Values {
+// 昇順の列 v (重複してよい) のうち x 未満 (LE なら x 以下) のものの数を引く表。値の範囲 [v の最小, v の最大] を最大
+// 65536 個の区間に分け、区間を表で決めてから、その中を cmov の二分探索で探す。範囲の外の x は表を引かない。
+template <class T> struct Lookup {
  using U= std::make_unsigned_t<T>;
- std::vector<T> vals;
+ std::vector<T> v;
  U lo= 0;
  int sh= 0;
- std::vector<int> t;  // t[k] は vals のうち ((v - lo) >> sh) < k のものの数
- // a を詰めた順位の列を返す。
- std::vector<u32> build(const std::vector<T>& a) {
-  const int n= a.size();
-  std::vector<u32> id(n);
-  if constexpr(sizeof(T) == 4) {
-   constexpr u32 flip= std::is_signed_v<T> ? 0x80000000u : 0;
-   std::vector<u64> p(n), q(n);
-   for(int i= 0; i < n; ++i) p[i]= u64(u32(a[i]) ^ flip) << 32 | u32(i);
-   for(int s= 32; s < 64; s+= 11) {
-    const int w= std::min(11, 64 - s), m= (1 << w) - 1;
-    u32 cnt[2049]= {};
-    for(u64 k: p) ++cnt[(k >> s & m) + 1];
-    for(int b= 0; b < (1 << w); ++b) cnt[b + 1]+= cnt[b];
-    for(u64 k: p) q[cnt[k >> s & m]++]= k;
-    p.swap(q);
-   }
-   for(u64 k: p) {
-    const T v= T(u32(k >> 32) ^ flip);
-    if(vals.empty() || vals.back() != v) vals.push_back(v);
-    id[u32(k)]= vals.size() - 1;
-   }
-  } else {
-   std::vector<u32> ord(n);
-   for(int i= 0; i < n; ++i) ord[i]= i;
-   std::sort(ord.begin(), ord.end(), [&](u32 i, u32 j) { return a[i] < a[j]; });
-   for(u32 i: ord) {
-    if(vals.empty() || vals.back() != a[i]) vals.push_back(a[i]);
-    id[i]= vals.size() - 1;
-   }
+ std::vector<int> t;  // t[k] は v のうち ((v - lo) >> sh) < k のものの数
+ // v を入れてから呼ぶ。
+ void build() {
+  if(v.empty()) return;
+  lo= U(v[0]);
+  const U d= U(U(v.back()) - lo);
+  while((d >> sh) >= (U(1) << 16)) ++sh;
+  const int K= int(d >> sh) + 1, m= v.size();
+  t.resize(K + 1);
+  for(int i= 0, k= 0; k <= K; ++k) {
+   while(i < m && int(U(U(v[i]) - lo) >> sh) < k) ++i;
+   t[k]= i;
   }
-  if(!vals.empty()) {
-   lo= U(vals[0]);
-   const U d= U(vals.back()) - lo;
-   while((d >> sh) >= (U(1) << 16)) ++sh;
-   const int K= int(d >> sh) + 1, m= vals.size();
-   t.resize(K + 1);
-   for(int i= 0, k= 0; k <= K; ++k) {
-    while(i < m && int((U(vals[i]) - lo) >> sh) < k) ++i;
-    t[k]= i;
-   }
-  }
-  return id;
  }
- // vals のうち x 未満 (LE なら x 以下) のものの数。
  template <bool LE> [[gnu::always_inline]] int rank(T x) const {
-  const int m= vals.size();
-  if(m == 0 || (LE ? x < vals[0] : !(vals[0] < x))) return 0;
-  if(LE ? !(x < vals[m - 1]) : vals[m - 1] < x) return m;
-  const int k= int((U(x) - lo) >> sh), a= t[k];
-  return a + lower_cm<LE>(vals.data() + a, t[k + 1] - a, x);
+  const int m= v.size();
+  if(m == 0 || (LE ? x < v[0] : !(v[0] < x))) return 0;
+  if(LE ? !(x < v[m - 1]) : v[m - 1] < x) return m;
+  const int k= int(U(U(x) - lo) >> sh), a= t[k];
+  return a + lower_cm<LE>(v.data() + a, t[k + 1] - a, x);
  }
 };
+// 値と順位の対応。Compress なら値を compress で順位に詰め、異なる値の昇順と値から順位を引く表を持つ。Compress でなければ、
+// 値 (0 以上 2^31 未満) をそのまま順位とし、sigma は値の最大 + 1。
+template <class T, bool Compress> struct Ranks {
+ Lookup<T> val;
+ u32 sigma= 0;
+ // a の値を順位に書き換える。
+ void build(std::vector<T>& a) {
+  if constexpr(Compress) {
+   val.v= compress(a), val.build();
+   sigma= val.v.size();
+  } else
+   for(const T& x: a) sigma= std::max(sigma, u32(x) + 1);
+ }
+ // 値が x 未満 (LE なら x 以下) の順位の数。
+ template <bool LE> [[gnu::always_inline]] u32 rank(T x) const {
+  if constexpr(Compress) return val.template rank<LE>(x);
+  else {
+   if constexpr(std::is_signed_v<T>)
+    if(x < T(0)) return 0;
+   return u64(x) >= sigma ? sigma : u32(x) + LE;
+  }
+ }
+ [[gnu::always_inline]] T value(u32 r) const {
+  if constexpr(Compress) return val.v[r];
+  else return T(r);
+ }
+};
+// 順位に書き換えた a を、段ごとの処理で読む型の列にする。4 byte の整数ならそのまま、ほかは u32 に移す。
+template <class T> inline auto rank_list(std::vector<T>&& a) {
+ if constexpr(sizeof(T) == 4) return std::move(a);
+ else {
+  std::vector<u32> c(a.size());
+  for(std::size_t i= 0; i < a.size(); ++i) c[i]= u32(std::make_unsigned_t<T>(a[i]));
+  return c;
+ }
 }
-template <class T= int> class WaveletMatrix {
+}
+template <class T= int, bool Compress= true> class WaveletMatrix {
  using u32= unsigned;
  using u64= unsigned long long;
  struct alignas(32) Blk {
@@ -147,7 +155,7 @@ template <class T= int> class WaveletMatrix {
  };
  int n= 0, levels= 1, nb= 0;
  u32 sigma= 0;
- wavelet_matrix_internal::Values<T> val;
+ wavelet_matrix_internal::Ranks<T, Compress> val;
  wavelet_matrix_internal::Vec<Blk> b;  // 段 d (下から d 番目の 2 bit) のブロック j は b[d * nb + j]
  std::vector<std::array<int, 4>> z;    // z[d][s] は段 d の記号 s より小さい記号の数
  [[gnu::always_inline]] static int rank_eq(const Blk& k, int i, int s) {
@@ -193,16 +201,14 @@ template <class T= int> class WaveletMatrix {
   }
   return c;
  }
-public:
- WaveletMatrix(): WaveletMatrix(std::vector<T>()) {}
- explicit WaveletMatrix(const std::vector<T>& a): n(a.size()) {
-  std::vector<u32> cur= val.build(a), nxt(n);
-  sigma= val.vals.size();
+ // cur は順位の列。
+ template <class R> void build(std::vector<R> cur) {
   int lg= 1;
   while((u32(1) << lg) < sigma) ++lg;
   levels= (lg + 1) / 2, nb= n / 64 + 1;
   b.assign(std::size_t(nb) * levels, Blk{});
   z.assign(levels, {});
+  std::vector<R> nxt(n);
   for(int d= levels - 1; d >= 0; --d) {
    const int sh= 2 * d;
    Blk* B= b.data() + std::size_t(d) * nb;
@@ -212,20 +218,28 @@ public:
     const int m= std::max(0, std::min(64, n - j * 64));
     u64 hi= 0, lo= 0;
     for(int t= 0; t < m; ++t) {
-     const u32 sy= cur[j * 64 + t] >> sh & 3;
+     const u32 sy= u32(cur[j * 64 + t]) >> sh & 3;
      hi|= u64(sy >> 1) << t, lo|= u64(sy & 1) << t, ++cnt[sy];
     }
     B[j].h= hi, B[j].l= lo;
    }
    z[d]= {0, cnt[0], cnt[0] + cnt[1], cnt[0] + cnt[1] + cnt[2]};
    int pos[4]= {z[d][0], z[d][1], z[d][2], z[d][3]};
-   for(int i= 0; i < n; ++i) nxt[pos[cur[i] >> sh & 3]++]= cur[i];
+   for(int i= 0; i < n; ++i) nxt[pos[u32(cur[i]) >> sh & 3]++]= cur[i];
    cur.swap(nxt);
   }
  }
+public:
+ WaveletMatrix(): WaveletMatrix(std::vector<T>()) {}
+ // Compress = false なら、a の値はどれも 0 以上 2^31 未満。
+ explicit WaveletMatrix(std::vector<T> a): n(a.size()) {
+  val.build(a);
+  sigma= val.sigma;
+  build(wavelet_matrix_internal::rank_list(std::move(a)));
+ }
  int size() const { return n; }
  // [l, r) の小さい方から k 番目 (0 始まり)。0 <= k < r - l。
- [[gnu::always_inline]] T kth_smallest(int l, int r, int k) const { return val.vals[kth_rank(l, r, k)]; }
+ [[gnu::always_inline]] T kth_smallest(int l, int r, int k) const { return val.value(kth_rank(l, r, k)); }
  // [l, r) の大きい方から k 番目 (0 始まり)。0 <= k < r - l。
  [[gnu::always_inline]] T kth_largest(int l, int r, int k) const { return kth_smallest(l, r, r - l - 1 - k); }
  // [l, r) のうち x 未満の個数。
@@ -237,7 +251,7 @@ public:
  // [l, r) のうちちょうど x の個数。
  [[gnu::always_inline]] int freq(int l, int r, T x) const {
   const u32 id= val.template rank<false>(x);
-  if(id == sigma || !(val.vals[id] == x)) return 0;
+  if(id == sigma || !(val.value(id) == x)) return 0;
   for(int d= levels - 1; d >= 0; --d) {
    const int s= id >> (2 * d) & 3, zs= z[d][s];
    const Blk* B= b.data() + std::size_t(d) * nb;
@@ -246,22 +260,22 @@ public:
   return r - l;
  }
  // [l, r) のうち x 未満の最大。無ければ nullopt。
- std::optional<T> max_lt(int l, int r, T x) const {
+ [[gnu::always_inline]] std::optional<T> max_lt(int l, int r, T x) const {
   const int c= count_lt(l, r, x);
   return c ? std::optional<T>(kth_smallest(l, r, c - 1)) : std::nullopt;
  }
  // [l, r) のうち x 以下の最大。無ければ nullopt。
- std::optional<T> max_le(int l, int r, T x) const {
+ [[gnu::always_inline]] std::optional<T> max_le(int l, int r, T x) const {
   const int c= count_le(l, r, x);
   return c ? std::optional<T>(kth_smallest(l, r, c - 1)) : std::nullopt;
  }
  // [l, r) のうち x 以上の最小。無ければ nullopt。
- std::optional<T> min_ge(int l, int r, T x) const {
+ [[gnu::always_inline]] std::optional<T> min_ge(int l, int r, T x) const {
   const int c= count_lt(l, r, x);
   return c < r - l ? std::optional<T>(kth_smallest(l, r, c)) : std::nullopt;
  }
  // [l, r) のうち x より大きい最小。無ければ nullopt。
- std::optional<T> min_gt(int l, int r, T x) const {
+ [[gnu::always_inline]] std::optional<T> min_gt(int l, int r, T x) const {
   const int c= count_le(l, r, x);
   return c < r - l ? std::optional<T>(kth_smallest(l, r, c)) : std::nullopt;
  }
