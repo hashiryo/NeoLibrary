@@ -194,12 +194,13 @@ private:
   built_= true;
  }
  // 高さを sink からの距離に直す (global relabel)。excl は使わない頂点 (高さ n に置く)。活性な頂点の表と高さごとの頂点の
- // 表を作り直し、amax_ と bmax_ を決める。alive には生きている (sink へたどれる) 余りの和を入れる。CUT のときは sink に
- // 届かない余りの下限を返す。高さ d 以上の頂点の集合から出る残余容量は、高さ d から d - 1 への弧の容量の和 C_d なので、
- // sink に届く余りは min_d (E_{<d} + C_d) を超えない (E_{<d} は高さ d 未満の余り)。C_d は、高さ d の頂点を BFS で取り
- // 出したときに、もう読んでいる弧の容量と相手の高さから数える。どちらも判定にしか使わないので double で持つ (和が Cap
- // を溢れても困らない)。
- template <bool CUT> double global_relabel(int sink, int excl, double& alive) {
+ // 表を作り直し、amax_ と bmax_ を決める。alive には生きている (sink へたどれる) 余りの和を入れる。CUT が 0 でなければ
+ // sink に届かない余りの下限を返す。高さ d 以上の頂点の集合から出る残余容量は、高さ d から d - 1 への弧の容量の和 C_d
+ // なので、sink に届く余りは min_d (E_{<d} + C_d) を超えない (E_{<d} は高さ d 未満の余り)。CUT が 1 のときは、高さ d の
+ // 頂点を BFS で取り出したときに、もう読んでいる弧の容量と相手の高さから C_d を数える。CUT が 2 のときは、余りのある
+ // 頂点から残余グラフでたどれる頂点だけで数える (余りの届かない頂点の容量は使えないので、下限が締まる)。その分、前向き
+ // の BFS が 1 回増える。どちらも判定にしか使わないので double で持つ (和が Cap を溢れても困らない)。
+ template <int CUT> double global_relabel(int sink, int excl, double& alive) {
   const int n= n_;
   std::fill(h_.begin(), h_.end(), n);
   std::fill(ahead_.begin(), ahead_.end(), -1), std::fill(bhead_.begin(), bhead_.end(), -1);
@@ -208,7 +209,7 @@ private:
   h_[sink]= 0, q_[qt++]= sink;
   while(qh < qt) {
    const int u= q_[qh++], du= h_[u], d= du + 1;
-   if constexpr(CUT) {
+   if constexpr(CUT == 1) {
     if(du != lay) {
      if(lay > 0) reach= std::min(reach, e0 + c);
      lay= du, c= 0, e0= e;
@@ -228,19 +229,40 @@ private:
        if(ahead_[d] < 0) ahead_[d]= atail_[d]= w;
        else anext_[atail_[d]]= w, atail_[d]= w;
        amax= d;
-       if constexpr(!CUT) e+= double(ex_[w]);
+       if constexpr(CUT != 1) e+= double(ex_[w]);
       }
      }
-    } else if constexpr(CUT) {
+    } else if constexpr(CUT == 1) {
      if(hw == du - 1) c+= double(a.cap);
     }
    }
   }
   amax_= amax, bmax_= bmax, alive= e;
-  if constexpr(CUT) {
+  if constexpr(CUT == 1) {
    if(lay > 0) reach= std::min(reach, e0 + c);
-   return std::max(0.0, e - reach);
-  } else return 0;
+  } else if constexpr(CUT == 2) {
+   // 前向きの BFS で余りからたどれる頂点を回りながら、層ごとの余り el と、層 d から d - 1 への弧の容量 cl を足す。
+   std::vector<char> mk(n);
+   std::vector<double> cl(bmax + 2), el(bmax + 2);
+   std::vector<int> f;
+   for(int i= 1; i < qt; ++i)
+    if(const int u= q_[i]; ex_[u] > 0) mk[u]= 1, f.push_back(u);
+   for(size_t i= 0; i < f.size(); ++i) {
+    const int u= f[i], du= h_[u];
+    el[du]+= double(ex_[u]);
+    for(int k= st_[u]; k < st_[u + 1]; ++k)
+     if(const A& a= as_[k]; a.cap > 0) {
+      const int w= a.to, hw= h_[w];
+      if(hw == du - 1) cl[du]+= double(a.cap);
+      if(!mk[w] && hw < n && w != sink) mk[w]= 1, f.push_back(w);
+     }
+   }
+   double below= 0;
+   for(int d= 1; d <= bmax; ++d) reach= std::min(reach, below + cl[d]), below+= el[d];
+   reach= std::min(reach, below);
+  }
+  if constexpr(CUT == 0) return 0;
+  else return std::max(0.0, e - reach);
  }
  // global relabel のあとの状態から、余りを highest label で流す (同じ高さの中は FIFO、gap)。高さを上げた仕事量 (1 回に
  // つき 12 と弧の数) が freq を超えたら false を返し (高さはもう正確でないので、呼ぶ側が global relabel する)、活性な頂点
@@ -370,35 +392,40 @@ private:
  }
  // 終点 sink に向けて、ex_ の余りを highest label で流す。excl は使わない頂点 (高さ n に置く)。
  // HLPP は、sink に届かない余りが、残余グラフではまだ sink へたどれる間 (人が椅子より多い累積の鎖、真ん中が詰まる 2 段の
- // 鎖など) に、高い頂点を行き来して 2 乗の時間がかかる。highest label なので、その間は届く余りが後回しになる。そこで
- // global relabel のたびに進み具合を見て、詰まっていそうなら、余りのある頂点から sink への増加路 (augment_multi) を
- // BFS 4 回分の仕事量だけ試す。試すのは、直前の区間で sink に届いた量 got が生きている余りより少なく、届かない余りの
- // 下限 stuck が初めに生きていた余りの 1/1024 以上あり、さらに残り (生きている余り - stuck) に今の進みで 4 区間より
- // 多くかかりそうか、stuck が got 以上のとき。試して、残りの半分以上を流せたら増加路で最後まで流し、流せなかったら
- // 増加路が向かないグラフとみて、もう試さずに HLPP を続ける。下限を求めて試さなかったときは、次に求めるのを global
- // relabel の回数が 1.5 倍になってからにする。
+ // 鎖など) に、高い頂点を行き来して 2 乗の時間がかかる。highest label なので、その間は届く余りが後回しになり、sink に
+ // 何も届かない区間が続くこともある。そこで global relabel のたびに進み具合を見て、詰まっていそうなら、余りのある頂点
+ // から sink への増加路 (augment_multi) を BFS 4 回分の仕事量だけ試す。試すのは、直前の区間で sink に届いた量 got が
+ // 生きている余りより少なく、届かない余りの下限 stuck が初めに生きていた余りの 1/1024 以上あり、さらに残り (生きている
+ // 余り - stuck) に今の進みで 4 区間より多くかかりそうか、stuck が got 以上のとき。試して、残りの半分以上を流せたら
+ // 増加路で最後まで流し、流せなかったら増加路が向かないグラフとみて、もう試さずに HLPP を続ける。下限を求めて試さな
+ // かったときは、次に求めるのを global relabel の回数が 1.5 倍になってからにする。下限は、got が生きている余りの 1/16
+ // より少ないときだけ、余りからたどれる頂点に絞って数える (global_relabel<2>。間隔は 4 倍ずつ空ける)。余りの届かない
+ // 頂点が sink の隣に多いと (両端の椅子にしか座れない人が多い網など)、絞らない下限はそれを数えて 0 になる。
  void discharge_all(int sink, int excl) {
   const int n= n_;
   double alive= 0;
-  global_relabel<false>(sink, excl, alive);
+  global_relabel<0>(sink, excl, alive);
   const double alive0= alive;
   const long long freq= 2 * (6LL * n + st_[n] / 2);
-  int grs= 0, next= 0;  // next: 次に下限を求める global relabel の番号 (試したあとは INT_MAX)
+  // next: 次に下限を求める global relabel の番号 (試したあとは INT_MAX)。nextx: 次に絞った下限を求めてよい番号
+  int grs= 0, next= 0, nextx= 0;
   Cap last= ex_[sink];
   while(!pump(sink, freq)) {
    ++grs;
    const double got= double(ex_[sink] - last);
    last= ex_[sink];
    if(grs >= next && got < alive) {
-    const double stuck= global_relabel<true>(sink, excl, alive), rest= alive - stuck;
+    const bool narrow= got * 16 < alive && grs >= nextx;
+    if(narrow) nextx= 4 * grs;
+    const double stuck= narrow ? global_relabel<2>(sink, excl, alive) : global_relabel<1>(sink, excl, alive), rest= alive - stuck;
     if(stuck * 1024 >= alive0 && (got * 4 < rest || stuck >= got)) {
      bool done= augment_multi(sink, excl, 4LL * (n + st_[n]));
      if(!done && double(ex_[sink] - last) * 2 >= rest) done= augment_multi(sink, excl, std::numeric_limits<long long>::max());
      if(done) return;
      next= std::numeric_limits<int>::max();
-     global_relabel<false>(sink, excl, alive), last= ex_[sink];
+     global_relabel<0>(sink, excl, alive), last= ex_[sink];
     } else next= grs + (grs + 1) / 2;
-   } else global_relabel<false>(sink, excl, alive);
+   } else global_relabel<0>(sink, excl, alive);
   }
  }
  // Dinic で s から t へ limit まで流す。今の流れから続け、流し終えても正しい流れのまま。DFS は再帰しない。
