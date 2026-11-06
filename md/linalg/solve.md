@@ -21,4 +21,6 @@ template <class T> Matrix<T> kernel(const Matrix<T>& A);
 
 `ZMod` は、$[A \mid b]$ を前進消去し、要の列が作る上三角の行列 $T$ で、自由な列と $b$ の列をまとめて後退代入します ($TX = Y$)。前進消去は `det` と同じ遅らせた更新で、行を u64 で持ち、要を 8 本ずつ貯めます。後退代入は下から 8 行ずつの組にして、組より下の行の分を 8 行まとめて足します。$X$ の 4 列ずつ 8 行分の和をレジスタに持ち、下の行の 4 列を 1 回読んで 8 行に足す形です。$\max(h, w) \le 16$ の `ZMod` とほかの体は、素朴な掃き出しで簡約した階段の形にしてから読みます。
 
-procon-judge の yosupo-system-of-linear-equations で書き比べた zmod_sle_blk8t を写しました。写し元は x64-gcc の Xeon 8370C で 7.02 ms と首位で、今の Library の 9 倍の速さです。lib-neo の提出は `solve_with_kernel` を呼び、結果をハーネスの形に直す分も含めて、手元の M2 で写し元と 1% から 4% の差でした。記録は algo-notes の notes/linear-algebra.md にあります。
+法が奇数なら、前進消去の要を探す列、要の行、行ごとの掛ける数を AVX2 で 4 個ずつ求めます。形は `det` と同じで、要の行と要の値は本当の値の $2^{-32}$ 倍になります。$T$ の各行と $Y$ の行が同じ倍率なので、$TX = Y$ の解は変わりません。残りの行の $b$ の値を前進消去のあとで読むので、最後の組の更新も足します。行列と要の行は、Linux では huge page に置きます。
+
+procon-judge の yosupo-system-of-linear-equations で書き比べた zmod_sle_blk8t を写し、前進消去を zmod_sle_hpv の形にしました。EPYC 7763 の x64-gcc (run 41461416961) で、zmod_sle_hpv は 4.25 ms、zmod_sle_blk8t は 7.82 ms でした。同じ回の、要を探す列がスカラーのままの lib-neo は 5.17 ms、Library Checker の首位の写しは 24.39 ms です。記録は algo-notes の notes/linear-algebra.md にあります。
