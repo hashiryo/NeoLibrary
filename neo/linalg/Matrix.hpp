@@ -116,19 +116,20 @@ template <class T> [[gnu::always_inline]] inline void fast_axpy(T* __restrict c,
  for(int j= 0; j < n; ++j) c[j]+= T::fast_mul(x, r[j]);
 }
 #ifdef __x86_64__
-// MinPlus<int> と MaxPlus<int> の速い道の積 c = a b を、4 行 × 16 列の和を 8 本の ymm に持つタイルで求める。a は h4 行 × m 列、
-// b は m 行 × w16 列、c は h4 行 × w16 列で、h4 は 4 の倍数、w16 は 16 の倍数 (広げた行と列は 0 の値 z)。MIN なら min、そうで
-// なければ max で足す。和 x + y は範囲の判定を通った値どうしなので int を溢れない。b は 16 列の帯ごとに k の向きに読む (辺 300 なら
-// 帯は 19 KB で L1 に残る)。k のループは 2 回ずつ展開し、k ごとに 8 本の和を空の asm に通す。通さないと x64 の GCC 15 は和を毎回
-// 別のレジスタに求めてから戻す vmovdqa を 8 本付け、1 本はスタックにも書いていた (procon-judge の cf-147-b の maxplus_tile)。
-template <bool MIN> [[gnu::noinline]] inline void semiring_tile(const int* __restrict a, const int* __restrict b, int* __restrict c, int h4, int m, int w16, int z) {
+// MinPlus<int> と MaxPlus<int> の速い道の積 c = a b を、4 行 × 16 列の和を 8 本の ymm に持つタイルで求める。a は h4 行 × m 列
+// (h4 は h を 4 の倍数に切り上げたもので、広げた行は 0 の値 z)、b は m 行 × w16 列 (w16 は w を 16 の倍数に切り上げたもので、広げた
+// 列は z)、c は h 行 × w 列 (行の間隔 w) に書く。MIN なら min、そうでなければ max で足す。和 x + y は範囲の判定を通った値どうしなので
+// int を溢れない。b は 16 列の帯ごとに k の向きに読む (辺 300 なら帯は 19 KB で L1 に残る)。k のループは 2 回ずつ展開し、k ごとに
+// 8 本の和を空の asm に通す。通さないと x64 の GCC 15 は和を毎回別のレジスタに求めてから戻す vmovdqa を 8 本付け、1 本はスタックにも
+// 書いていた (procon-judge の cf-147-b の maxplus_tile)。
+template <bool MIN> [[gnu::noinline]] inline void semiring_tile(const int* __restrict a, const int* __restrict b, int* __restrict c, int h, int m, int w, int w16, int z) {
  const __m256i Z= _mm256_set1_epi32(z);
  auto op= [](__m256i x, __m256i y) {
   if constexpr(MIN) return _mm256_min_epi32(x, y);
   else return _mm256_max_epi32(x, y);
  };
  for(int j0= 0; j0 < w16; j0+= 16)
-  for(int i0= 0; i0 < h4; i0+= 4) {
+  for(int i0= 0; i0 < h; i0+= 4) {
    const int *x0= a + std::size_t(i0) * m, *x1= x0 + m, *x2= x1 + m, *x3= x2 + m;
    const int* yb= b + j0;
    __m256i c00= Z, c01= Z, c10= Z, c11= Z, c20= Z, c21= Z, c30= Z, c31= Z;
@@ -145,11 +146,21 @@ template <bool MIN> [[gnu::noinline]] inline void semiring_tile(const int* __res
     c30= op(c30, _mm256_add_epi32(t, y0)), c31= op(c31, _mm256_add_epi32(t, y1));
     asm("" : "+x"(c00), "+x"(c01), "+x"(c10), "+x"(c11), "+x"(c20), "+x"(c21), "+x"(c30), "+x"(c31));
    }
-   int* cr= c + std::size_t(i0) * w16 + j0;
-   _mm256_storeu_si256((__m256i*)cr, c00), _mm256_storeu_si256((__m256i*)(cr + 8), c01), cr+= w16;
-   _mm256_storeu_si256((__m256i*)cr, c10), _mm256_storeu_si256((__m256i*)(cr + 8), c11), cr+= w16;
-   _mm256_storeu_si256((__m256i*)cr, c20), _mm256_storeu_si256((__m256i*)(cr + 8), c21), cr+= w16;
-   _mm256_storeu_si256((__m256i*)cr, c30), _mm256_storeu_si256((__m256i*)(cr + 8), c31);
+   if(i0 + 4 <= h && j0 + 16 <= w) {
+    int* cr= c + std::size_t(i0) * w + j0;
+    _mm256_storeu_si256((__m256i*)cr, c00), _mm256_storeu_si256((__m256i*)(cr + 8), c01), cr+= w;
+    _mm256_storeu_si256((__m256i*)cr, c10), _mm256_storeu_si256((__m256i*)(cr + 8), c11), cr+= w;
+    _mm256_storeu_si256((__m256i*)cr, c20), _mm256_storeu_si256((__m256i*)(cr + 8), c21), cr+= w;
+    _mm256_storeu_si256((__m256i*)cr, c30), _mm256_storeu_si256((__m256i*)(cr + 8), c31);
+   } else {  // 端のタイルは、写してから入る分だけ書く
+    alignas(32) int tmp[64];
+    _mm256_store_si256((__m256i*)tmp, c00), _mm256_store_si256((__m256i*)(tmp + 8), c01);
+    _mm256_store_si256((__m256i*)(tmp + 16), c10), _mm256_store_si256((__m256i*)(tmp + 24), c11);
+    _mm256_store_si256((__m256i*)(tmp + 32), c20), _mm256_store_si256((__m256i*)(tmp + 40), c21);
+    _mm256_store_si256((__m256i*)(tmp + 48), c30), _mm256_store_si256((__m256i*)(tmp + 56), c31);
+    for(int r= 0; r < 4 && i0 + r < h; ++r)
+     for(int q= 0; q < 16 && j0 + q < w; ++q) c[std::size_t(i0 + r) * w + j0 + q]= tmp[r * 16 + q];
+   }
   }
 }
 #endif
@@ -853,19 +864,26 @@ template <class T> struct Matrix {
     const bool one= T::fast_one_sided(l.a.data(), l.a.size()) && T::fast_one_sided(r.a.data(), r.a.size());
     if(one || (T::fast_bounded(l.a.data(), l.a.size()) && T::fast_bounded(r.a.data(), r.a.size()))) {
 #ifdef __x86_64__
-     // MinPlus<int> と MaxPlus<int> で、どの辺も 16 以上なら、行と列を広げた int の配列に写してタイルで掛ける。
+     // MinPlus<int> と MaxPlus<int> で、どの辺も 16 以上なら、行と列を広げた int の配列に写してタイルで掛け、答えの行列に直接書く。
+     // 写す配列は呼び出しをまたいで使い回す。積ごとに確保して答えも別の配列に書いた 115be19 は、cf-147-b の EPYC 7763 で写し元の
+     // 1.65 倍かかっていた (4 KB のページを初めて触る分が、積 1 回あたり 0.6 ms ほどと見ている)。
      if constexpr(requires { T::zero().x; } && sizeof(T) == sizeof(int) && std::is_same_v<std::remove_cvref_t<decltype(T::zero().x)>, int>) {
       if(l.h >= 16 && l.w >= 16 && r.w >= 16) {
        constexpr int z= T::zero().x;
-       const int h4= (l.h + 3) & ~3, m= l.w, w16= (r.w + 15) & ~15;
-       linalg_internal::hvec<int> a(std::size_t(h4) * m, z), b(std::size_t(m) * w16, z), t(std::size_t(h4) * w16);
-       for(int i= 0; i < l.h; ++i)
+       static linalg_internal::hvec<int> a, b;
+       const int h= l.h, h4= (h + 3) & ~3, m= l.w, w= r.w, w16= (w + 15) & ~15;
+       if(a.size() < std::size_t(h4) * m) a.resize(std::size_t(h4) * m);
+       if(b.size() < std::size_t(m) * w16) b.resize(std::size_t(m) * w16);
+       for(int i= 0; i < h; ++i)
         for(int k= 0; k < m; ++k) a[std::size_t(i) * m + k]= l[i][k].x;
-       for(int k= 0; k < m; ++k)
-        for(int j= 0; j < r.w; ++j) b[std::size_t(k) * w16 + j]= r[k][j].x;
-       linalg_internal::semiring_tile<(z > 0)>(a.data(), b.data(), t.data(), h4, m, w16, z);
-       for(int i= 0; i < l.h; ++i)
-        for(int j= 0; j < r.w; ++j) c[i][j]= T::fast_fix(T(t[std::size_t(i) * w16 + j]), !one);
+       std::fill(a.begin() + std::size_t(h) * m, a.begin() + std::size_t(h4) * m, z);
+       for(int k= 0; k < m; ++k) {
+        int* bk= b.data() + std::size_t(k) * w16;
+        for(int j= 0; j < w; ++j) bk[j]= r[k][j].x;
+        std::fill(bk + w, bk + w16, z);
+       }
+       linalg_internal::semiring_tile<(z > 0)>(a.data(), b.data(), reinterpret_cast<int*>(c.a.data()), h, m, w, w16, z);
+       for(auto& v: c.a) v= T::fast_fix(v, !one);
        return c;
       }
      }
