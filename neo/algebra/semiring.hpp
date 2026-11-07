@@ -1,4 +1,7 @@
 #pragma once
+#if defined(__x86_64__) && defined(__AVX2__)
+#include <immintrin.h>
+#endif
 #include <cstddef>
 #include <limits>
 #include <type_traits>
@@ -18,6 +21,33 @@ template <class T> constexpr T inf() {
  if constexpr(std::is_floating_point_v<T>) return std::numeric_limits<T>::infinity();
  else return std::numeric_limits<T>::max() / 2;
 }
+// 4 byte か 8 byte の整数の値を持つ p と q の n 個のうち、先頭から 32 byte ずつの塊の値 (NEG なら符号を反転したもの) の or が
+// mask の bit を持たないかを、x86 で AVX2 が使えれば vptest で調べ、調べた個数を返す (mask の bit があれば -1)。残りは呼び出し元
+// がスカラーで調べる。塊は先頭から読むので、直前の積が行列を先頭から 32 byte ずつ書いていれば、書き込みからの受け渡しが効く
+// (最後の塊を末尾から重ねて読む形は、3 × 3 の行列では 4 byte ずれて 2 つの書き込みにまたがり、procon-judge の cf-1609-e で
+// スカラーの or より遅かった)。使えなければ 0 を返す。
+template <class T, bool NEG> inline long long chunks_within(const void* p, const void* q, std::size_t n, T mask) {
+#if defined(__x86_64__) && defined(__AVX2__)
+ if constexpr(sizeof(T) == 4 || sizeof(T) == 8) {
+  constexpr std::size_t S= 32 / sizeof(T);
+  if(n < S) return 0;
+  const char *a= static_cast<const char*>(p), *b= static_cast<const char*>(q);
+  auto ld= [](const char* r) {
+   const __m256i v= _mm256_loadu_si256((const __m256i*)r);
+   if constexpr(!NEG) return v;
+   else if constexpr(sizeof(T) == 4) return _mm256_sub_epi32(_mm256_setzero_si256(), v);
+   else return _mm256_sub_epi64(_mm256_setzero_si256(), v);
+  };
+  const __m256i m= sizeof(T) == 4 ? _mm256_set1_epi32(int(mask)) : _mm256_set1_epi64x((long long)mask);
+  __m256i o= _mm256_or_si256(ld(a), ld(b));
+  std::size_t i= S;
+  for(; i + S <= n; i+= S) o= _mm256_or_si256(o, _mm256_or_si256(ld(a + i * sizeof(T)), ld(b + i * sizeof(T))));
+  return _mm256_testz_si256(o, m) ? (long long)i : -1;
+ }
+#endif
+ (void)p, (void)q, (void)n, (void)mask;
+ return 0;
+}
 }
 template <class T> struct MinPlus {
  static constexpr T INF= semiring_internal::inf<T>();
@@ -35,8 +65,10 @@ template <class T> struct MinPlus {
   if constexpr(std::is_floating_point_v<T>) return false;
   else {
    using U= std::make_unsigned_t<T>;
+   long long i= 0;
+   if(!std::is_constant_evaluated() && (i= semiring_internal::chunks_within<T, false>(p, q, n, T(~U(INF)))) < 0) return false;
    U o= 0;
-   for(std::size_t i= 0; i < n; ++i) o|= U(p[i].x) | U(q[i].x);
+   for(std::size_t j= i; j < n; ++j) o|= U(p[j].x) | U(q[j].x);
    return !(o & ~U(INF));
   }
  }
@@ -90,8 +122,10 @@ template <class T> struct MaxPlus {
   if constexpr(std::is_floating_point_v<T> || !std::is_signed_v<T>) return false;
   else {
    using U= std::make_unsigned_t<T>;
+   long long i= 0;
+   if(!std::is_constant_evaluated() && (i= semiring_internal::chunks_within<T, true>(p, q, n, T(~U(INF)))) < 0) return false;
    U o= 0;
-   for(std::size_t i= 0; i < n; ++i) o|= (U(0) - U(p[i].x)) | (U(0) - U(q[i].x));
+   for(std::size_t j= i; j < n; ++j) o|= (U(0) - U(p[j].x)) | (U(0) - U(q[j].x));
    return !(o & ~U(INF));
   }
  }
