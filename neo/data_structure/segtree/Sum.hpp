@@ -32,17 +32,18 @@ struct Mask {
 inline constexpr Mask mask{};
 template <class V> class Wide {
  int n= 0, H= 0;
- u64* lv[24]= {};
+ std::size_t loff[24]= {};  // 段 h の表は mem の loff[h] から (写しても壊れないよう、ポインタでなくずれで持つ)
  segment_tree_internal::Vec<u64> mem;
  segment_tree_internal::Vec<V> a;
  template <class F> void build(const F& init) {
   const std::size_t N= n;
   H= 1;
   while((N >> (H * LB)) != 0) ++H;
-  std::size_t off[24], total= 0;
-  for(int h= 0; h < H; ++h) off[h]= total, total+= ((N >> ((h + 1) * LB)) + 1) << LB;
+  std::size_t total= 0;
+  for(int h= 0; h < H; ++h) loff[h]= total, total+= ((N >> ((h + 1) * LB)) + 1) << LB;
   mem.assign(total, 0), a.resize(n);
-  for(int h= 0; h < H; ++h) lv[h]= mem.data() + off[h];
+  u64* lv[24];
+  for(int h= 0; h < H; ++h) lv[h]= mem.data() + loff[h];
   for(int i= 0; i < n; ++i) a[i]= init(i);
   // 段 0 は塊の中の左からの和、段 h + 1 の子の値は段 h の塊の合計。下から順に作る。
   std::vector<u64> cur(a.begin(), a.end()), nxt;
@@ -57,16 +58,18 @@ template <class V> class Wide {
    cur.swap(nxt);
   }
  }
+ const u64* L(int h) const { return mem.data() + loff[h]; }
+ u64* L(int h) { return mem.data() + loff[h]; }
  [[gnu::always_inline]] u64 prefix(int r) const {
   u64 s= 0;
-  for(int h= 0; h < H; ++h) s+= lv[h][std::size_t(r) >> (h * LB)];
+  for(int h= 0; h < H; ++h) s+= L(h)[std::size_t(r) >> (h * LB)];
   return s;
  }
  [[gnu::always_inline]] void add(int p, u64 x) {
   const __m256i xv= _mm256_set1_epi64x((long long)x);
   for(int h= 0; h < H; ++h) {
    const std::size_t c= std::size_t(p) >> (h * LB);
-   u64* blk= lv[h] + ((c >> LB) << LB);
+   u64* blk= L(h) + ((c >> LB) << LB);
    const u64* m= mask.v + (B - 1 - (c & (B - 1)));
    const __m256i v0= _mm256_load_si256((const __m256i*)blk), v1= _mm256_load_si256((const __m256i*)(blk + 4));
    const __m256i m0= _mm256_loadu_si256((const __m256i*)m), m1= _mm256_loadu_si256((const __m256i*)(m + 4));
@@ -94,7 +97,7 @@ public:
  // [l, r) の和。2 つの接頭辞を同じループで読む。
  [[gnu::always_inline]] V prod(int l, int r) const {
   u64 s= 0;
-  for(int h= 0; h < H; ++h) s+= lv[h][std::size_t(r) >> (h * LB)] - lv[h][std::size_t(l) >> (h * LB)];
+  for(int h= 0; h < H; ++h) s+= L(h)[std::size_t(r) >> (h * LB)] - L(h)[std::size_t(l) >> (h * LB)];
   return V(s);
  }
  V all_prod() const { return V(prefix(n)); }
@@ -112,11 +115,11 @@ public:
    for(int j= 1; j < B; ++j) {
     const std::size_t x= start + (std::size_t(j) << sh);
     if(x > std::size_t(n)) break;
-    if(x > std::size_t(l) && !check(V(acc + lv[h][(b << LB) + j] - base))) break;
+    if(x > std::size_t(l) && !check(V(acc + L(h)[(b << LB) + j] - base))) break;
     jb= j;
    }
    if(h == 0) return int(start + jb);
-   acc+= lv[h][(b << LB) + jb], b= (b << LB) + jb;
+   acc+= L(h)[(b << LB) + jb], b= (b << LB) + jb;
   }
  }
  // check(prod(l, r)) が真になる最小の l。g(x) を「x >= r なら真、ほかは check(prefix(r) - prefix(x))」とすると、
@@ -133,12 +136,12 @@ public:
    int jf= 0;  // 塊の始まり (j = 0) はいつも偽
    for(int j= B - 1; j >= 1; --j) {
     const std::size_t x= start + (std::size_t(j) << sh);
-    if(x >= std::size_t(r) || check(V(top - (acc + lv[h][(b << LB) + j])))) continue;
+    if(x >= std::size_t(r) || check(V(top - (acc + L(h)[(b << LB) + j])))) continue;
     jf= j;
     break;
    }
    if(h == 0) return int(start + jf + 1);
-   acc+= lv[h][(b << LB) + jf], b= (b << LB) + jf;
+   acc+= L(h)[(b << LB) + jf], b= (b << LB) + jf;
   }
  }
 };

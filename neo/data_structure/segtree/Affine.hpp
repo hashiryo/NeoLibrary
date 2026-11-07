@@ -86,7 +86,7 @@ inline void masks(int lo, int hi, __m256i& k0, __m256i& k1) {
 inline __m256i ld(const u32* p) { return _mm256_load_si256((const __m256i*)p); }
 inline void st(u32* p, __m256i x) { _mm256_store_si256((__m256i*)p, x); }
 // 段の数を数え、段 0 の要素の置き場と段 h >= 1 の塊の置き場を作る。cnt[h] は段 h の塊の数。
-template <class Blk> int layout(int n, int* cnt, segment_tree_internal::Vec<u32>& mem0, segment_tree_internal::Vec<Blk>& mem1, u32*& v0, Blk** lv) {
+template <class Blk> int layout(int n, int* cnt, segment_tree_internal::Vec<u32>& mem0, segment_tree_internal::Vec<Blk>& mem1, std::size_t* off) {
  int H= 0, nb= std::max((n + 15) >> 4, 1);
  std::size_t total1= 0;
  for(;;) {
@@ -97,9 +97,8 @@ template <class Blk> int layout(int n, int* cnt, segment_tree_internal::Vec<u32>
  }
  mem0.assign(std::size_t(cnt[0]) << 4, 0);
  mem1.resize(std::max<std::size_t>(total1, 1));
- v0= mem0.data();
- std::size_t off= 0;
- for(int h= 1; h < H; ++h) lv[h]= mem1.data() + off, off+= cnt[h];
+ std::size_t o= 0;
+ for(int h= 1; h < H; ++h) off[h]= o, o+= cnt[h];
  return H;
 }
 struct alignas(64) LBlk {
@@ -110,8 +109,11 @@ template <class Z, unsigned P> class Lazy {
  using Mul= typename A::Mul;
  using E= std::array<Z, 2>;
  int n= 0, H= 0;
- u32* v0= nullptr;
- LBlk* lv[8]= {};
+ std::size_t loff[8]= {};  // 段 h >= 1 の塊は mem1 の loff[h] から。写しても壊れないよう、ポインタでなくずれで持つ
+ u32* V0() { return mem0.data(); }
+ const u32* V0() const { return mem0.data(); }
+ LBlk* LV(int h) { return mem1.data() + loff[h]; }
+ const LBlk* LV(int h) const { return mem1.data() + loff[h]; }
  int last[8]= {};
  u32 pw[8]= {};
  alignas(32) u32 tl[8][16]= {};
@@ -131,11 +133,11 @@ template <class Z, unsigned P> class Lazy {
    else st(p, _mm256_blendv_epi8(ld(p), x0, k0)), st(p + 8, _mm256_blendv_epi8(ld(p + 8), x1, k1));
   };
   if(h == 0) {
-   u32* p= v0 + (std::size_t(b) << 4);
+   u32* p= V0() + (std::size_t(b) << 4);
    upd(p, A::add(A::mul(ld(p), f), add0), A::add(A::mul(ld(p + 8), f), add1));
    return;
   }
-  LBlk& B= lv[h][b];
+  LBlk& B= LV(h)[b];
   upd(B.s, A::add(A::mul(ld(B.s), f), add0), A::add(A::mul(ld(B.s + 8), f), add1));
   upd(B.m, A::mul(ld(B.m), f), A::mul(ld(B.m + 8), f));
   const __m256i av= _mm256_set1_epi32(int(a));
@@ -143,14 +145,14 @@ template <class Z, unsigned P> class Lazy {
  }
  // 段 h の子 c (段 h - 1 の塊 c) へ作用を配る。
  void push(int h, int c) {
-  LBlk& B= lv[h][c >> 4];
+  LBlk& B= LV(h)[c >> 4];
   const int j= c & 15;
   const u32 m= B.m[j], a= B.a[j];
   if(m == 1 && a == 0) return;
   B.m[j]= 1, B.a[j]= 0;
   apply_lanes<true>(h - 1, c, 0, 16, Mul(m), a, u32(u64(a) * pw[h - 1] % P));
  }
- u32* row(int h, int b) const { return h == 0 ? v0 + (std::size_t(b) << 4) : lv[h][b].s; }
+ const u32* row(int h, int b) const { return h == 0 ? V0() + (std::size_t(b) << 4) : LV(h)[b].s; }
  u32 block_sum(int h, int b) const {
   const u32* p= row(h, b);
   return A::hsum(ld(p), ld(p + 8));
@@ -164,10 +166,10 @@ template <class Z, unsigned P> class Lazy {
  // l と r - 1 を含む段 0 から段 H - 2 の塊を先読みする。根の塊はいつも触るので要らない。
  void prefetch(int l, int r) const {
   const int x= r - 1;
-  _mm_prefetch((const char*)(v0 + ((std::size_t(l) >> 4) << 4)), _MM_HINT_T0);
-  _mm_prefetch((const char*)(v0 + ((std::size_t(x) >> 4) << 4)), _MM_HINT_T0);
+  _mm_prefetch((const char*)(V0() + ((std::size_t(l) >> 4) << 4)), _MM_HINT_T0);
+  _mm_prefetch((const char*)(V0() + ((std::size_t(x) >> 4) << 4)), _MM_HINT_T0);
   for(int h= 1; h + 1 < H; ++h) {
-   const char *p= (const char*)(lv[h] + (l >> (4 * h + 4))), *q= (const char*)(lv[h] + (x >> (4 * h + 4)));
+   const char *p= (const char*)(LV(h) + (l >> (4 * h + 4))), *q= (const char*)(LV(h) + (x >> (4 * h + 4)));
    _mm_prefetch(p, _MM_HINT_T0), _mm_prefetch(p + 64, _MM_HINT_T0), _mm_prefetch(p + 128, _MM_HINT_T0);
    _mm_prefetch(q, _MM_HINT_T0), _mm_prefetch(q + 64, _MM_HINT_T0), _mm_prefetch(q + 128, _MM_HINT_T0);
   }
@@ -196,8 +198,8 @@ template <class Z, unsigned P> class Lazy {
   }
   for(int h= 1; h < H; ++h) {
    const int sh= 4 * h, sm= (1 << sh) - 1;
-   if(l & sm) lv[h][l >> (sh + 4)].s[(l >> sh) & 15]= block_sum(h - 1, l >> sh);
-   if(r & sm) lv[h][x >> (sh + 4)].s[(x >> sh) & 15]= block_sum(h - 1, x >> sh);
+   if(l & sm) LV(h)[l >> (sh + 4)].s[(l >> sh) & 15]= block_sum(h - 1, l >> sh);
+   if(r & sm) LV(h)[x >> (sh + 4)].s[(x >> sh) & 15]= block_sum(h - 1, x >> sh);
   }
  }
  // 区間の和に当てる 1 次関数 (x, 個数) -> m x + a 個数。m と a は p 未満。
@@ -208,25 +210,25 @@ template <class Z, unsigned P> class Lazy {
  static u64 app(Af F, u64 x, u64 cnt) { return (F.m * x + F.a * cnt) % P; }
  // 段 h の子 c (l を含む) から下の、[l, 子の終わり) の和。子の作用まで当てた値。
  u64 left_path(int h, int c, int l) const {
-  Af G{lv[h][c >> 4].m[c & 15] % P, lv[h][c >> 4].a[c & 15] % P};
+  Af G{LV(h)[c >> 4].m[c & 15] % P, LV(h)[c >> 4].a[c & 15] % P};
   u64 acc= 0;
   for(int g= h - 1;; --g) {
    const int sh= 4 * g, b= l >> (sh + 4), j= (l >> sh) & 15, end= (b + 1) << (sh + 4);
    if(g == 0 || !(l & ((1 << sh) - 1))) return (acc + app(G, lanes_sum(g, b, j, 16), u64(end - l))) % P;
    if(j < 15) acc+= app(G, lanes_sum(g, b, j + 1, 16), u64(end - (((l >> sh) + 1) << sh)));
-   G= comp(G, lv[g][b].m[j], lv[g][b].a[j]);
+   G= comp(G, LV(g)[b].m[j], LV(g)[b].a[j]);
   }
  }
  // 段 h の子 c (r - 1 を含む) から下の、[子の始まり, r) の和。
  u64 right_path(int h, int c, int r) const {
   const int x= r - 1;
-  Af G{lv[h][c >> 4].m[c & 15] % P, lv[h][c >> 4].a[c & 15] % P};
+  Af G{LV(h)[c >> 4].m[c & 15] % P, LV(h)[c >> 4].a[c & 15] % P};
   u64 acc= 0;
   for(int g= h - 1;; --g) {
    const int sh= 4 * g, b= x >> (sh + 4), j= (x >> sh) & 15, start= b << (sh + 4);
    if(g == 0 || !(r & ((1 << sh) - 1))) return (acc + app(G, lanes_sum(g, b, 0, j + 1), u64(r - start))) % P;
    if(j > 0) acc+= app(G, lanes_sum(g, b, 0, j), u64(((x >> sh) << sh) - start));
-   G= comp(G, lv[g][b].m[j], lv[g][b].a[j]);
+   G= comp(G, LV(g)[b].m[j], LV(g)[b].a[j]);
   }
  }
  u32 sum(int l, int r) const {
@@ -246,14 +248,14 @@ template <class Z, unsigned P> class Lazy {
     if(fl < fr) res+= lanes_sum(h, b, fl, fr);
     return u32(app(F, res % P, u64(r - l)));
    }
-   if(!(l & sm) && !(r & sm)) return u32(app(F, lv[h][b].s[jl], u64(r - l)));
-   F= comp(F, lv[h][b].m[jl], lv[h][b].a[jl]);
+   if(!(l & sm) && !(r & sm)) return u32(app(F, LV(h)[b].s[jl], u64(r - l)));
+   F= comp(F, LV(h)[b].m[jl], LV(h)[b].a[jl]);
    b= (b << 4) + jl, --h;
   }
  }
  template <class F> void build(const F& init) {
   int cnt[8];
-  H= layout(n, cnt, mem0, mem1, v0, lv);
+  H= layout(n, cnt, mem0, mem1, loff);
   for(int h= 0; h < H; ++h) {
    last[h]= cnt[h] - 1, pw[h]= u32((u64(1) << (4 * h)) % P);
    for(int j= 0; j < 16; ++j) {
@@ -261,12 +263,12 @@ template <class Z, unsigned P> class Lazy {
     tl[h][j]= u32(std::clamp<long long>(n - start, 0, 1LL << (4 * h)));
    }
   }
-  for(int i= 0; i < n; ++i) v0[i]= Z(init(i)).val();
+  for(int i= 0; i < n; ++i) V0()[i]= Z(init(i)).val();
   for(int h= 1; h < H; ++h)
    for(int b= 0; b < cnt[h]; ++b)
     for(int j= 0; j < 16; ++j) {
      const int c= b * 16 + j;
-     lv[h][b].s[j]= c < cnt[h - 1] ? block_sum(h - 1, c) : 0, lv[h][b].m[j]= 1, lv[h][b].a[j]= 0;
+     LV(h)[b].s[j]= c < cnt[h - 1] ? block_sum(h - 1, c) : 0, LV(h)[b].m[j]= 1, LV(h)[b].a[j]= 0;
     }
  }
 public:
@@ -283,18 +285,18 @@ public:
  template <class F, std::enable_if_t<std::is_invocable_r_v<Z, const F&, int>, int> = 0> Lazy(int n, const F& init): n(n) { build(init); }
  int size() const { return n; }
  Z get(int i) const {
-  u64 v= v0[i];
+  u64 v= V0()[i];
   for(int h= 1; h < H; ++h) {
    const int c= i >> (4 * h);
-   v= (u64(lv[h][c >> 4].m[c & 15]) * v + lv[h][c >> 4].a[c & 15]) % P;
+   v= (u64(LV(h)[c >> 4].m[c & 15]) * v + LV(h)[c >> 4].a[c & 15]) % P;
   }
   return Z::raw(u32(v));
  }
  Z operator[](int i) const { return get(i); }
  void set(int i, Z x) {
   for(int h= H - 1; h >= 1; --h) push(h, i >> (4 * h));
-  v0[i]= x.val();
-  for(int h= 1; h < H; ++h) lv[h][i >> (4 * h + 4)].s[(i >> (4 * h)) & 15]= block_sum(h - 1, i >> (4 * h));
+  V0()[i]= x.val();
+  for(int h= 1; h < H; ++h) LV(h)[i >> (4 * h + 4)].s[(i >> (4 * h)) & 15]= block_sum(h - 1, i >> (4 * h));
  }
  void mul(int i, Z x) { set(i, get(i) + x); }
  [[gnu::always_inline]] Z prod(int l, int r) const { return l < r ? Z::raw(sum(l, r)) : Z(); }
@@ -330,8 +332,11 @@ template <class Z, unsigned P> class Dual {
  using Mul= typename A::Mul;
  using E= std::array<Z, 2>;
  int n= 0, H= 0;
- u32* v0= nullptr;
- DBlk* lv[8]= {};
+ std::size_t loff[8]= {};  // 段 h >= 1 の塊は mem1 の loff[h] から。写しても壊れないよう、ポインタでなくずれで持つ
+ u32* V0() { return mem0.data(); }
+ const u32* V0() const { return mem0.data(); }
+ DBlk* LV(int h) { return mem1.data() + loff[h]; }
+ const DBlk* LV(int h) const { return mem1.data() + loff[h]; }
  segment_tree_internal::Vec<u32> mem0;
  segment_tree_internal::Vec<DBlk> mem1;
  template <bool ALL> void apply_lanes(int h, int b, int lo, int hi, const Mul& f, u32 a) {
@@ -343,16 +348,16 @@ template <class Z, unsigned P> class Dual {
    else st(p, _mm256_blendv_epi8(ld(p), x0, k0)), st(p + 8, _mm256_blendv_epi8(ld(p + 8), x1, k1));
   };
   if(h == 0) {
-   u32* p= v0 + (std::size_t(b) << 4);
+   u32* p= V0() + (std::size_t(b) << 4);
    upd(p, A::add(A::mul(ld(p), f), av), A::add(A::mul(ld(p + 8), f), av));
    return;
   }
-  DBlk& B= lv[h][b];
+  DBlk& B= LV(h)[b];
   upd(B.m, A::mul(ld(B.m), f), A::mul(ld(B.m + 8), f));
   upd(B.a, A::add(A::mul(ld(B.a), f), av), A::add(A::mul(ld(B.a + 8), f), av));
  }
  void push(int h, int c) {
-  DBlk& B= lv[h][c >> 4];
+  DBlk& B= LV(h)[c >> 4];
   const int j= c & 15;
   const u32 m= B.m[j], a= B.a[j];
   if(m == 1 && a == 0) return;
@@ -361,21 +366,21 @@ template <class Z, unsigned P> class Dual {
  }
  void prefetch(int l, int r) const {
   const int x= r - 1;
-  _mm_prefetch((const char*)(v0 + ((std::size_t(l) >> 4) << 4)), _MM_HINT_T0);
-  _mm_prefetch((const char*)(v0 + ((std::size_t(x) >> 4) << 4)), _MM_HINT_T0);
+  _mm_prefetch((const char*)(V0() + ((std::size_t(l) >> 4) << 4)), _MM_HINT_T0);
+  _mm_prefetch((const char*)(V0() + ((std::size_t(x) >> 4) << 4)), _MM_HINT_T0);
   for(int h= 1; h + 1 < H; ++h) {
-   const char *p= (const char*)(lv[h] + (l >> (4 * h + 4))), *q= (const char*)(lv[h] + (x >> (4 * h + 4)));
+   const char *p= (const char*)(LV(h) + (l >> (4 * h + 4))), *q= (const char*)(LV(h) + (x >> (4 * h + 4)));
    _mm_prefetch(p, _MM_HINT_T0), _mm_prefetch(p + 64, _MM_HINT_T0);
    _mm_prefetch(q, _MM_HINT_T0), _mm_prefetch(q + 64, _MM_HINT_T0);
   }
  }
  template <class F> void build(const F& init) {
   int cnt[8];
-  H= layout(n, cnt, mem0, mem1, v0, lv);
-  for(int i= 0; i < n; ++i) v0[i]= Z(init(i)).val();
+  H= layout(n, cnt, mem0, mem1, loff);
+  for(int i= 0; i < n; ++i) V0()[i]= Z(init(i)).val();
   for(int h= 1; h < H; ++h)
    for(int b= 0; b < cnt[h]; ++b)
-    for(int j= 0; j < 16; ++j) lv[h][b].m[j]= 1, lv[h][b].a[j]= 0;
+    for(int j= 0; j < 16; ++j) LV(h)[b].m[j]= 1, LV(h)[b].a[j]= 0;
  }
 public:
  Dual()= default;
@@ -391,17 +396,17 @@ public:
  template <class F, std::enable_if_t<std::is_invocable_r_v<Z, const F&, int>, int> = 0> Dual(int n, const F& init): n(n) { build(init); }
  int size() const { return n; }
  Z get(int i) const {
-  u64 v= v0[i];
+  u64 v= V0()[i];
   for(int h= 1; h < H; ++h) {
    const int c= i >> (4 * h);
-   v= (u64(lv[h][c >> 4].m[c & 15]) * v + lv[h][c >> 4].a[c & 15]) % P;
+   v= (u64(LV(h)[c >> 4].m[c & 15]) * v + LV(h)[c >> 4].a[c & 15]) % P;
   }
   return Z::raw(u32(v));
  }
  Z operator[](int i) const { return get(i); }
  void set(int i, Z x) {
   for(int h= H - 1; h >= 1; --h) push(h, i >> (4 * h));
-  v0[i]= x.val();
+  V0()[i]= x.val();
  }
  [[gnu::always_inline]] void apply(int l, int r, const E& f) {
   if(l >= r) return;
