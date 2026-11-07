@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cassert>
 #include <limits>
+#include <memory>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -18,6 +19,9 @@
 // 2 回目からの flow と、上限が効く最初の flow は Dinic で流す (DFS は再帰しない)。容量を少し変えて少しだけ流し直す
 // 使い方では、呼ぶたびにグラフ全体の BFS がかかる push-relabel より速い。辺は flow を呼んだときに CSR に組み、そのあと
 // 辺を足したら、流量を保ったまま組み直す。今の流れから続けて流すので、終点の違う flow を何度呼んでもよい。
+// メモリは、組んだあとに、弧 1 本 (辺ごとに 2 本) につき 8 + sizeof(Cap) バイト、辺ごとに 5 バイト (順向きの弧の位置と容量の
+// 形)、頂点ごとに int 6 つと Cap 1 つ (と、使った高さの分の表) を使う。逆向きの容量が 0 でも容量と同じでもない辺があると、
+// 辺ごとに Cap 1 つが増える。add_edge で溜めた辺は、組みながら捨てる。
 // 方式は procon-judge の loj-127、self-flow-maxflow、self-flow-maxflow-shapes、aoj-2803、aoj-2313、aoj-2835 で比べて
 // 選んだ。記録は algo-notes の notes/network-flow.md と notes/network-flow-api.md。
 // Cap は整数の型。辺ごとの cap + rev_cap と、s から t への流量の答えが Cap に収まること。
@@ -29,14 +33,16 @@ public:
   Cap cap, rev_cap, flow;  // flow は from から to へ正、逆向きに流れていれば負
  };
  explicit MaxFlow(int n= 0): n_(n) {}
- int add_vertex() { return sync(), built_= false, n_++; }
+ int add_vertex() { return finish(), built_= false, n_++; }
  // from から to へ容量 cap、逆向きに容量 rev_cap の辺。番号を返す。
  int add_edge(int from, int to, Cap cap, Cap rev_cap= 0) {
   assert(0 <= from && from < n_ && 0 <= to && to < n_ && cap >= 0 && rev_cap >= 0);
-  sync();
-  eu_.push_back(from), ev_.push_back(to), ecap_.push_back(cap), erev_.push_back(rev_cap), eflow_.push_back(0);
+  finish();
+  if((npe_ & (CH - 1)) == 0 && npe_ > 0) pe_.emplace_back().reserve(CH);
+  else if(npe_ == 0 && pe_.empty()) pe_.emplace_back();
+  pe_.back().push_back({from, to, cap, rev_cap});
   built_= false;
-  return int(eu_.size()) - 1;
+  return m_ + npe_++;
  }
  // s から t へ流せるだけ流し、増えた量を返す。今の流れから続ける。
  Cap flow(int s, int t) { return run(s, t, false, 0); }
@@ -53,14 +59,11 @@ public:
     if(const A& a= as_[k]; a.cap > 0 && !vis[a.to]) vis[a.to]= true, q.push_back(a.to);
   return vis;
  }
- Edge get_edge(int i) {
-  sync();
-  return {eu_[i], ev_[i], ecap_[i], erev_[i], eflow_[i]};
- }
+ Edge get_edge(int i) { return finish(), edge_at(i); }
  std::vector<Edge> edges() {
-  sync();
-  std::vector<Edge> ret(eu_.size());
-  for(size_t i= 0; i < eu_.size(); ++i) ret[i]= {eu_[i], ev_[i], ecap_[i], erev_[i], eflow_[i]};
+  finish();
+  std::vector<Edge> ret(m_ + npe_);
+  for(int i= 0; i < (int)ret.size(); ++i) ret[i]= edge_at(i);
   return ret;
  }
  // 辺 i の容量を cap、逆向きの容量を rev_cap に変える。今の流れは s から t への流れとする。流量が新しい容量に収まらない分は、
@@ -68,14 +71,17 @@ public:
  Cap change_cap(int i, Cap cap, Cap rev_cap, int s, int t) {
   assert(cap >= 0 && rev_cap >= 0);
   build(), finish();
-  if(pos_[i] < 0) return ecap_[i]= cap, erev_[i]= rev_cap, 0;
-  A& a= as_[pos_[i]];
-  int u= eu_[i], v= ev_[i];
-  Cap f= cap_of_forward(i), ext= 0;
-  ecap_[i]= cap, erev_[i]= rev_cap;
+  if(pos_[i] < 0) {
+   L& l= loops_[-1 - pos_[i]];
+   return l.c= cap, l.r= rev_cap, 0;
+  }
+  A &a= as_[pos_[i]], &b= as_[a.rev];
+  int u= b.to, v= a.to;
+  Cap f= cap_of(i) - a.cap, ext= 0;
+  set_kind(i, cap, rev_cap);
   if(f > cap) ext= f - cap, f= cap;
   else if(f < -rev_cap) ext= -rev_cap - f, f= -rev_cap, std::swap(u, v);
-  a.cap= cap - f, as_[a.rev].cap= rev_cap + f, eflow_[i]= f;
+  a.cap= cap - f, b.cap= rev_cap + f;
   if(ext == 0) return 0;
   // u に ext だけ余り、v に ext だけ足りない。
   ext-= flow(u, v, ext);
@@ -86,18 +92,19 @@ public:
   finish();
   return ext;
  }
- Cap change_cap(int i, Cap cap, int s, int t) { return change_cap(i, cap, erev_[i], s, t); }
+ Cap change_cap(int i, Cap cap, int s, int t) { return build(), finish(), change_cap(i, cap, edge_at(i).rev_cap, s, t); }
  // 今の流れ (s から t への流れとする) を、s から t への道に分ける。道ごとの流量と、通る辺の番号の列を返す。逆向きの容量
  // のある辺は、to から from へ通ることもある。流れの中の循環は道に含めない。
  std::vector<std::pair<Cap, std::vector<int>>> decompose(int s, int t) {
-  sync();
-  const int m= eu_.size();
+  finish();
+  const int m= m_ + npe_;
   std::vector<Cap> rem(m);
   std::vector<int> head(n_ + 1, 0), arc;
-  auto tail= [&](int i) { return eflow_[i] > 0 ? eu_[i] : ev_[i]; };
-  auto tip= [&](int i) { return eflow_[i] > 0 ? ev_[i] : eu_[i]; };
+  // 流れのある辺の、流れの向きでの始点と終点。
+  auto tail= [&](int i) { const Edge e= edge_at(i); return e.flow > 0 ? e.from : e.to; };
+  auto tip= [&](int i) { const Edge e= edge_at(i); return e.flow > 0 ? e.to : e.from; };
   for(int i= 0; i < m; ++i)
-   if(eflow_[i] != 0 && eu_[i] != ev_[i]) rem[i]= eflow_[i] > 0 ? eflow_[i] : -eflow_[i], ++head[tail(i) + 1];
+   if(const Edge e= edge_at(i); e.flow != 0 && e.from != e.to) rem[i]= e.flow > 0 ? e.flow : -e.flow, ++head[tail(i) + 1];
   for(int x= 0; x < n_; ++x) head[x + 1]+= head[x];
   arc.resize(head[n_]);
   {
@@ -150,23 +157,72 @@ private:
  struct A {
   int to, rev;
   Cap cap;
+  // resize で 0 を書かない (組むときに全部の位置へ書く)。書くまでページを触らないので、溜めた辺を捨てながら組める。
+  A() {}
+  A(int to, int rev, Cap cap): to(to), rev(rev), cap(cap) {}
  };
- int n_;
+ struct P {  // まだ CSR に組んでいない辺
+  int u, v;
+  Cap c, r;
+ };
+ struct L {  // 自己ループ (流れないので CSR に入れない)
+  int u;
+  Cap c, r;
+ };
+ // 組んでいない辺 (番号が m_ 以上) は、CH 本ずつの塊に分けて pe_ に溜める。組むときに読み終えた塊から捨てるので、塊と
+ // CSR の弧の両方を全部持つ時間を短くできる (弧へ書く場所が前から順に進むグラフでは、ピークがほぼ弧の分だけになる)。
+ // 最初の塊は普通に伸ばし、小さいグラフで大きな塊を確保しない。
+ static constexpr int CH= 1 << 14;
+ int n_, m_= 0, npe_= 0;
  bool built_= false, pending_= false, used_= false;  // used_: 一度 flow を呼んだ
  int ps_= -1, pt_= -1;                               // 余りを戻す段が残っている flow の s と t
- std::vector<int> eu_, ev_;
- std::vector<Cap> ecap_, erev_, eflow_;
- std::vector<int> st_, pos_;  // pos_[i] = arc index of edge i (forward)
+ std::vector<std::vector<P>> pe_;
+ std::vector<L> loops_;
+ // 組んだ辺 i について、pos_[i] は順向きの弧の位置 (自己ループなら -1 - loops_ の番号)。元の容量は、2 本の弧の残余容量の
+ // 和 (cap + rev_cap のまま変わらない) から、kind_[i] が 0 (rev_cap = 0) なら和、1 (rev_cap = cap) なら和の半分として
+ // 求める。2 (どちらでもない) の辺があるときだけ、全部の辺の元の容量を ecap_ に持つ。端点と流量も弧から求める。
+ std::vector<int> st_, pos_;
+ std::vector<unsigned char> kind_;
+ std::vector<Cap> ecap_;
  std::vector<A> as_;
- std::vector<int> h_, cur_, anext_, atail_, ahead_, bnext_, bprev_, bhead_, q_;
+ // 高さごとの表 (ahead_、atail_、bhead_) は頂点の数だけ確保するが、0 で埋めず、使った高さ (hinit_ 未満) までだけ -1 で
+ // 初期化する。書いていないページは常駐しないので、高さが低いままのグラフでは表の分のメモリがほとんど要らない。
+ std::vector<int> h_, cur_, anext_, bnext_, bprev_;
+ std::unique_ptr<int[]> ahead_, atail_, bhead_;
+ int hinit_= 0;
  std::vector<Cap> ex_;
  int amax_= -1, bmax_= -1;  // global relabel が決める、活性な頂点と頂点の高さの最大
- Cap cap_of_forward(int i) const { return pos_[i] < 0 ? Cap(0) : ecap_[i] - as_[pos_[i]].cap; }
- void sync() {
-  if(!built_) return;
-  finish();
-  for(size_t i= 0; i < pos_.size(); ++i)
-   if(pos_[i] >= 0) eflow_[i]= ecap_[i] - as_[pos_[i]].cap;
+ // 組んだ辺 i (自己ループでない) の元の容量。
+ Cap cap_of(int i) const {
+  if(kind_[i] == 2) return ecap_[i];
+  const A& a= as_[pos_[i]];
+  const Cap sum= a.cap + as_[a.rev].cap;
+  return kind_[i] ? sum / 2 : sum;
+ }
+ static unsigned char kind_of(Cap cap, Cap rev_cap) { return rev_cap == 0 ? 0 : rev_cap == cap ? 1 : 2; }
+ // 組んだ辺 i の容量の形を、新しい容量に合わせて直す。ecap_ を持っていなければ、今の容量から作ってから直す。
+ void set_kind(int i, Cap cap, Cap rev_cap) {
+  const unsigned char k= kind_of(cap, rev_cap);
+  if(k == 2 && ecap_.empty()) {
+   ecap_.resize(m_);
+   for(int j= 0; j < m_; ++j)
+    if(pos_[j] >= 0) ecap_[j]= cap_of(j);
+  }
+  kind_[i]= k;
+  if(!ecap_.empty()) ecap_[i]= cap;
+ }
+ Edge edge_at(int i) const {
+  if(i >= m_) {
+   const P& e= pe_[(i - m_) / CH][(i - m_) % CH];
+   return {e.u, e.v, e.c, e.r, 0};
+  }
+  if(pos_[i] < 0) {
+   const L& l= loops_[-1 - pos_[i]];
+   return {l.u, l.u, l.c, l.r, 0};
+  }
+  const A &a= as_[pos_[i]], &b= as_[a.rev];
+  const Cap c= cap_of(i);
+  return {b.to, a.to, c, Cap(a.cap + b.cap - c), Cap(c - a.cap)};
  }
  // 保留している、余りを s へ戻す段を回す。
  void finish() {
@@ -174,23 +230,74 @@ private:
   discharge_all(ps_, pt_);
   ex_[ps_]= 0, pending_= false;
  }
+ void init_heights(int d) {  // 高さ d までの表を使えるようにする
+  for(; hinit_ <= d; ++hinit_) ahead_[hinit_]= bhead_[hinit_]= -1;
+ }
+ // 組んでいない辺を CSR に組む。前に組んだ辺があれば、今の残余容量のまま組んでいない辺の前に戻してから組み直す。CSR の
+ // 弧は頂点ごとに辺の番号の順に並ぶ。組んだあとに、元の容量の形 kind_ と頂点ごとの配列を確保する。
  void build() {
   if(built_) return;
-  const int n= n_, m= eu_.size();
-  st_.assign(n + 1, 0), pos_.assign(m, -1);
-  for(int i= 0; i < m; ++i)
-   if(eu_[i] != ev_[i]) ++st_[eu_[i] + 1], ++st_[ev_[i] + 1];
+  const int n= n_, m0= m_;
+  if(m0 > 0) {
+   std::vector<std::vector<P>> all;
+   int cnt= 0;
+   auto push= [&](const P& e) {
+    if(cnt % CH == 0) all.emplace_back().reserve(CH);
+    all.back().push_back(e), ++cnt;
+   };
+   for(int i= 0; i < m0; ++i)
+    if(pos_[i] >= 0) {
+     const A &a= as_[pos_[i]], &b= as_[a.rev];
+     push({b.to, a.to, a.cap, b.cap});
+    } else {
+     const L& l= loops_[-1 - pos_[i]];
+     push({l.u, l.u, l.c, l.r});
+    }
+   for(const auto& ch: pe_)
+    for(const P& e: ch) push(e);
+   pe_.swap(all), npe_= cnt;
+   std::vector<A>().swap(as_);
+  }
+  const int m= npe_;
+  st_.assign(n + 1, 0), pos_.resize(m), kind_.resize(m), loops_.clear();
+  for(const auto& ch: pe_)
+   for(const P& e: ch)
+    if(e.u != e.v) ++st_[e.u + 1], ++st_[e.v + 1];
   for(int v= 0; v < n; ++v) st_[v + 1]+= st_[v];
   as_.resize(st_[n]);
-  std::vector<int> p(st_.begin(), st_.end() - 1);
-  for(int i= 0; i < m; ++i)
-   if(eu_[i] != ev_[i]) {
-    const int a= p[eu_[i]]++, b= p[ev_[i]]++;
-    as_[a]= {ev_[i], b, ecap_[i] - eflow_[i]}, as_[b]= {eu_[i], a, erev_[i] + eflow_[i]};
-    pos_[i]= a;
+  bool general= !ecap_.empty();
+  {
+   std::vector<int> p(st_.begin(), st_.end() - 1);
+   int i= 0;
+   for(auto& ch: pe_) {
+    for(const P& e: ch) {
+     if(e.u == e.v) pos_[i]= -1 - (int)loops_.size(), loops_.push_back({e.u, e.c, e.r});
+     else {
+      const int a= p[e.u]++, b= p[e.v]++;
+      as_[a]= {e.v, b, e.c}, as_[b]= {e.u, a, e.r};
+      pos_[i]= a;
+     }
+     // 前に組んだ辺は元の容量の形をそのまま使う (残余容量は元の容量ではない)。
+     if(i >= m0) general|= (kind_[i]= e.u == e.v ? 0 : kind_of(e.c, e.r)) == 2;
+     ++i;
+    }
+    std::vector<P>().swap(ch);  // 読み終えた塊は捨てる
    }
-  h_.assign(n, 0), cur_.assign(n, 0), anext_.assign(n, -1), atail_.assign(n + 1, -1), ahead_.assign(n + 1, -1);
-  bnext_.assign(n, -1), bprev_.assign(n, -1), bhead_.assign(n + 1, -1), q_.assign(n, 0), ex_.assign(n, 0);
+  }
+  std::vector<std::vector<P>>().swap(pe_), npe_= 0;
+  if(general) {
+   if(ecap_.empty()) {
+    ecap_.resize(m0);
+    for(int j= 0; j < m0; ++j)
+     if(pos_[j] >= 0) ecap_[j]= cap_of(j);
+   }
+   ecap_.resize(m);
+   for(int j= m0; j < m; ++j)
+    if(pos_[j] >= 0) ecap_[j]= as_[pos_[j]].cap;
+  }
+  m_= m;
+  h_.assign(n, 0), cur_.assign(n, 0), anext_.assign(n, -1), bnext_.assign(n, -1), bprev_.assign(n, -1), ex_.assign(n, 0);
+  ahead_.reset(new int[n + 1]), atail_.reset(new int[n + 1]), bhead_.reset(new int[n + 1]), hinit_= 0;
   built_= true;
  }
  // 高さを sink からの距離に直す (global relabel)。excl は使わない頂点 (高さ n に置く)。活性な頂点の表と高さごとの頂点の
@@ -203,24 +310,25 @@ private:
  template <int CUT> double global_relabel(int sink, int excl, double& alive) {
   const int n= n_;
   std::fill(h_.begin(), h_.end(), n);
-  std::fill(ahead_.begin(), ahead_.end(), -1), std::fill(bhead_.begin(), bhead_.end(), -1);
+  std::fill(ahead_.get(), ahead_.get() + hinit_, -1), std::fill(bhead_.get(), bhead_.get() + hinit_, -1);
+  // 待ち行列は cur_ を借りる (BFS のあとで今の弧を先頭に書き直す)。
+  std::vector<int>& q= cur_;
   int amax= -1, bmax= -1, qh= 0, qt= 0, lay= 0;
   double e= 0, reach= 1e300, c= 0, e0= 0;  // e0: 取り出している層より下の余り
-  h_[sink]= 0, q_[qt++]= sink;
+  h_[sink]= 0, q[qt++]= sink;
   while(qh < qt) {
-   const int u= q_[qh++], du= h_[u], d= du + 1;
-   if constexpr(CUT == 1) {
-    if(du != lay) {
+   const int u= q[qh++], du= h_[u], d= du + 1;
+   if(du != lay) {
+    if constexpr(CUT == 1)
      if(lay > 0) reach= std::min(reach, e0 + c);
-     lay= du, c= 0, e0= e;
-    }
-    if(du > 0) e+= double(ex_[u]);
+    lay= du, c= 0, e0= e;
    }
+   if(d >= hinit_) init_heights(d);
    for(int k= st_[u]; k < st_[u + 1]; ++k) {
     const A& a= as_[k];
     if(const int w= a.to, hw= h_[w]; hw == n) {
      if(w != excl && as_[a.rev].cap > 0) {
-      h_[w]= d, q_[qt++]= w, cur_[w]= st_[w];
+      h_[w]= d, q[qt++]= w;
       bnext_[w]= bhead_[d], bprev_[w]= -1;
       if(bhead_[d] >= 0) bprev_[bhead_[d]]= w;
       bhead_[d]= w, bmax= d;
@@ -229,24 +337,25 @@ private:
        if(ahead_[d] < 0) ahead_[d]= atail_[d]= w;
        else anext_[atail_[d]]= w, atail_[d]= w;
        amax= d;
-       if constexpr(CUT != 1) e+= double(ex_[w]);
       }
      }
     } else if constexpr(CUT == 1) {
      if(hw == du - 1) c+= double(a.cap);
     }
    }
+   if(du > 0) e+= double(ex_[u]);
   }
-  amax_= amax, bmax_= bmax, alive= e;
-  if constexpr(CUT == 1) {
+  if constexpr(CUT == 1)
    if(lay > 0) reach= std::min(reach, e0 + c);
-  } else if constexpr(CUT == 2) {
+  std::copy(st_.begin(), st_.end() - 1, cur_.begin());
+  amax_= amax, bmax_= bmax, alive= e;
+  if constexpr(CUT == 2) {
    // 前向きの BFS で余りからたどれる頂点を回りながら、層ごとの余り el と、層 d から d - 1 への弧の容量 cl を足す。
    std::vector<char> mk(n);
    std::vector<double> cl(bmax + 2), el(bmax + 2);
    std::vector<int> f;
-   for(int i= 1; i < qt; ++i)
-    if(const int u= q_[i]; ex_[u] > 0) mk[u]= 1, f.push_back(u);
+   for(int u= 0; u < n; ++u)
+    if(h_[u] < n && u != sink && ex_[u] > 0) mk[u]= 1, f.push_back(u);
    for(size_t i= 0; i < f.size(); ++i) {
     const int u= f[i], du= h_[u];
     el[du]+= double(ex_[u]);
@@ -269,7 +378,7 @@ private:
  // がなくなったら true を返す。global relabel のたびに作り直す状態だけを持つ関数に分けて、ループの中の変数を減らす。
  bool pump(int sink, long long freq) {
   const int n= n_;
-  int amax= amax_, bmax= bmax_;
+  int amax= amax_, bmax= bmax_, hinit= hinit_;
   auto ins_b= [&](int v, int d) {
    bnext_[v]= bhead_[d], bprev_[v]= -1;
    if(bhead_[d] >= 0) bprev_[bhead_[d]]= v;
@@ -327,11 +436,14 @@ private:
      break;
     }
     h_[v]= hv= nh, cur_[v]= nk;
+    if(nh >= hinit) {
+     for(; hinit <= nh; ++hinit) ahead_[hinit]= bhead_[hinit]= -1;
+    }
     ins_b(v, nh), bmax= std::max(bmax, nh);
    }
-   if(work > freq) return false;
+   if(work > freq) return hinit_= hinit, false;
   }
-  return true;
+  return hinit_= hinit, true;
  }
  // 余りのある頂点から sink への増加路で流す (始点の多い Dinic)。層は sink からの距離で、余りを途中の頂点に残さない。
  // 余りのある頂点から sink へ残余グラフでたどれなくなれば true。仕事量 (BFS 1 回につき n と弧の数、DFS は見た弧の数、
@@ -340,17 +452,18 @@ private:
   const int n= n_;
   std::vector<int> stk, src;
   long long spent= 0;
+  std::vector<int>& q= bnext_;  // 待ち行列は、ここでは使わない層の表を借りる (このあと global relabel で作り直す)
   for(;;) {
    if((spent+= n + st_[n]) > budget) return false;
    std::fill(h_.begin(), h_.end(), n);
    int qh= 0, qt= 0;
-   h_[sink]= 0, q_[qt++]= sink;
+   h_[sink]= 0, q[qt++]= sink;
    src.clear();
    while(qh < qt) {
-    const int u= q_[qh++], d= h_[u] + 1;
+    const int u= q[qh++], d= h_[u] + 1;
     for(int k= st_[u]; k < st_[u + 1]; ++k)
      if(const A& a= as_[k]; h_[a.to] == n && a.to != excl && as_[a.rev].cap > 0) {
-      h_[a.to]= d, q_[qt++]= a.to, cur_[a.to]= st_[a.to];
+      h_[a.to]= d, q[qt++]= a.to, cur_[a.to]= st_[a.to];
       if(ex_[a.to] > 0) src.push_back(a.to);
      }
    }
@@ -432,15 +545,16 @@ private:
  Cap augment(int s, int t, Cap limit) {
   Cap total= 0;
   std::vector<int>& lv= h_;
+  std::vector<int>& q= bnext_;  // 待ち行列は、push-relabel の層の表を借りる (余りを戻す段は global relabel で作り直す)
   std::vector<int> stk;
   while(total < limit) {
    std::fill(lv.begin(), lv.end(), -1);
    int qh= 0, qt= 0;
-   lv[s]= 0, q_[qt++]= s;
+   lv[s]= 0, q[qt++]= s;
    while(qh < qt && lv[t] < 0) {
-    const int u= q_[qh++];
+    const int u= q[qh++];
     for(int k= st_[u]; k < st_[u + 1]; ++k)
-     if(const A& a= as_[k]; a.cap > 0 && lv[a.to] < 0) lv[a.to]= lv[u] + 1, q_[qt++]= a.to;
+     if(const A& a= as_[k]; a.cap > 0 && lv[a.to] < 0) lv[a.to]= lv[u] + 1, q[qt++]= a.to;
    }
    if(lv[t] < 0) break;
    std::copy(st_.begin(), st_.end() - 1, cur_.begin());
