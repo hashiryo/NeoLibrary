@@ -28,7 +28,7 @@ bool operator==(const Matrix& l, const Matrix& r);
 
 要素の型 `T` は、和 (`+`)、積 (`*`)、0、1 を持つ半環であればよく、積は可換でなくてかまいません。0 と 1 は、`T` に静的メンバ関数 `zero()` と `one()` があればそれを、なければ `T(0)` と `T(1)` を使います。`neo/algebra/semiring.hpp` の `MinPlus` などは前者です。引き算とスカラー倍は、`T` がそれを持つときだけ使えます。
 
-`A * B` は $h \times m$ と $m \times w$ の積、`A * v` は列ベクトルとの積、`A.pow(k)` は正方行列の $k$ 乗です。一般の `T` では、積は i-k-j の順に足す $O(hmw)$、累乗は二分累乗です。
+`A * B` は $h \times m$ と $m \times w$ の積、`A * v` は列ベクトルとの積、`A.pow(k)` は正方行列の $k$ 乗です。一般の `T` では、積は i-k-j の順に足す $O(hmw)$、累乗は二分累乗です。`MinPlus` と `MaxPlus` の値が速い道の範囲 (`neo/algebra/semiring.hpp`) にあれば、INF の比べのない和で掛けます。値が `int` なら、x86 でどの辺も 16 以上のとき、4 行 × 16 列の和を 8 本の ymm に持つタイルで掛けます。
 
 ## ZMod の行列
 
@@ -47,6 +47,8 @@ Strassen の再帰は yosupo-matrix-product の zmod_winograd_hpo を、実行�
 行列の値を持つ配列を huge page に置くのも同じ理由です。matrix-product の lib-neo は、4 MB の行列を 3 つ (入力の 2 つと答え) 作るので、`std::vector<T>` に持つ形では写し元より 9 ms 遅くなっていました。
 
 Frobenius 標準形の道は yosupo-pow-of-matrix の zmod_frob を、静的な素数の法と `ZMod<0>` の素数の法に広げたものです。乱数のベクトルから Krylov の鎖を作り、それまでの鎖の張る空間に入ったところで止めて、関係から鎖の多項式を読みます。前の鎖の成分が残れば、それを鎖の多項式で割って始めのベクトルから引き、鎖を作り直します。A を同伴行列を並べたブロック対角の形 $F$ に直し、$A^K = T F^K T^{-1}$ を 2 回のタイルの積で求めます。写し元は鎖ごとに乱数を選び直していましたが、法が小さいと前の鎖が最小多項式の次数を外して割り切れなくなり、法 2 の乱択の行列で 3 割ほどが二分累乗に落ちていました。そこで、法が 1024 未満なら乱数のベクトルを 4 本試して鎖の最も長いものを選び、割り切れなければ最初からやり直します (法が小さければ 8 回、大きければ 2 回まで)。それでも駄目なら二分累乗にします。法が素数かどうかは、底 2、7、61 の Miller-Rabin で調べます。静的な法ならコンパイル時に、`ZMod<0>` なら最後に調べた法の結果を覚えておきます。鎖を作る内積は、最後に 4 本の和を $2^{32}$ の位で 2 回畳んでから u64 のまま足し、剰余を 1 回だけ取ります。`ZMod` の足し算 ($2M$ 以上なら引く) と `val()` でまとめると、x64 の GCC がその比べを分岐にして予測を外します。EPYC 7763 の x64-gcc では、その形で yosupo-pow-of-matrix の合計が 7% 増えていました (procon-judge の run 42351839787)。
+
+`MinPlus<int>` と `MaxPlus<int>` のタイルは、procon-judge の cf-147-b の maxplus_tile2 を写したものです。行と列を広げた `int` の配列に写し ($O(n^2)$)、B を 16 列の帯ごとに k の向きに読みます。k ごとに B の 2 本を読み、A の 4 個を広げて、vpaddd と vpminsd (vpmaxsd) を 8 本ずつ行います。k のループは 2 回ずつ展開し、k ごとに 8 本の和を空の asm に通します。通さないと x64 の GCC 15 は、和を毎回別のレジスタに求めてから戻す vmovdqa を 8 本付け、1 本はスタックにも書いていました。cf-147-b は、300 次の max-plus の行列の 2 の冪と、上の bit から掛ける積を求める問題です。EPYC 7763 の x64-gcc で、maxplus_tile2 は 19.68 ms、空の asm のないタイルは 28.28 ms、i-k-j の lib-neo は 39.09 ms でした (run 42356059466)。arm では、SIMDe のタイルが arm の gcc で i-k-j の 2 倍以上遅かったので (Neoverse-N2 の run 42353789021)、i-k-j のままにします。
 
 写し元の CI の記録は、x64-gcc で次のとおりです。yosupo-matrix-product の zmod_winograd_hpo は EPYC 7763 で 49.80 ms でした (run 41412829910)。同じ回の zmod_strassen は 62.77 ms、Library Checker の首位の写しは 72.59 ms、今の Library は 887.54 ms です。yosupo-pow-of-matrix の zmod_frob は EPYC 9V45 で 6.21 ms (106 倍) でした。この行列を呼ぶ lib-neo の提出は、手元の M2 (SIMDe) で写し元と並びました。matrix-product の最大のケースは 82.1 ms と 79.8 ms、pow-of-matrix は 11.0 ms と 10.8 ms です。matrix-product の 22 ケースの合計は 370.6 ms と 477.9 ms で、辺 600 から 800 の長方形を、1024 まで広げずタイルで掛ける分だけ短くなっています。手元で決めた切り替えの大きさは、x64 では測り直していません。
 

@@ -115,6 +115,44 @@ template <class T> constexpr T one() {
 template <class T> [[gnu::always_inline]] inline void fast_axpy(T* __restrict c, const T* __restrict r, T x, int n) {
  for(int j= 0; j < n; ++j) c[j]+= T::fast_mul(x, r[j]);
 }
+#ifdef __x86_64__
+// MinPlus<int> と MaxPlus<int> の速い道の積 c = a b を、4 行 × 16 列の和を 8 本の ymm に持つタイルで求める。a は h4 行 × m 列、
+// b は m 行 × w16 列、c は h4 行 × w16 列で、h4 は 4 の倍数、w16 は 16 の倍数 (広げた行と列は 0 の値 z)。MIN なら min、そうで
+// なければ max で足す。和 x + y は範囲の判定を通った値どうしなので int を溢れない。b は 16 列の帯ごとに k の向きに読む (辺 300 なら
+// 帯は 19 KB で L1 に残る)。k のループは 2 回ずつ展開し、k ごとに 8 本の和を空の asm に通す。通さないと x64 の GCC 15 は和を毎回
+// 別のレジスタに求めてから戻す vmovdqa を 8 本付け、1 本はスタックにも書いていた (procon-judge の cf-147-b の maxplus_tile)。
+template <bool MIN> [[gnu::noinline]] inline void semiring_tile(const int* __restrict a, const int* __restrict b, int* __restrict c, int h4, int m, int w16, int z) {
+ const __m256i Z= _mm256_set1_epi32(z);
+ auto op= [](__m256i x, __m256i y) {
+  if constexpr(MIN) return _mm256_min_epi32(x, y);
+  else return _mm256_max_epi32(x, y);
+ };
+ for(int j0= 0; j0 < w16; j0+= 16)
+  for(int i0= 0; i0 < h4; i0+= 4) {
+   const int *x0= a + std::size_t(i0) * m, *x1= x0 + m, *x2= x1 + m, *x3= x2 + m;
+   const int* yb= b + j0;
+   __m256i c00= Z, c01= Z, c10= Z, c11= Z, c20= Z, c21= Z, c30= Z, c31= Z;
+#pragma GCC unroll 2
+   for(int k= 0; k < m; ++k) {
+    const __m256i y0= _mm256_loadu_si256((const __m256i*)(yb + std::size_t(k) * w16)), y1= _mm256_loadu_si256((const __m256i*)(yb + std::size_t(k) * w16 + 8));
+    __m256i t= _mm256_set1_epi32(x0[k]);
+    c00= op(c00, _mm256_add_epi32(t, y0)), c01= op(c01, _mm256_add_epi32(t, y1));
+    t= _mm256_set1_epi32(x1[k]);
+    c10= op(c10, _mm256_add_epi32(t, y0)), c11= op(c11, _mm256_add_epi32(t, y1));
+    t= _mm256_set1_epi32(x2[k]);
+    c20= op(c20, _mm256_add_epi32(t, y0)), c21= op(c21, _mm256_add_epi32(t, y1));
+    t= _mm256_set1_epi32(x3[k]);
+    c30= op(c30, _mm256_add_epi32(t, y0)), c31= op(c31, _mm256_add_epi32(t, y1));
+    asm("" : "+x"(c00), "+x"(c01), "+x"(c10), "+x"(c11), "+x"(c20), "+x"(c21), "+x"(c30), "+x"(c31));
+   }
+   int* cr= c + std::size_t(i0) * w16 + j0;
+   _mm256_storeu_si256((__m256i*)cr, c00), _mm256_storeu_si256((__m256i*)(cr + 8), c01), cr+= w16;
+   _mm256_storeu_si256((__m256i*)cr, c10), _mm256_storeu_si256((__m256i*)(cr + 8), c11), cr+= w16;
+   _mm256_storeu_si256((__m256i*)cr, c20), _mm256_storeu_si256((__m256i*)(cr + 8), c21), cr+= w16;
+   _mm256_storeu_si256((__m256i*)cr, c30), _mm256_storeu_si256((__m256i*)(cr + 8), c31);
+  }
+}
+#endif
 template <class T> struct is_zmod: std::false_type {};
 template <unsigned M> struct is_zmod<ZMod<M>>: std::true_type {};
 template <class T> constexpr bool is_zmod_v= is_zmod<T>::value;
@@ -814,6 +852,24 @@ template <class T> struct Matrix {
                 }) {
     const bool one= T::fast_one_sided(l.a.data(), l.a.size()) && T::fast_one_sided(r.a.data(), r.a.size());
     if(one || (T::fast_bounded(l.a.data(), l.a.size()) && T::fast_bounded(r.a.data(), r.a.size()))) {
+#ifdef __x86_64__
+     // MinPlus<int> と MaxPlus<int> で、どの辺も 16 以上なら、行と列を広げた int の配列に写してタイルで掛ける。
+     if constexpr(requires { T::zero().x; } && sizeof(T) == sizeof(int) && std::is_same_v<std::remove_cvref_t<decltype(T::zero().x)>, int>) {
+      if(l.h >= 16 && l.w >= 16 && r.w >= 16) {
+       constexpr int z= T::zero().x;
+       const int h4= (l.h + 3) & ~3, m= l.w, w16= (r.w + 15) & ~15;
+       linalg_internal::hvec<int> a(std::size_t(h4) * m, z), b(std::size_t(m) * w16, z), t(std::size_t(h4) * w16);
+       for(int i= 0; i < l.h; ++i)
+        for(int k= 0; k < m; ++k) a[std::size_t(i) * m + k]= l[i][k].x;
+       for(int k= 0; k < m; ++k)
+        for(int j= 0; j < r.w; ++j) b[std::size_t(k) * w16 + j]= r[k][j].x;
+       linalg_internal::semiring_tile<(z > 0)>(a.data(), b.data(), t.data(), h4, m, w16, z);
+       for(int i= 0; i < l.h; ++i)
+        for(int j= 0; j < r.w; ++j) c[i][j]= T::fast_fix(T(t[std::size_t(i) * w16 + j]), !one);
+       return c;
+      }
+     }
+#endif
      for(int i= 0; i < l.h; ++i) {
       T* ci= c[i];
       for(int k= 0; k < l.w; ++k) linalg_internal::fast_axpy(ci, r[k], l[i][k], r.w);
