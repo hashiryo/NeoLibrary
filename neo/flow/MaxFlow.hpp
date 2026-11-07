@@ -1,16 +1,11 @@
 #pragma once
 #include <algorithm>
 #include <cassert>
-#include <cstdint>
 #include <limits>
 #include <memory>
 #include <type_traits>
 #include <utility>
 #include <vector>
-#ifdef __linux__
-#include <sys/mman.h>
-#include <unistd.h>
-#endif
 // 最大流。ACL の mf_graph と同じく、add_edge で辺を足して番号を受け取り、flow(s, t) か flow(s, t, limit) で流し、
 // min_cut(s)、get_edge(i)、edges() で解を取り出す。ACL に無いものとして、逆向きの容量 (無向辺)、流れを保ったまま
 // 容量を変える change_cap、流れを道に分ける decompose がある。
@@ -239,19 +234,6 @@ private:
  void init_heights(int d) {  // 高さ d までの表を使えるようにする
   for(; hinit_ <= d; ++hinit_) ahead_[hinit_]= bhead_[hinit_]= -1;
  }
- // 溜めた辺の塊を捨てる。Linux では先にページを返す。入力を vector に読んだあとなどで glibc の mmap の閾値が上がって
- // いると、塊は mmap でなくヒープに置かれ、free しても組み終えるまで常駐のまま残るため (容量が int の 1000×1000 の格子で、
- // ピークが 115 MB から 142 MB に増えた)。
- static void drop(std::vector<P>& ch) {
-#ifdef __linux__
-  if(const std::size_t bytes= ch.capacity() * sizeof(P); bytes >= (std::size_t(1) << 16)) {
-   const std::uintptr_t pg= sysconf(_SC_PAGESIZE), p= reinterpret_cast<std::uintptr_t>(ch.data());
-   const std::uintptr_t a= (p + pg - 1) & ~(pg - 1), b= (p + bytes) & ~(pg - 1);
-   if(a < b) madvise(reinterpret_cast<void*>(a), b - a, MADV_DONTNEED);
-  }
-#endif
-  std::vector<P>().swap(ch);
- }
  // 組んでいない辺を CSR に組む。前に組んだ辺があれば、今の残余容量のまま組んでいない辺の前に戻してから組み直す。CSR の
  // 弧は頂点ごとに辺の番号の順に並ぶ。組んだあとに、元の容量の形 kind_ と頂点ごとの配列を確保する。
  void build() {
@@ -300,7 +282,7 @@ private:
      if(i >= m0) general|= (kind_[i]= e.u == e.v ? 0 : kind_of(e.c, e.r)) == 2;
      ++i;
     }
-    drop(ch);  // 読み終えた塊は捨てる
+    std::vector<P>().swap(ch);  // 読み終えた塊は捨てる
    }
   }
   std::vector<std::vector<P>>().swap(pe_), npe_= 0;
