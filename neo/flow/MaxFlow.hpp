@@ -21,7 +21,8 @@
 // 辺を足したら、流量を保ったまま組み直す。今の流れから続けて流すので、終点の違う flow を何度呼んでもよい。
 // メモリは、組んだあとに、弧 1 本 (辺ごとに 2 本) につき 8 + sizeof(Cap) バイト、辺ごとに 5 バイト (順向きの弧の位置と容量の
 // 形)、頂点ごとに int 6 つと Cap 1 つ (と、使った高さの分の表) を使う。逆向きの容量が 0 でも容量と同じでもない辺があると、
-// 辺ごとに Cap 1 つが増える。add_edge で溜めた辺は、組みながら捨てる。
+// 辺ごとに Cap 1 つが増える。add_edge で溜めた辺は、組みながら捨てる。流している間の待ち行列や道の弧の列は、そのとき
+// 使っていない頂点ごとの配列を借りる。
 // 方式は procon-judge の loj-127、self-flow-maxflow、self-flow-maxflow-shapes、aoj-2803、aoj-2313、aoj-2835 で比べて
 // 選んだ。記録は algo-notes の notes/network-flow.md と notes/network-flow-api.md。
 // Cap は整数の型。辺ごとの cap + rev_cap と、s から t への流量の答えが Cap に収まること。
@@ -311,7 +312,7 @@ private:
   const int n= n_;
   std::fill(h_.begin(), h_.end(), n);
   std::fill(ahead_.get(), ahead_.get() + hinit_, -1), std::fill(bhead_.get(), bhead_.get() + hinit_, -1);
-  // 待ち行列は cur_ を借りる (BFS のあとで今の弧を先頭に書き直す)。
+  // 待ち行列は cur_ を借りる (最後に今の弧を先頭に書き直す)。
   std::vector<int>& q= cur_;
   int amax= -1, bmax= -1, qh= 0, qt= 0, lay= 0;
   double e= 0, reach= 1e300, c= 0, e0= 0;  // e0: 取り出している層より下の余り
@@ -347,29 +348,30 @@ private:
   }
   if constexpr(CUT == 1)
    if(lay > 0) reach= std::min(reach, e0 + c);
-  std::copy(st_.begin(), st_.end() - 1, cur_.begin());
   amax_= amax, bmax_= bmax, alive= e;
   if constexpr(CUT == 2) {
    // 前向きの BFS で余りからたどれる頂点を回りながら、層ごとの余り el と、層 d から d - 1 への弧の容量 cl を足す。
+   // 待ち行列は、続けて cur_ を借りる。
    std::vector<char> mk(n);
    std::vector<double> cl(bmax + 2), el(bmax + 2);
-   std::vector<int> f;
+   int fn= 0;
    for(int u= 0; u < n; ++u)
-    if(h_[u] < n && u != sink && ex_[u] > 0) mk[u]= 1, f.push_back(u);
-   for(size_t i= 0; i < f.size(); ++i) {
-    const int u= f[i], du= h_[u];
+    if(h_[u] < n && u != sink && ex_[u] > 0) mk[u]= 1, q[fn++]= u;
+   for(int i= 0; i < fn; ++i) {
+    const int u= q[i], du= h_[u];
     el[du]+= double(ex_[u]);
     for(int k= st_[u]; k < st_[u + 1]; ++k)
      if(const A& a= as_[k]; a.cap > 0) {
       const int w= a.to, hw= h_[w];
       if(hw == du - 1) cl[du]+= double(a.cap);
-      if(!mk[w] && hw < n && w != sink) mk[w]= 1, f.push_back(w);
+      if(!mk[w] && hw < n && w != sink) mk[w]= 1, q[fn++]= w;
      }
    }
    double below= 0;
    for(int d= 1; d <= bmax; ++d) reach= std::min(reach, below + cl[d]), below+= el[d];
    reach= std::min(reach, below);
   }
+  std::copy(st_.begin(), st_.end() - 1, cur_.begin());
   if constexpr(CUT == 0) return 0;
   else return std::max(0.0, e - reach);
  }
@@ -450,39 +452,39 @@ private:
  // 流すたびに道の長さ) が budget を超えたら、そこで止めて false を返す (流れは前流のまま)。
  bool augment_multi(int sink, int excl, long long budget) {
   const int n= n_;
-  std::vector<int> stk, src;
   long long spent= 0;
-  std::vector<int>& q= bnext_;  // 待ち行列は、ここでは使わない層の表を借りる (このあと global relabel で作り直す)
+  // 待ち行列 q、余りのある頂点の並び src、辿っている弧の列 stk は、ここでは使わない層の表と活性な頂点の表を借りる
+  // (このあと global relabel で作り直す)。
+  std::vector<int>&q= bnext_, &src= anext_, &stk= bprev_;
   for(;;) {
    if((spent+= n + st_[n]) > budget) return false;
    std::fill(h_.begin(), h_.end(), n);
-   int qh= 0, qt= 0;
+   int qh= 0, qt= 0, ns= 0;
    h_[sink]= 0, q[qt++]= sink;
-   src.clear();
    while(qh < qt) {
     const int u= q[qh++], d= h_[u] + 1;
     for(int k= st_[u]; k < st_[u + 1]; ++k)
      if(const A& a= as_[k]; h_[a.to] == n && a.to != excl && as_[a.rev].cap > 0) {
       h_[a.to]= d, q[qt++]= a.to, cur_[a.to]= st_[a.to];
-      if(ex_[a.to] > 0) src.push_back(a.to);
+      if(ex_[a.to] > 0) src[ns++]= a.to;
      }
    }
-   if(src.empty()) return true;
-   for(const int v0: src) {
+   if(ns == 0) return true;
+   for(int i0= 0; i0 < ns; ++i0) {
     // v0 から sink へ、高さが 1 ずつ下がる弧をたどる。sink に着いたら流し、詰まった弧の手前まで戻る。
-    stk.clear();
-    int v= v0;
+    const int v0= src[i0];
+    int v= v0, sp= 0;
     while(ex_[v0] > 0) {
      if(v == sink) {
       Cap d= ex_[v0];
       int cut= 0;
-      for(int i= 0; i < (int)stk.size(); ++i)
+      for(int i= 0; i < sp; ++i)
        if(as_[stk[i]].cap < d) d= as_[stk[i]].cap, cut= i;
-      for(const int k: stk) as_[k].cap-= d, as_[as_[k].rev].cap+= d;
+      for(int i= 0; i < sp; ++i) as_[stk[i]].cap-= d, as_[as_[stk[i]].rev].cap+= d;
       ex_[v0]-= d, ex_[sink]+= d;
-      spent+= stk.size();
-      stk.resize(cut);
-      v= stk.empty() ? v0 : as_[stk.back()].to;
+      spent+= sp;
+      sp= cut;
+      v= sp == 0 ? v0 : as_[stk[sp - 1]].to;
       continue;
      }
      int& k= cur_[v];
@@ -493,12 +495,12 @@ private:
      if(k == st_[v + 1]) {
       h_[v]= n;  // 行き止まり
       if(v == v0) break;
-      stk.pop_back();
-      v= stk.empty() ? v0 : as_[stk.back()].to;
+      --sp;
+      v= sp == 0 ? v0 : as_[stk[sp - 1]].to;
       ++cur_[v];
       continue;
      }
-     stk.push_back(k), v= as_[k].to;
+     stk[sp++]= k, v= as_[k].to;
     }
    }
   }
@@ -544,9 +546,8 @@ private:
  // Dinic で s から t へ limit まで流す。今の流れから続け、流し終えても正しい流れのまま。DFS は再帰しない。
  Cap augment(int s, int t, Cap limit) {
   Cap total= 0;
-  std::vector<int>& lv= h_;
-  std::vector<int>& q= bnext_;  // 待ち行列は、push-relabel の層の表を借りる (余りを戻す段は global relabel で作り直す)
-  std::vector<int> stk;
+  // 段は h_、待ち行列は bnext_、辿っている弧の列は bprev_ を借りる (余りを戻す段は global relabel で作り直す)。
+  std::vector<int>&lv= h_, &q= bnext_, &stk= bprev_;
   while(total < limit) {
    std::fill(lv.begin(), lv.end(), -1);
    int qh= 0, qt= 0;
@@ -558,19 +559,18 @@ private:
    }
    if(lv[t] < 0) break;
    std::copy(st_.begin(), st_.end() - 1, cur_.begin());
-   // stk は辿っている弧の列。t に着いたら bottleneck を流し、bottleneck の弧の手前まで戻る。
-   stk.clear();
-   int v= s;
+   // stk の先頭 sp 本が辿っている弧の列。t に着いたら bottleneck を流し、bottleneck の弧の手前まで戻る。
+   int v= s, sp= 0;
    while(total < limit) {
     if(v == t) {
      Cap d= limit - total;
      int cut= 0;
-     for(int i= 0; i < (int)stk.size(); ++i)
+     for(int i= 0; i < sp; ++i)
       if(as_[stk[i]].cap < d) d= as_[stk[i]].cap, cut= i;
-     for(int k: stk) as_[k].cap-= d, as_[as_[k].rev].cap+= d;
+     for(int i= 0; i < sp; ++i) as_[stk[i]].cap-= d, as_[as_[stk[i]].rev].cap+= d;
      total+= d;
-     stk.resize(cut);
-     v= stk.empty() ? s : as_[stk.back()].to;
+     sp= cut;
+     v= sp == 0 ? s : as_[stk[sp - 1]].to;
      continue;
     }
     int& k= cur_[v];
@@ -579,12 +579,12 @@ private:
     if(k == st_[v + 1]) {
      if(v == s) break;
      lv[v]= -1;  // 行き止まり
-     stk.pop_back();
-     v= stk.empty() ? s : as_[stk.back()].to;
+     --sp;
+     v= sp == 0 ? s : as_[stk[sp - 1]].to;
      ++cur_[v];
      continue;
     }
-    stk.push_back(k), v= as_[k].to;
+    stk[sp++]= k, v= as_[k].to;
    }
   }
   return total;
