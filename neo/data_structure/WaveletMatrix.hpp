@@ -16,11 +16,12 @@
 // 静的な整数の列の wavelet matrix。区間の k 番目、値が x 未満の個数、[lo, hi) の個数、ちょうど x の個数、
 // x 未満の最大と x 以上の最小を引く。値は内部で順位に詰める (neo/sort/compress.hpp の compress)。Compress = false なら、
 // 値 (0 以上 2^31 未満) をそのまま順位として使い、詰める手間と、クエリのたびに値から順位を引く手間を省く。
-// 1 段で 2 bit ずつ分ける 4 分の形で、段の数は 2 分の半分になる。段ごとに 64 個ずつのブロックを、記号 (0 から 3) の
-// 上の bit の列と下の bit の列と、ブロックより前の記号ごとの数の 32 byte に詰める。k 番目は、記号ごとの数と k を
-// 比べたマスクで記号を選ぶ (分岐なし)。値から順位への変換は、値の範囲を最大 65536 個の区間に分けた表で狭めてから
+// 1 段で 3 bit ずつ分ける 8 分の形で、段の数は 2 分の 1/3 になる。段ごとに 64 個ずつのブロックを、記号 (0 から 7) の
+// 3 本の bit の列と、ブロックより前の記号 t 未満の数 (t = 0..8) の 64 byte に詰める。k 番目は、両端で記号 1 から 7 未満の数を
+// 7 個ずつ求め、区間の中の数と k を比べた 7 つの比較の和で記号を選ぶ (分岐なし)。[lo, hi) の個数は、2 つの境の記号が同じ段を
+// 1 回で下り、違う段から下は 2 本を同じループで下りる。値から順位への変換は、値の範囲を最大 65536 個の区間に分けた表で狭めてから
 // cmov の二分探索で探す。2 MB 以上の配列は、Linux では 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼む。
-// procon-judge の yosupo-range-kth-smallest などで書き比べた wm4 を写したもの。
+// procon-judge の yosupo-range-kth-smallest などで書き比べた wm8kp (k 番目) と wm8_rng ([lo, hi) の個数) を写したもの。
 namespace wavelet_matrix_internal {
 using u32= unsigned;
 using u64= unsigned long long;
@@ -149,43 +150,66 @@ template <class T> inline auto rank_list(std::vector<T>&& a) {
 template <class T= int, bool Compress= true> class WaveletMatrix {
  using u32= unsigned;
  using u64= unsigned long long;
- struct alignas(32) Blk {
-  u64 h, l;
-  u32 c[4];
+ struct alignas(64) Blk {
+  u64 b0, b1, b2;  // 記号の bit 0、1、2
+  u32 c[9];        // c[t] はブロックより前の記号 t 未満の数
+ };
+ // 段の記号と、その 3 本の bit を全部の bit に広げたマスク。
+ struct Sym {
+  int s;
+  u64 a0, a1, a2;
+  [[gnu::always_inline]] explicit Sym(int s_): s(s_), a0(-u64(s_ & 1)), a1(-u64(s_ >> 1 & 1)), a2(-u64(s_ >> 2)) {}
+  // 記号 s 未満の印と、記号 s の印。
+  [[gnu::always_inline]] u64 lt(const Blk& k) const { return (~k.b2 & a2) | (~(k.b2 ^ a2) & ((~k.b1 & a1) | (~(k.b1 ^ a1) & ~k.b0 & a0))); }
+  [[gnu::always_inline]] u64 eq(const Blk& k) const { return ~(k.b2 ^ a2) & ~(k.b1 ^ a1) & ~(k.b0 ^ a0); }
  };
  int n= 0, levels= 1, nb= 0;
  u32 sigma= 0;
  wavelet_matrix_internal::Ranks<T, Compress> val;
- wavelet_matrix_internal::Vec<Blk> b;  // 段 d (下から d 番目の 2 bit) のブロック j は b[d * nb + j]
- std::vector<std::array<int, 4>> z;    // z[d][s] は段 d の記号 s より小さい記号の数
- [[gnu::always_inline]] static int rank_eq(const Blk& k, int i, int s) {
-  const u64 m= (u64(1) << (i & 63)) - 1, hs= -u64(s >> 1), ls= -u64(s & 1);
-  return k.c[s] + __builtin_popcountll(~(k.h ^ hs) & ~(k.l ^ ls) & m);
+ wavelet_matrix_internal::Vec<Blk> b;  // 段 d (下から d 番目の 3 bit) のブロック j は b[d * nb + j]
+ std::vector<std::array<int, 8>> z;    // z[d][s] は段 d の記号 s より小さい記号の数
+ [[gnu::always_inline]] static u64 low(int i) { return (u64(1) << (i & 63)) - 1; }
+ // [0, i) の記号 s 未満の数と、記号 s の数。k はブロック i / 64。
+ [[gnu::always_inline]] static int rank_lt(const Blk& k, int i, const Sym& y) { return int(k.c[y.s]) + __builtin_popcountll(y.lt(k) & low(i)); }
+ [[gnu::always_inline]] static int rank_eq(const Blk& k, int i, const Sym& y) { return int(k.c[y.s + 1] - k.c[y.s]) + __builtin_popcountll(y.eq(k) & low(i)); }
+ [[gnu::always_inline]] const Blk* level(int d) const { return b.data() + std::size_t(d) * nb; }
+ // ブロックより前の記号 t 未満の数 c と、ブロックの中の印 x の popcount の和。空の asm に通して、clang が popcount をベクタの表引きに、
+ // 足し算を 4 個ずつのベクタにまとめないようにする (まとめると x64-clang で k 番目が 2 割遅かった)。
+ [[gnu::always_inline]] static int pc(u32 c, u64 x) {
+  int v= int(c) + __builtin_popcountll(x);
+  asm("" : "+r"(v));
+  return v;
  }
- // 記号 s 未満の [0, i) の数 (s = 0 なら 0)。
- [[gnu::always_inline]] static int rank_lt(const Blk& k, int i, int s) {
-  const u64 m= (u64(1) << (i & 63)) - 1, m2= -u64(s >= 2), m3= -u64(s == 3), m1= -u64(s == 1);
-  const u64 a= m2 | (m1 & ~k.l), b3= m3 & ~k.l;
-  const u32 k1= -u32(s >= 1), k2= -u32(s >= 2), k3= -u32(s >= 3);
-  return int((k.c[0] & k1) + (k.c[1] & k2) + (k.c[2] & k3)) + __builtin_popcountll(((~k.h & a) | (k.h & b3)) & m);
+ // ブロック k の [0, i) のうち記号 t 未満の数を L[t] に書く (t = 0..8)。
+ [[gnu::always_inline]] static void rank_all(const Blk& k, int i, int* L) {
+  const u64 m= low(i), n2= ~k.b2, n1= ~k.b1, a10= k.b1 & k.b0, o10= ~(k.b1 | k.b0);
+  L[0]= 0;
+  L[1]= pc(k.c[1], n2 & o10 & m);
+  L[2]= pc(k.c[2], n2 & n1 & m);
+  L[3]= pc(k.c[3], n2 & ~a10 & m);
+  L[4]= pc(k.c[4], n2 & m);
+  L[5]= pc(k.c[5], (n2 | o10) & m);
+  L[6]= pc(k.c[6], (n2 | n1) & m);
+  L[7]= pc(k.c[7], ~(k.b2 & a10) & m);
+  L[8]= i;
  }
+ // 区間の中の記号 t 未満の数 D[t] は、配列に書かずに比べる (gcc は配列に書いた 8 個の 32 bit を 1 回のベクタで読み直し、書き込みから
+ // の受け渡しが効かずに遅かった)。D[t] も空の asm に通して、clang が比較をベクタにまとめないようにする。選んだ記号の数だけを、両端の
+ // 配列から引く。
  [[gnu::always_inline]] u32 kth_rank(int l, int r, int k) const {
-  using wavelet_matrix_internal::mask, wavelet_matrix_internal::sel;
   u32 res= 0;
   for(int d= levels - 1; d >= 0; --d) {
-   const Blk *B= b.data() + std::size_t(d) * nb, &bl= B[l >> 6], &br= B[r >> 6];
-   const u64 ml= (u64(1) << (l & 63)) - 1, mr= (u64(1) << (r & 63)) - 1;
-   const int l0= bl.c[0] + __builtin_popcountll(~bl.h & ~bl.l & ml), l1= bl.c[1] + __builtin_popcountll(~bl.h & bl.l & ml);
-   const int l2= bl.c[2] + __builtin_popcountll(bl.h & ~bl.l & ml), l3= l - l0 - l1 - l2;
-   const int r0= br.c[0] + __builtin_popcountll(~br.h & ~br.l & mr), r1= br.c[1] + __builtin_popcountll(~br.h & br.l & mr);
-   const int r2= br.c[2] + __builtin_popcountll(br.h & ~br.l & mr), r3= r - r0 - r1 - r2;
-   const int a0= r0 - l0, a01= a0 + (r1 - l1), a012= a01 + (r2 - l2);
-   const int g1= mask(k >= a0), g2= mask(k >= a01), g3= mask(k >= a012);
-   const std::array<int, 4>& Z= z[d];
-   k-= sel(g3, a012, sel(g2, a01, a0 & g1));
-   l= sel(g3, Z[3] + l3, sel(g2, Z[2] + l2, sel(g1, Z[1] + l1, l0)));
-   r= sel(g3, Z[3] + r3, sel(g2, Z[2] + r2, sel(g1, Z[1] + r1, r0)));
-   res= res << 2 | u32((g1 & 1) + (g2 & 1) + (g3 & 1));
+   const Blk* B= level(d);
+   int Ll[9], Lr[9];
+   rank_all(B[l >> 6], l, Ll), rank_all(B[r >> 6], r, Lr);
+   int d1= Lr[1] - Ll[1], d2= Lr[2] - Ll[2], d3= Lr[3] - Ll[3], d4= Lr[4] - Ll[4], d5= Lr[5] - Ll[5], d6= Lr[6] - Ll[6], d7= Lr[7] - Ll[7];
+   asm("" : "+r"(d1), "+r"(d2), "+r"(d3), "+r"(d4), "+r"(d5), "+r"(d6), "+r"(d7));
+   const int sy= int(d1 <= k) + int(d2 <= k) + int(d3 <= k) + int(d4 <= k) + int(d5 <= k) + int(d6 <= k) + int(d7 <= k);
+   const std::array<int, 8>& Z= z[d];
+   k-= Lr[sy] - Ll[sy];
+   l= Z[sy] + Ll[sy + 1] - Ll[sy];
+   r= Z[sy] + Lr[sy + 1] - Lr[sy];
+   res= res << 3 | u32(sy);
   }
   return res;
  }
@@ -194,38 +218,66 @@ template <class T= int, bool Compress= true> class WaveletMatrix {
   if(x >= sigma) return r - l;
   int c= 0;
   for(int d= levels - 1; d >= 0; --d) {
-   const int s= x >> (2 * d) & 3, zs= z[d][s];
-   const Blk *B= b.data() + std::size_t(d) * nb, &bl= B[l >> 6], &br= B[r >> 6];
-   c+= rank_lt(br, r, s) - rank_lt(bl, l, s);
-   l= zs + rank_eq(bl, l, s), r= zs + rank_eq(br, r, s);
+   const Sym y(x >> (3 * d) & 7);
+   const Blk *B= level(d), &bl= B[l >> 6], &br= B[r >> 6];
+   const int zs= z[d][y.s];
+   c+= rank_lt(br, r, y) - rank_lt(bl, l, y);
+   l= zs + rank_eq(bl, l, y), r= zs + rank_eq(br, r, y);
   }
   return c;
+ }
+ // [l, r) の順位が [a, b) に入る数 (a < b)。2 つの境の記号が同じ段では、両方の記号未満の数が打ち消し合うので数えずに下りる。
+ // 記号が違う段で記号 a から b 未満の数を数え、そこから下は b の側 (記号 b 未満を足す) と a の側 (記号 a 未満を引く) を同じ
+ // ループで下りる。
+ [[gnu::always_inline]] int count_range_rank(int l, int r, u32 a, u32 b) const {
+  if(b >= sigma) return r - l - count_rank(l, r, a);
+  for(int d= levels - 1; d >= 0; --d) {
+   const Sym ya(a >> (3 * d) & 7), yb(b >> (3 * d) & 7);
+   const Blk *B= level(d), &bl= B[l >> 6], &br= B[r >> 6];
+   if(ya.s == yb.s) {
+    const int zs= z[d][yb.s];
+    l= zs + rank_eq(bl, l, yb), r= zs + rank_eq(br, r, yb);
+    continue;
+   }
+   int c= rank_lt(br, r, yb) - rank_lt(bl, l, yb) - (rank_lt(br, r, ya) - rank_lt(bl, l, ya));
+   int lb= z[d][yb.s] + rank_eq(bl, l, yb), rb= z[d][yb.s] + rank_eq(br, r, yb);
+   int la= z[d][ya.s] + rank_eq(bl, l, ya), ra= z[d][ya.s] + rank_eq(br, r, ya);
+   for(int e= d - 1; e >= 0; --e) {
+    const Sym ua(a >> (3 * e) & 7), ub(b >> (3 * e) & 7);
+    const Blk *E= level(e), &kl= E[lb >> 6], &kr= E[rb >> 6], &hl= E[la >> 6], &hr= E[ra >> 6];
+    c+= rank_lt(kr, rb, ub) - rank_lt(kl, lb, ub) - (rank_lt(hr, ra, ua) - rank_lt(hl, la, ua));
+    lb= z[e][ub.s] + rank_eq(kl, lb, ub), rb= z[e][ub.s] + rank_eq(kr, rb, ub);
+    la= z[e][ua.s] + rank_eq(hl, la, ua), ra= z[e][ua.s] + rank_eq(hr, ra, ua);
+   }
+   return c;
+  }
+  return 0;
  }
  // cur は順位の列。
  template <class R> void build(std::vector<R> cur) {
   int lg= 1;
   while((u32(1) << lg) < sigma) ++lg;
-  levels= (lg + 1) / 2, nb= n / 64 + 1;
+  levels= (lg + 2) / 3, nb= n / 64 + 1;
   b.assign(std::size_t(nb) * levels, Blk{});
   z.assign(levels, {});
   std::vector<R> nxt(n);
   for(int d= levels - 1; d >= 0; --d) {
-   const int sh= 2 * d;
+   const int sh= 3 * d;
    Blk* B= b.data() + std::size_t(d) * nb;
-   int cnt[4]= {};
+   int cnt[8]= {};
    for(int j= 0; j < nb; ++j) {
-    for(int s= 0; s < 4; ++s) B[j].c[s]= cnt[s];
+    for(int t= 0, s= 0; t <= 8; ++t) B[j].c[t]= s, s+= t < 8 ? cnt[t] : 0;
     const int m= std::max(0, std::min(64, n - j * 64));
-    u64 hi= 0, lo= 0;
+    u64 x0= 0, x1= 0, x2= 0;
     for(int t= 0; t < m; ++t) {
-     const u32 sy= u32(cur[j * 64 + t]) >> sh & 3;
-     hi|= u64(sy >> 1) << t, lo|= u64(sy & 1) << t, ++cnt[sy];
+     const u32 sy= u32(cur[j * 64 + t]) >> sh & 7;
+     x0|= u64(sy & 1) << t, x1|= u64(sy >> 1 & 1) << t, x2|= u64(sy >> 2) << t, ++cnt[sy];
     }
-    B[j].h= hi, B[j].l= lo;
+    B[j].b0= x0, B[j].b1= x1, B[j].b2= x2;
    }
-   z[d]= {0, cnt[0], cnt[0] + cnt[1], cnt[0] + cnt[1] + cnt[2]};
-   int pos[4]= {z[d][0], z[d][1], z[d][2], z[d][3]};
-   for(int i= 0; i < n; ++i) nxt[pos[u32(cur[i]) >> sh & 3]++]= cur[i];
+   int pos[8];
+   for(int s= 0, acc= 0; s < 8; ++s) z[d][s]= pos[s]= acc, acc+= cnt[s];
+   for(int i= 0; i < n; ++i) nxt[pos[u32(cur[i]) >> sh & 7]++]= cur[i];
    cur.swap(nxt);
   }
  }
@@ -247,15 +299,20 @@ public:
  // [l, r) のうち x 以下の個数。
  [[gnu::always_inline]] int count_le(int l, int r, T x) const { return count_rank(l, r, val.template rank<true>(x)); }
  // [l, r) のうち値が [lo, hi) に入る個数。lo >= hi なら 0。
- [[gnu::always_inline]] int count(int l, int r, T lo, T hi) const { return lo < hi ? count_lt(l, r, hi) - count_lt(l, r, lo) : 0; }
+ [[gnu::always_inline]] int count(int l, int r, T lo, T hi) const {
+  if(!(lo < hi)) return 0;
+  const u32 a= val.template rank<false>(lo), b= val.template rank<false>(hi);
+  return a < b ? count_range_rank(l, r, a, b) : 0;
+ }
  // [l, r) のうちちょうど x の個数。
  [[gnu::always_inline]] int freq(int l, int r, T x) const {
   const u32 id= val.template rank<false>(x);
   if(id == sigma || !(val.value(id) == x)) return 0;
   for(int d= levels - 1; d >= 0; --d) {
-   const int s= id >> (2 * d) & 3, zs= z[d][s];
-   const Blk* B= b.data() + std::size_t(d) * nb;
-   l= zs + rank_eq(B[l >> 6], l, s), r= zs + rank_eq(B[r >> 6], r, s);
+   const Sym y(id >> (3 * d) & 7);
+   const Blk* B= level(d);
+   const int zs= z[d][y.s];
+   l= zs + rank_eq(B[l >> 6], l, y), r= zs + rank_eq(B[r >> 6], r, y);
   }
   return r - l;
  }

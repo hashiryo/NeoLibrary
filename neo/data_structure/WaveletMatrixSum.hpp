@@ -3,10 +3,11 @@
 // 静的な整数の列の、重み付きの wavelet matrix。区間で値が x 未満のものの個数と重みの和、[lo, hi) の個数と和、
 // 小さい方 (大きい方) から k 個の重みの和、k 番目を引く。重みを渡さなければ値そのものを重みにする。
 // 1 段で 1 bit ずつ分ける 2 分の形で、段ごとに、分けたあとの並びの重みの累積を持つ。和は、値の上限の bit が 1 の段
-// だけ累積を読む (分岐で飛ばす)。4 分の形より、和の配列の読み出しが少ない。bit 列は 64 bit の語の列と語ごとの累積の
-// 列。値は WaveletMatrix と同じく順位に詰め (Compress = false ならそのまま順位として使う)、値から順位への変換も同じ表で
-// 引く。2 MB 以上の配列は、Linux では 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼む。procon-judge の
-// yosupo-static-range-sum-with-upper-bound などで書き比べた wm_sep_brtbl と、atcoder-abc281-e の wm_sep を写したもの。
+// だけ累積を読む (分岐で飛ばす)。4 分の形より、和の配列の読み出しが少ない。[lo, hi) の和は、2 つの境の bit が同じ段を
+// 1 回で下り、違う段から下は 2 本を同じループで下りる。bit 列は 64 bit の語の列と語ごとの累積の列。値は WaveletMatrix と
+// 同じく順位に詰め (Compress = false ならそのまま順位として使う)、値から順位への変換も同じ表で引く。2 MB 以上の配列は、
+// Linux では 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼む。procon-judge の yosupo-static-range-sum-with-upper-bound などで
+// 書き比べた wm_sep_brtbl と、atcoder-abc281-e の wm_sep、yosupo-rectangle-sum の wm_sep_rng を写したもの。
 template <class T= int, class W= long long, bool Compress= true> class WaveletMatrixSum {
  using u32= unsigned;
  using u64= unsigned long long;
@@ -57,6 +58,35 @@ template <class T= int, class W= long long, bool Compress= true> class WaveletMa
    for(int i= 0; i < n; ++i) Sh[i + 1]= Sh[i] + cw[i];
   }
  }
+ // [l, r) の順位が [a, b) に入るものの個数と和 (a < b)。2 つの境の bit が同じ段では、両方の数と和が打ち消し合うので累積を
+ // 読まずに下りる。bit が違う段から下は、b の側 (足す) と a の側 (引く) を同じループで下りる。
+ [[gnu::always_inline]] std::pair<int, W> count_sum_range_rank(int l, int r, u32 a, u32 b) const {
+  if(b >= sigma) {
+   const auto [c, s]= count_sum_rank(l, r, a);
+   return {r - l - c, S(lg)[r] - S(lg)[l] - s};
+  }
+  for(int h= lg - 1; h >= 0; --h) {
+   const int l1= rank1(h, l), r1= rank1(h, r);
+   if((a ^ b) >> h & 1) {
+    const int l0= l - l1, r0= r - r1;
+    int c= r0 - l0;
+    W s= S(h)[r0] - S(h)[l0];
+    int lb= zero[h] + l1, rb= zero[h] + r1, la= l0, ra= r0;
+    for(int g= h - 1; g >= 0; --g) {
+     const int p1= rank1(g, lb), q1= rank1(g, rb), p0= lb - p1, q0= rb - q1;
+     const int u1= rank1(g, la), v1= rank1(g, ra), u0= la - u1, v0= ra - v1;
+     if(b >> g & 1) c+= q0 - p0, s+= S(g)[q0] - S(g)[p0], lb= zero[g] + p1, rb= zero[g] + q1;
+     else lb= p0, rb= q0;
+     if(a >> g & 1) c-= v0 - u0, s-= S(g)[v0] - S(g)[u0], la= zero[g] + u1, ra= zero[g] + v1;
+     else la= u0, ra= v0;
+    }
+    return {c, s};
+   }
+   if(b >> h & 1) l= zero[h] + l1, r= zero[h] + r1;
+   else l-= l1, r-= r1;
+  }
+  return {0, W()};
+ }
  // [l, r) の順位 x 未満の個数と和。x は 0 以上 sigma 以下。
  [[gnu::always_inline]] std::pair<int, W> count_sum_rank(int l, int r, u32 x) const {
   if(x >= sigma) return {r - l, S(lg)[r] - S(lg)[l]};
@@ -91,9 +121,8 @@ public:
  // [l, r) のうち値が [lo, hi) に入るものの個数と重みの和。lo >= hi なら {0, 0}。
  [[gnu::always_inline]] std::pair<int, W> count_sum(int l, int r, T lo, T hi) const {
   if(!(lo < hi)) return {0, W()};
-  const auto [c1, s1]= count_sum_lt(l, r, hi);
-  const auto [c0, s0]= count_sum_lt(l, r, lo);
-  return {c1 - c0, s1 - s0};
+  const u32 a= val.template rank<false>(lo), b= val.template rank<false>(hi);
+  return a < b ? count_sum_range_rank(l, r, a, b) : std::pair<int, W>(0, W());
  }
  // [l, r) の値の小さい方から k 個の重みの和 (同じ値は位置の順)。0 <= k <= r - l。
  [[gnu::always_inline]] W sum_smallest(int l, int r, int k) const {
