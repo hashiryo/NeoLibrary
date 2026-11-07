@@ -20,4 +20,4 @@ T は整数の型で、負の値も 64 bit の値も使えます。同じ座標�
 
 並べ方は添字の並べ替えの `argsort` (neo/sort/argsort.hpp) です。4 byte の整数は基数ソートの形で並べ、ほかの型は添字の列を `std::stable_sort` で並べます。
 
-方式は procon-judge の aoj-2426 ($N \le 5000$、$M \le 5 \times 10^5$) で比べて選びました。この型を使う提出の x64-gcc の最大は、Xeon 8573C で 72.4 ms ほどで、写し元の提出 (wm4) の 69.7 ms と並びました。x の範囲を `std::lower_bound` で引いていたときは、EPYC 9V45 で 92.6 ms ほどかかり、wm4 (43.2 ms) の 2 倍でした。記録は algo-notes の notes/wavelet-matrix.md にあります。
+方式は procon-judge の aoj-2426 ($N \le 5000$、$M \le 5 \times 10^5$) で比べて選びました。この型を使う提出の x64-gcc の最大は、EPYC 9V74 で 41.0 ms ほどで、同じ回の 4 分の形の提出 (wm4) の 60.7 ms より 3 割ほど速く出ました。WaveletMatrix を 8 分の形にした分と、y の 2 つの境を一緒に下りる分です。x の範囲を `std::lower_bound` で引いていたときは、EPYC 9V45 で 92.6 ms ほどかかり、wm4 (43.2 ms) の 2 倍でした。記録は algo-notes の notes/wavelet-matrix.md にあります。
