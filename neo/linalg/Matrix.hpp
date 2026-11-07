@@ -475,7 +475,9 @@ inline void fold_all(u64* y, int len, u64 r32) {
 template <class Z> struct Frob {
  static u32 rd(u64 x) { return Z(x).val(); }
  static u64 fold1(u64 x, u64 r32) { return (x >> 32) * r32 + u32(x); }
- // sum_i x[i] y[i] mod M (x[i], y[i] < M)。
+ // sum_i x[i] y[i] mod M (x[i], y[i] < M)。最後は 4 本の和を 2 回畳んで (各 2^60 + 2^32 未満) u64 のまま足し、剰余を 1 回だけ
+ // 取る。Z の足し算 (2M 以上なら引く) と val() で 4 本をまとめると、x64 の GCC はその比べを分岐にし、値が乱数に近いので予測を外す
+ // (Krylov の鎖を作るあいだに n^2 回呼ぶので、yosupo-pow-of-matrix の EPYC 7763 で合計が 7% 増えていた)。
  static u32 dot(const u32* x, const u32* y, int n, u64 r32) {
   const __m256i Rv= _mm256_set1_epi64x(r32), LO= _mm256_set1_epi64x(0xffffffffll);
   __m256i acc= _mm256_setzero_si256();
@@ -484,12 +486,13 @@ template <class Z> struct Frob {
    acc= _mm256_add_epi64(acc, _mm256_mul_epu32(_mm256_cvtepu32_epi64(_mm_loadu_si128((const __m128i*)(x + i))), _mm256_cvtepu32_epi64(_mm_loadu_si128((const __m128i*)(y + i)))));
    if(++t == 8) acc= _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(acc, 32), Rv), _mm256_and_si256(acc, LO)), t= 0;
   }
+  acc= _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(acc, 32), Rv), _mm256_and_si256(acc, LO));
+  acc= _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(acc, 32), Rv), _mm256_and_si256(acc, LO));
   alignas(32) u64 s[4];
   _mm256_store_si256((__m256i*)s, acc);
-  Z r= Z(s[0]) + Z(s[1]) + Z(s[2]) + Z(s[3]);
-  u64 q= 0;
+  u64 q= s[0] + s[1] + s[2] + s[3];
   for(; i < n; ++i) q+= u64(x[i]) * y[i];
-  return (r + Z(q)).val();
+  return rd(q);
  }
  // t[0..len) (畳んだ u64) を、f (monic、次数 d) で割った余りに直して r[0..d) (M 未満) に書く。nf[j] = -f[j] mod M。
  static void reduce(std::vector<u64>& t, int len, const std::vector<u32>& nf, int d, std::vector<u32>& r, u64 r32) {
