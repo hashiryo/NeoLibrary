@@ -18,8 +18,10 @@
 // xs[a[i]] が元の a[i] になる。値と添字を値の上の桁で振り分け、塊の中を u32 の鍵 (桁より下の bit の上の 26 bit までを上に、塊の中の
 // 位置を下の 6 bit に詰めたもの) の AVX2 のネットワークで並べたら、並べた順に順位を数えて a の添字の位置に書く。塊は値の順に並び、
 // 違う塊の値は必ず違うので、順位は塊をまたいで数え続ければよい。
-//   4 byte: 値と添字を u64 に詰めて振り分ける。桁は要素によって違う bit の上から、塊の平均が 16 個以下になる幅 (6 bit から 16 bit)。
-//     10^6 個ほどの列は、間をあけて取った 1024 個から桁の位置を見込み、全要素の bit or と bit and を取る走査でヒストグラムも作る。
+//   4 byte: 値と添字を u64 に詰めて振り分ける。桁は、要素によって違う bit の幅と最大値と最小値の差の幅の狭い方 (差の方なら、
+//     最小値を引いた鍵) の上から、塊の平均が 16 個以下になる幅 (6 bit から 16 bit)。符号付きの値が 0 をまたぐと、違う bit は
+//     32 bit 全部に広がるが、差の幅は狭いことがある。10^6 個ほどの列は、間をあけて取った 1024 個から桁の位置を見込み、全要素の
+//     bit or と bit and を取る走査でヒストグラムも作る。
 //   8 byte: 値と添字を別の配列の同じ位置に振り分ける (合わせて u64 に収まらないため)。桁は、要素によって違う bit の幅と最大値と
 //     最小値の差の幅の狭い方の上から選ぶ。26 bit が等しい隣どうしがあれば、そこだけ挿入ソートで値の順に直す。
 // どちらも、桁より下の bit が全要素で同じなら振り分けずに塊の番号から順位を引く表で書き換え、値の種類が 1024 個以下ならハッシュ表で
@@ -189,17 +191,18 @@ template <class T> inline std::vector<T> scan(const u64* s, std::size_t n, T* a)
  }
  return xs;
 }
-// 塊 s[0, m) (2 <= m <= 64) を鍵のネットワークで並べ、並べた順に順位を数えて a の添字の位置に書き、新しい値を xs に足す。rk は
+// 塊 s[0, m) (2 <= m <= 64) を鍵のネットワークで並べ、並べた順に順位を数えて a の添字の位置に書き、新しい値を xs に足す。s の上位
+// 32 bit は値の鍵から base を引いたもの。rk は
 // それまでの値の種類数 (次に付ける順位)。塊の中では桁とそれより上の bit、lo より下の bit がそろっているので、鍵の上の 26 bit 以下
 // (値の鍵の bit [lo, sh)) が等しいことと値が等しいことは同じ。
-template <class T> [[gnu::always_inline]] inline void rank_bucket(const u64* s, int m, __m128i lo, __m256i rmask, T* a, std::vector<T>& xs, u32& rk) {
+template <class T> [[gnu::always_inline]] inline void rank_bucket(const u64* s, int m, __m128i lo, __m256i rmask, u32 base, T* a, std::vector<T>& xs, u32& rk) {
  alignas(32) u32 k[64];
  sort_keys(s, m, lo, rmask, k);
  u32 prev= ~0u;  // 鍵の上の bit は 26 bit 以下なので、塊の最初の要素は必ず新しい値になる
  for(int t= 0; t < m; ++t) {
   const u32 v= k[t] >> 6;
   const u64 x= s[k[t] & 63];
-  if(v != prev) xs.push_back(T(u32(x >> 32) ^ F<T>)), prev= v, ++rk;
+  if(v != prev) xs.push_back(T((u32(x >> 32) + base) ^ F<T>)), prev= v, ++rk;
   a[u32(x)]= T(rk - 1);
  }
 }
@@ -265,19 +268,19 @@ template <class T> inline std::vector<T> compress(T* a, std::size_t n) {
   const u32 sd= so ^ se;
   if(sd && 32 - __builtin_clz(sd) - __builtin_ctz(sd) >= 16) ssh= 31 - __builtin_clz(sd) - 15;
  }
- u32 o= 0, e= ~0u;
+ u32 o= 0, e= ~0u, mn= ~0u, mx= 0;
  std::vector<u32> pos;
  if(ssh >= 0) {
   pos.assign(std::size_t(1) << 16, 0);
   u32* c= pos.data();
   for(std::size_t i= 0; i < n; ++i) {
    const u32 x= u32(a[i]) ^ FL;
-   o|= x, e&= x, ++c[x >> ssh & 0xFFFF];
+   o|= x, e&= x, mn= std::min(mn, x), mx= std::max(mx, x), ++c[x >> ssh & 0xFFFF];
   }
  } else {
   for(std::size_t i= 0; i < n; ++i) {
    const u32 x= u32(a[i]) ^ FL;
-   o|= x, e&= x;
+   o|= x, e&= x, mn= std::min(mn, x), mx= std::max(mx, x);
   }
  }
  const u32 diff= o ^ e;
@@ -290,29 +293,36 @@ template <class T> inline std::vector<T> compress(T* a, std::size_t n) {
   std::vector<T> xs;
   if(few_values(a, n, xs)) return xs;
  }
- const int hi= 31 - __builtin_clz(diff), lo= __builtin_ctz(diff), w= hi - lo + 1;
+ // 鍵の bit [lo, hi] が要素によって違いうる。最大値と最小値の差の幅の方が狭いなら、最小値 (base) を引いた鍵の bit [0, 幅) を使う
+ // (符号付きの値が 0 をまたぐと、最上位 bit を反転した鍵が 2^31 をまたいで 32 bit 全部が違いうるが、差の幅は狭いことがある。
+ // 違う bit で桁を選ぶと、使う塊が偏って 64 個を超える塊が std::sort に回る)。
+ int hi= 31 - __builtin_clz(diff), lo= __builtin_ctz(diff);
+ u32 base= 0;
+ if(const int wm= 32 - __builtin_clz(mx - mn); wm < hi - lo + 1) lo= 0, hi= wm - 1, base= mn;
+ const int w= hi - lo + 1;
  // 6 bit 以上にするのは、桁より下の bit を 26 bit 以下にして、塊の中の位置 (6 bit) と u32 に詰めるため。
  int db= 6;
  while(db < 16 && (n >> db) > 16) ++db;
  db= std::min(db, w);
  const int sh= hi - db + 1, r= sh - lo;
  const u32 mk= (1u << db) - 1;
- if(sh != ssh || db != 16) {  // 見込まなかったか、見込みが外れた
+ if(sh != ssh || db != 16 || base) {  // 見込まなかったか、見込みが外れた (見込みは base を引かない鍵で作る)
   pos.assign(std::size_t(1) << db, 0);
-  for(std::size_t i= 0; i < n; ++i) ++pos[(u32(a[i]) ^ FL) >> sh & mk];
+  for(std::size_t i= 0; i < n; ++i) ++pos[((u32(a[i]) ^ FL) - base) >> sh & mk];
  }
  if(!r) {
-  // 桁が値を決めるので、空でない塊ごとに値が 1 つある。値の鍵は、桁の外の bit (全要素で同じ) に塊の番号を入れたもの。
+  // 桁が値を決めるので、空でない塊ごとに値が 1 つある。値の鍵は、桁の外の bit (全要素で同じ) に塊の番号を入れたものに base を
+  // 足したもの (base を引いた鍵では、桁の外の bit は 0)。
   std::vector<T> xs;
   xs.reserve(std::min(n, pos.size()));
-  const u32 base= e & ~(mk << sh);
+  const u32 out= base ? 0 : e & ~(mk << sh);
   u32 rk= 0;
   for(std::size_t d= 0; d < pos.size(); ++d) {
    const u32 c= pos[d];
    pos[d]= rk;
-   if(c) xs.push_back(T((base | u32(d) << sh) ^ FL)), ++rk;
+   if(c) xs.push_back(T(((out | u32(d) << sh) + base) ^ FL)), ++rk;
   }
-  for(std::size_t i= 0; i < n; ++i) a[i]= T(pos[(u32(a[i]) ^ FL) >> sh & mk]);
+  for(std::size_t i= 0; i < n; ++i) a[i]= T(pos[((u32(a[i]) ^ FL) - base) >> sh & mk]);
   return xs;
  }
  for(std::size_t d= 0, s= 0; d < pos.size(); ++d) {
@@ -322,7 +332,7 @@ template <class T> inline std::vector<T> compress(T* a, std::size_t n) {
  Buf<u64> bb(n + 64);  // 塊を 8 個ずつ読むので、最後の塊の後ろを 63 個まで読む
  u64* b= bb.p;
  for(std::size_t i= 0; i < n; ++i) {
-  const u32 x= u32(a[i]) ^ FL;
+  const u32 x= (u32(a[i]) ^ FL) - base;
   b[pos[x >> sh & mk]++]= u64(x) << 32 | i;
  }
  // 振り分けたあとの pos[d] は塊 d の終わり。
@@ -334,18 +344,18 @@ template <class T> inline std::vector<T> compress(T* a, std::size_t n) {
   const std::size_t end= pos[d], m= end - off;
   if(m == 1) {
    const u64 x= b[off];
-   xs.push_back(T(u32(x >> 32) ^ FL));
+   xs.push_back(T((u32(x >> 32) + base) ^ FL));
    a[u32(x)]= T(rk++);
   } else if(m >= 2 && m <= 64) {
-   rank_bucket(b + off, int(m), lov, rmask, a, xs, rk);
+   rank_bucket(b + off, int(m), lov, rmask, base, a, xs, rk);
   } else if(m > 64) {
    if(!std::is_sorted(b + off, b + end)) std::sort(b + off, b + end);
    u32 prev= u32(b[off] >> 32);
-   xs.push_back(T(prev ^ FL)), ++rk;
+   xs.push_back(T((prev + base) ^ FL)), ++rk;
    for(std::size_t t= off; t < end; ++t) {
     const u64 x= b[t];
     const u32 v= u32(x >> 32);
-    if(v != prev) xs.push_back(T(v ^ FL)), prev= v, ++rk;
+    if(v != prev) xs.push_back(T((v + base) ^ FL)), prev= v, ++rk;
     a[u32(x)]= T(rk - 1);
    }
   }

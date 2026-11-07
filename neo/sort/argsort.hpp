@@ -17,7 +17,8 @@
 // 列 a について、a[p[0]] <= a[p[1]] <= ... となる添字の列 p を返す。等しい値は添字の小さい順 (安定な並べ方)。
 // 4 byte の整数は、値と添字を u64 に詰めて値の上の桁で振り分け、塊の中を u32 の鍵 (桁より下の bit を上に、塊の中の位置を下の 6 bit
 // に詰めたもの) の AVX2 のネットワークで並べ、鍵の下の 6 bit で詰めた u64 を引いて添字を書く。振り分けは元の順を保つので、塊の中の
-// 位置の順は添字の順と同じ。桁より下の bit が 26 bit 以下になるように桁を 6 bit 以上にする。AMD などでは、桁を塊の平均が 16 個以下に
+// 位置の順は添字の順と同じ。桁は、要素によって違う bit の幅と最大値と最小値の差の幅の狭い方 (差の方なら、最小値を引いた鍵) の
+// 上から取る。桁より下の bit が 26 bit 以下になるように桁を 6 bit 以上にする。AMD などでは、桁を塊の平均が 16 個以下に
 // なる幅 (16 bit まで) にして振り分けを 1 回で済ませる。Intel の CPU では書き先が 65536 か所に散らばる振り分けが重い (10^6 個で
 // 1.3〜1.45 倍) ので、上の 8 bit で振り分けてから、1 段目の塊ごとに次の桁で L1 に載る小さい配列へ振り分けて並べる。64 個を超えた
 // 塊は std::sort。符号付きの値は最上位 bit を反転した鍵で並べる。作業用の配列と返す列は、2^19 byte 以上なら Linux では huge page を
@@ -218,10 +219,10 @@ template <class I> inline void sort_level2(const u64* s, std::size_t m, int lo, 
   off= end;
  }
 }
-// 値の鍵の bit [lo, hi] が要素によって違いうる (hi > lo か hi == lo)。桁を塊の平均が 16 個以下になる幅 (6 bit から 16 bit) にして
-// 1 回振り分け、添字を q[0, n) に書く。6 bit 以上にするのは、桁より下の bit を 26 bit 以下にして、塊の中の位置 (6 bit) と u32 に
+// 鍵 (値の鍵から base を引いたもの) の bit [lo, hi] が要素によって違いうる (hi > lo か hi == lo)。桁を塊の平均が 16 個以下になる
+// 幅 (6 bit から 16 bit) にして 1 回振り分け、添字を q[0, n) に書く。6 bit 以上にするのは、桁より下の bit を 26 bit 以下にして、塊の中の位置 (6 bit) と u32 に
 // 詰めるため。
-template <class I, class T> inline void by_one(const T* a, std::size_t n, int hi, int lo, I* q) {
+template <class I, class T> inline void by_one(const T* a, std::size_t n, int hi, int lo, u32 base, I* q) {
  constexpr u32 F= std::is_signed_v<T> ? 0x80000000u : 0;
  int db= 6;
  while(db < 16 && (n >> db) > 16) ++db;
@@ -229,19 +230,19 @@ template <class I, class T> inline void by_one(const T* a, std::size_t n, int hi
  const int sh= hi - db + 1, r= sh - lo;
  const u32 mk= (1u << db) - 1;
  std::vector<u32> pos(std::size_t(1) << db);
- for(std::size_t i= 0; i < n; ++i) ++pos[(u32(a[i]) ^ F) >> sh & mk];
+ for(std::size_t i= 0; i < n; ++i) ++pos[((u32(a[i]) ^ F) - base) >> sh & mk];
  for(std::size_t d= 0, s= 0; d < pos.size(); ++d) {
   const u32 t= pos[d];
   pos[d]= u32(s), s+= t;
  }
  if(!r) {  // 桁より下の bit が全要素で同じ: 振り分け 1 回で添字を直接書く
-  for(std::size_t i= 0; i < n; ++i) q[pos[(u32(a[i]) ^ F) >> sh & mk]++]= I(i);
+  for(std::size_t i= 0; i < n; ++i) q[pos[((u32(a[i]) ^ F) - base) >> sh & mk]++]= I(i);
   return;
  }
  Buf<u64> bb(n + 64);  // 塊を 8 個ずつ読むので、最後の塊の後ろを 63 個まで読む
  u64* b= bb.p;
  for(std::size_t i= 0; i < n; ++i) {
-  const u32 x= u32(a[i]) ^ F;
+  const u32 x= (u32(a[i]) ^ F) - base;
   b[pos[x >> sh & mk]++]= u64(x) << 32 | i;
  }
  // 振り分けたあとの pos[d] は塊 d の終わり。
@@ -261,25 +262,25 @@ template <class I, class T> inline void by_one(const T* a, std::size_t n, int hi
  }
 }
 // Intel の道。上の 8 bit で振り分け、64 個を超えた 1 段目の塊は sort_level2 で並べる。
-template <class I, class T> inline void by_two(const T* a, std::size_t n, int hi, int lo, I* q) {
+template <class I, class T> inline void by_two(const T* a, std::size_t n, int hi, int lo, u32 base, I* q) {
  constexpr u32 F= std::is_signed_v<T> ? 0x80000000u : 0;
  const int db= std::min(8, hi - lo + 1), sh= hi - db + 1, r= sh - lo;  // r は 1 段目の桁より下で、要素によって違いうる bit の数 (24 bit 以下)
  const u32 mk= (1u << db) - 1;
  u32 pos[256]= {};
- for(std::size_t i= 0; i < n; ++i) ++pos[(u32(a[i]) ^ F) >> sh & mk];
+ for(std::size_t i= 0; i < n; ++i) ++pos[((u32(a[i]) ^ F) - base) >> sh & mk];
  u32 maxm= 0;
  for(u32 c= 0, acc= 0; c <= mk; ++c) {
   const u32 x= pos[c];
   pos[c]= acc, acc+= x, maxm= std::max(maxm, x);
  }
  if(!r) {  // 桁より下の bit が全要素で同じ: 振り分け 1 回で添字を直接書く
-  for(std::size_t i= 0; i < n; ++i) q[pos[(u32(a[i]) ^ F) >> sh & mk]++]= I(i);
+  for(std::size_t i= 0; i < n; ++i) q[pos[((u32(a[i]) ^ F) - base) >> sh & mk]++]= I(i);
   return;
  }
  Buf<u64> bb(n + 64);  // 塊を 8 個ずつ読むので、最後の塊の後ろを 63 個まで読む
  u64* b= bb.p;
  for(std::size_t i= 0; i < n; ++i) {
-  const u32 x= u32(a[i]) ^ F;
+  const u32 x= (u32(a[i]) ^ F) - base;
   b[pos[x >> sh & mk]++]= u64(x) << 32 | i;
  }
  // 振り分けたあとの pos[c] は塊 c の終わり。
@@ -311,19 +312,23 @@ template <class I, class T> inline std::vector<I> argsort4(const T* a, std::size
  }
  std::vector<I> p= make_result<I>(n);
  I* q= p.data();
- u32 o= 0, e= ~0u;
+ u32 o= 0, e= ~0u, mn= ~0u, mx= 0;
  for(std::size_t i= 0; i < n; ++i) {
   const u32 k= u32(a[i]) ^ F;
-  o|= k, e&= k;
+  o|= k, e&= k, mn= std::min(mn, k), mx= std::max(mx, k);
  }
  const u32 diff= o ^ e;
  if(!diff) {  // 全要素が同じ値
   for(std::size_t i= 0; i < n; ++i) q[i]= I(i);
   return p;
  }
- const int hi= 31 - __builtin_clz(diff), lo= __builtin_ctz(diff);
- if(two) by_two(a, n, hi, lo, q);
- else by_one(a, n, hi, lo, q);
+ // 鍵の bit [lo, hi] が要素によって違いうる。最大値と最小値の差の幅の方が狭いなら、最小値を引いた鍵の bit [0, 幅) を使う
+ // (符号付きの値が 0 をまたぐと、最上位 bit を反転した鍵が 2^31 をまたいで 32 bit 全部が違いうるが、差の幅は狭いことがある)。
+ int hi= 31 - __builtin_clz(diff), lo= __builtin_ctz(diff);
+ u32 base= 0;
+ if(const int wm= 32 - __builtin_clz(mx - mn); wm < hi - lo + 1) lo= 0, hi= wm - 1, base= mn;
+ if(two) by_two(a, n, hi, lo, base, q);
+ else by_one(a, n, hi, lo, base, q);
  return p;
 }
 }  // namespace argsort_internal
