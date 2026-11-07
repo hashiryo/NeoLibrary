@@ -9,7 +9,8 @@
 // 接頭辞和の木になる (procon-judge の yosupo-point-add-range-sum の wide8)。段 h の表の f 番目には、f と同じ塊
 // (8 個ずつ) の中で f より前にある子の和を持ち、[0, r) の和は段ごとに表の (r >> 3h) 番目を 1 つずつ読んで足す。
 // 1 点の加算は、段ごとに塊の後ろ側へマスクを取った値を AVX2 で足す。塊の 8 個は u64 でキャッシュの 1 行に収まる。
-// 値は u64 の桁あふれのまま足し、差を T に戻すので、T の範囲に収まる和は正しく出る。get のために元の値も持つ。
+// 値は u64 の桁あふれのまま足し、差を T に戻すので、T の範囲に収まる和は正しく出る。get は区間 [i, i + 1) の和で求める
+// (元の値の配列を別に持つと、1 点の加算のたびにその配列も読み書きして x64 で 1 割遅かった)。
 // max_right と min_left は、段ごとに塊の 8 個の境目の接頭辞和を見て、条件が切り替わる子へ下りる。
 // それ以外の T (浮動小数点数など) は二分木の汎用の形になる。
 namespace monoid {
@@ -34,14 +35,14 @@ template <class V> class Wide {
  int n= 0, H= 0;
  std::size_t loff[24]= {};  // 段 h の表は mem の loff[h] から (写しても壊れないよう、ポインタでなくずれで持つ)
  segment_tree_internal::Vec<u64> mem;
- segment_tree_internal::Vec<V> a;
  template <class F> void build(const F& init) {
   const std::size_t N= n;
   H= 1;
   while((N >> (H * LB)) != 0) ++H;
   std::size_t total= 0;
   for(int h= 0; h < H; ++h) loff[h]= total, total+= ((N >> ((h + 1) * LB)) + 1) << LB;
-  mem.assign(total, 0), a.resize(n);
+  mem.assign(total, 0);
+  std::vector<V> a(n);
   u64* lv[24];
   for(int h= 0; h < H; ++h) lv[h]= mem.data() + loff[h];
   for(int i= 0; i < n; ++i) a[i]= init(i);
@@ -90,10 +91,10 @@ public:
  }
  template <class F, std::enable_if_t<std::is_invocable_r_v<V, const F&, int>, int> = 0> Wide(int n, const F& init): n(n) { build(init); }
  int size() const { return n; }
- V get(int i) const { return a[i]; }
- V operator[](int i) const { return a[i]; }
- [[gnu::always_inline]] void set(int i, V x) { add(i, u64(x) - u64(a[i])), a[i]= x; }
- [[gnu::always_inline]] void mul(int i, V x) { add(i, u64(x)), a[i]+= x; }
+ V get(int i) const { return prod(i, i + 1); }
+ V operator[](int i) const { return get(i); }
+ [[gnu::always_inline]] void set(int i, V x) { add(i, u64(x) - u64(get(i))); }
+ [[gnu::always_inline]] void mul(int i, V x) { add(i, u64(x)); }
  // [l, r) の和。2 つの接頭辞を同じループで読む。
  [[gnu::always_inline]] V prod(int l, int r) const {
   u64 s= 0;

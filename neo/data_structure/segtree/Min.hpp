@@ -9,7 +9,8 @@
 // 最小のモノイド monoid::Min<T> と最大のモノイド monoid::Max<T>。SegmentTree<monoid::Min<T>> は、T が 64 bit 以下の
 // 符号付き整数なら、子を 16 個持つ木になる。段 0 は要素を 16 個ずつの塊に並べ、段 h >= 1 の塊は子 16 個ぶんの最小を
 // 並べて持つ (monoid::AddMin の木から加算の量を除いた形)。1 点の代入は葉を書き換え、段ごとに子の塊の 16 個の最小を
-// AVX2 で取り直し、親の値が変わらなくなった段で止める。mul (a[i] = min(a[i], x)) は値が小さくなる向きにしか動かない
+// AVX2 で取り直し、親の値が変わらなくなった段で止める。1 レーンの書き込みも、そのレーンを含む 32 byte をベクトルで読んで混ぜて
+// 書く (あとのベクトルの読み込みが書き込みから値を受け取れるように)。mul (a[i] = min(a[i], x)) は値が小さくなる向きにしか動かない
 // ので、子を読み直さずに上へ min を取るだけで済ます。区間の最小は、根から l と r - 1 が同じ子にある間は下り、
 // 分かれたら左右の道を下りて、全部掛かるレーンの最小を比べる。値は i64 で、16 個を 4 本の __m256i で扱う (gcc が
 // __m256i の配列をスタックへ退避するので、マスクは別々の変数で作る)。要素の無いレーンは、最小なら i64 の最大、
@@ -29,6 +30,13 @@ template <class V> struct Max {
 namespace segtree_min_internal {
 using i64= long long;
 inline __m256i ld(const i64* p) { return _mm256_load_si256((const __m256i*)p); }
+// p は 16 レーンの塊の先頭 (32 byte 境界)。j 番目のレーンを v にする。スカラーで書くと、あとで同じ塊をベクトルで読む
+// ときに書き込みから値を受け取れず、書き込みが終わるまで待つ。ベクトルで読んで混ぜて書けば受け取れる。
+inline void put_lane(i64* p, int j, i64 v) {
+ __m256i* q= (__m256i*)(p + (j & ~3));
+ const __m256i k= _mm256_cmpeq_epi64(_mm256_setr_epi64x(0, 1, 2, 3), _mm256_set1_epi64x(j & 3));
+ _mm256_store_si256(q, _mm256_blendv_epi8(_mm256_load_si256(q), _mm256_set1_epi64x(v), k));
+}
 // レーン [lo, hi) を選ぶマスク (16 レーンを 4 本)。
 inline void masks(int lo, int hi, __m256i& k0, __m256i& k1, __m256i& k2, __m256i& k3) {
  const __m256i L= _mm256_set1_epi64x(lo - 1), R= _mm256_set1_epi64x(hi);
@@ -159,11 +167,11 @@ public:
  V get(int i) const { return V(lv(0)[i]); }
  V operator[](int i) const { return get(i); }
  [[gnu::always_inline]] void set(int i, V x) {
-  lv(0)[i]= i64(x);
+  put_lane(lv(0) + ((i >> 4) << 4), i & 15, i64(x));
   for(int h= 1, c= i >> 4; h < H; ++h, c>>= 4) {
    const i64 m= block_best(h - 1, c);
    if(lv(h)[c] == m) break;  // ここから上は変わらない
-   lv(h)[c]= m;
+   put_lane(lv(h) + ((c >> 4) << 4), c & 15, m);
   }
  }
  // a[i] = op(a[i], x)。値はよくなる向きにしか動かないので、上へ best を取るだけでよい。
@@ -171,7 +179,7 @@ public:
   const i64 v= i64(x);
   for(int h= 0, c= i; h < H; ++h, c>>= 4) {
    if(!better(v, lv(h)[c])) break;
-   lv(h)[c]= v;
+   put_lane(lv(h) + ((c >> 4) << 4), c & 15, v);
   }
  }
  [[gnu::always_inline]] V prod(int l, int r) const { return l < r ? V(range_best(l, r)) : TI; }

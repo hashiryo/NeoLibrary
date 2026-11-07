@@ -10,7 +10,8 @@
 // T が 64 bit 以下の符号付き整数なら、子を 16 個持つ作用を配らない木になる (procon-judge の
 // yosupo-range-add-range-min の wide3)。段 0 は要素を 16 個ずつの塊に並べ、段 h >= 1 の塊は、子の部分木全体に
 // 足した量 t と、子の最小に t を足した s を子 16 個ぶん並べて持つ。加算は最小と可換なので作用を子へ配らない。
-// 区間の加算は下から全部掛かるレーンの s と t に AVX2 でまとめて足し、下から両端の道の s を取り直す。区間の最小は、
+// 区間の加算は下から全部掛かるレーンの s と t に AVX2 でまとめて足し、下から両端の道の s を取り直す (1 レーンの書き込みも
+// 32 byte をベクトルで読んで混ぜて書き、次の段のベクトルの読み込みが書き込みから値を受け取れるようにする)。区間の最小は、
 // 根から l と r - 1 が同じ子にある間は t を足しながら下り、分かれたら左右の道を下りて、全部掛かるレーンの最小に
 // そこまでの t を足して比べる。値は i64 で、16 個を 4 本の __m256i で扱う (gcc が __m256i の配列をスタックへ
 // 退避するので、マスクは別々の変数で作る)。要素の無いレーンは、最小なら i64 の最大、最大なら i64 の最小。
@@ -37,6 +38,13 @@ namespace segtree_add_min_internal {
 using i64= long long;
 inline __m256i ld(const i64* p) { return _mm256_load_si256((const __m256i*)p); }
 inline void st(i64* p, __m256i x) { _mm256_store_si256((__m256i*)p, x); }
+// p は 16 レーンの塊の先頭 (32 byte 境界)。j 番目のレーンを v にする。スカラーで書くと、あとで同じ塊をベクトルで読む
+// ときに書き込みから値を受け取れず、書き込みが終わるまで待つ。ベクトルで読んで混ぜて書けば受け取れる。
+inline void put_lane(i64* p, int j, i64 v) {
+ __m256i* q= (__m256i*)(p + (j & ~3));
+ const __m256i k= _mm256_cmpeq_epi64(_mm256_setr_epi64x(0, 1, 2, 3), _mm256_set1_epi64x(j & 3));
+ _mm256_store_si256(q, _mm256_blendv_epi8(_mm256_load_si256(q), _mm256_set1_epi64x(v), k));
+}
 // レーン [lo, hi) を選ぶマスク (16 レーンを 4 本)。
 inline void masks(int lo, int hi, __m256i& k0, __m256i& k1, __m256i& k2, __m256i& k3) {
  const __m256i L= _mm256_set1_epi64x(lo - 1), R= _mm256_set1_epi64x(hi);
@@ -163,12 +171,12 @@ template <class V, bool MAX> class Wide {
    if(l & sm) {
     Blk& B= LV(h)[l >> (sh + 4)];
     const int j= (l >> sh) & 15;
-    B.s[j]= block_best(h - 1, l >> sh) + B.t[j];
+    put_lane(B.s, j, block_best(h - 1, l >> sh) + B.t[j]);
    }
    if(r & sm) {
     Blk& B= LV(h)[y >> (sh + 4)];
     const int j= (y >> sh) & 15;
-    B.s[j]= block_best(h - 1, y >> sh) + B.t[j];
+    put_lane(B.s, j, block_best(h - 1, y >> sh) + B.t[j]);
    }
   }
  }

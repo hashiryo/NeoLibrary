@@ -13,7 +13,8 @@
 // s と t を AVX2 でまとめて書き、両端の道の s を子の 16 個から取り直す。代入は上の段ほど新しく、子の部分木全体を同じ
 // 値にするので、区間の取得と 1 点の取得は、道の途中で代入の残った子に当たればその値 (和なら値と個数の積) を返して
 // 下りずに済む。区間の取得は書き込みをせず、根から l と r - 1 が同じ子にある間は下り、分かれたら左右の道を下りる。
-// 最後の塊だけはレーンごとの長さを使い、要素の無いレーンには代入しない。それ以外の T は二分木の汎用の形になる。
+// 最後の塊だけはレーンごとの長さを使い、要素の無いレーンには代入しない。1 レーンの書き込みも 32 byte をベクトルで読んで混ぜて
+// 書き、あとのベクトルの読み込みが書き込みから値を受け取れるようにする。それ以外の T は二分木の汎用の形になる。
 namespace monoid {
 template <class V> struct AssignSum {
  using T= V;
@@ -45,6 +46,13 @@ using i64= long long;
 enum Kind { SUM, MIN, MAX };
 inline __m256i ld(const i64* p) { return _mm256_load_si256((const __m256i*)p); }
 inline void st(i64* p, __m256i x) { _mm256_store_si256((__m256i*)p, x); }
+// p は 16 レーンの塊の先頭 (32 byte 境界)。j 番目のレーンを v にする。スカラーで書くと、あとで同じ塊をベクトルで読む
+// ときに書き込みから値を受け取れず、書き込みが終わるまで待つ。ベクトルで読んで混ぜて書けば受け取れる。
+inline void put_lane(i64* p, int j, i64 v) {
+ __m256i* q= (__m256i*)(p + (j & ~3));
+ const __m256i k= _mm256_cmpeq_epi64(_mm256_setr_epi64x(0, 1, 2, 3), _mm256_set1_epi64x(j & 3));
+ _mm256_store_si256(q, _mm256_blendv_epi8(_mm256_load_si256(q), _mm256_set1_epi64x(v), k));
+}
 // レーン [lo, hi) を選ぶマスク (16 レーンを 4 本)。gcc は __m256i の配列をスタックへ退避するので別々の変数で返す。
 inline void masks(int lo, int hi, __m256i& k0, __m256i& k1, __m256i& k2, __m256i& k3) {
  const __m256i L= _mm256_set1_epi64x(lo - 1), R= _mm256_set1_epi64x(hi);
@@ -120,15 +128,20 @@ template <class V, Kind K> class Wide {
   if(h == 0) return put(V0() + (std::size_t(b) << 4), _mm256_set1_epi64x(x));
   Blk& B= LV(h)[b];
   if(K == SUM && b == last[h]) {
-   for(int j= lo; j < hi; ++j) B.s[j]= x * tl[h][j];
+   // レーンごとの長さ (2^32 未満) との積を、x の下と上の 32 bit に分けた 2 回の 32 x 32 の積で作る。
+   const __m256i xv= _mm256_set1_epi64x(x), xh= _mm256_srli_epi64(xv, 32);
+   auto mul= [&](__m256i len) { return _mm256_add_epi64(_mm256_mul_epu32(xv, len), _mm256_slli_epi64(_mm256_mul_epu32(xh, len), 32)); };
+   const i64* L= tl[h];
+   st(B.s, _mm256_blendv_epi8(ld(B.s), mul(ld(L)), k0)), st(B.s + 4, _mm256_blendv_epi8(ld(B.s + 4), mul(ld(L + 4)), k1));
+   st(B.s + 8, _mm256_blendv_epi8(ld(B.s + 8), mul(ld(L + 8)), k2)), st(B.s + 12, _mm256_blendv_epi8(ld(B.s + 12), mul(ld(L + 12)), k3));
   } else put(B.s, _mm256_set1_epi64x(val(x, plen[h])));
   put(B.t, _mm256_set1_epi64x(x));
  }
  void push(int h, int c) {
-  i64& t= LV(h)[c >> 4].t[c & 15];
-  if(t == NONE) return;
-  const i64 x= t;
-  t= NONE;
+  Blk& B= LV(h)[c >> 4];
+  const i64 x= B.t[c & 15];
+  if(x == NONE) return;
+  put_lane(B.t, c & 15, NONE);
   assign_lanes(h - 1, c, 0, 16, x);
  }
  // 段 h の子 (l を含む) から下の、[l, 子の終わり) の値。
@@ -195,8 +208,8 @@ template <class V, Kind K> class Wide {
   }
   for(int h= 1; h < H; ++h) {
    const int sh= 4 * h, sm= (1 << sh) - 1;
-   if(l & sm) LV(h)[l >> (sh + 4)].s[(l >> sh) & 15]= block_agg(h - 1, l >> sh);
-   if(r & sm) LV(h)[y >> (sh + 4)].s[(y >> sh) & 15]= block_agg(h - 1, y >> sh);
+   if(l & sm) put_lane(LV(h)[l >> (sh + 4)].s, (l >> sh) & 15, block_agg(h - 1, l >> sh));
+   if(r & sm) put_lane(LV(h)[y >> (sh + 4)].s, (y >> sh) & 15, block_agg(h - 1, y >> sh));
   }
  }
  template <class F> void build(const F& init) {

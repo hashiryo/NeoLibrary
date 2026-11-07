@@ -17,7 +17,8 @@
 // する。区間の和は書き込みをせず、根から l と r - 1 が同じ子にある間は作用を合成しながら下り、分かれたら左右の道を
 // 下りて、全部掛かるレーンの和にそこまでに合成した作用を当てて足す。値は剰余をそのままの値で 2p 未満に持ち、掛け算
 // は Shoup の方法 (掛ける数 m に floor(m 2^32 / p) を前計算) で 8 レーンずつ。区間の長さは段ごとに決まり、最後の
-// 塊だけレーンごとの長さの表を使う。1 点の取得は、葉の値に段 1 から順に作用を当てる (根に近いほど新しい作用)。
+// 塊だけレーンごとの長さの表を使う。1 レーンの書き込みも 32 byte をベクトルで読んで混ぜて書き、あとのベクトルの読み込みが
+// 書き込みから値を受け取れるようにする。1 点の取得は、葉の値に段 1 から順に作用を当てる (根に近いほど新しい作用)。
 // それ以外の Z (実行時の法の ZMod<0> や自前の剰余の型) は二分木の汎用の形になる。
 namespace monoid {
 template <class Z> struct AffineSum {
@@ -85,6 +86,13 @@ inline void masks(int lo, int hi, __m256i& k0, __m256i& k1) {
 }
 inline __m256i ld(const u32* p) { return _mm256_load_si256((const __m256i*)p); }
 inline void st(u32* p, __m256i x) { _mm256_store_si256((__m256i*)p, x); }
+// p は 16 レーンの塊の先頭 (32 byte 境界)。j 番目のレーンを v にする。スカラーで書くと、あとで同じ塊をベクトルで読む
+// ときに書き込みから値を受け取れず、書き込みが終わるまで待つ。ベクトルで読んで混ぜて書けば受け取れる。
+inline void put_lane(u32* p, int j, u32 v) {
+ __m256i* q= (__m256i*)(p + (j & ~7));
+ const __m256i k= _mm256_cmpeq_epi32(_mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), _mm256_set1_epi32(j & 7));
+ _mm256_store_si256(q, _mm256_blendv_epi8(_mm256_load_si256(q), _mm256_set1_epi32(int(v)), k));
+}
 // 段の数を数え、段 0 の要素の置き場と段 h >= 1 の塊の置き場を作る。cnt[h] は段 h の塊の数。
 template <class Blk> int layout(int n, int* cnt, segment_tree_internal::Vec<u32>& mem0, segment_tree_internal::Vec<Blk>& mem1, std::size_t* off) {
  int H= 0, nb= std::max((n + 15) >> 4, 1);
@@ -149,7 +157,7 @@ template <class Z, unsigned P> class Lazy {
   const int j= c & 15;
   const u32 m= B.m[j], a= B.a[j];
   if(m == 1 && a == 0) return;
-  B.m[j]= 1, B.a[j]= 0;
+  put_lane(B.m, j, 1), put_lane(B.a, j, 0);
   apply_lanes<true>(h - 1, c, 0, 16, Mul(m), a, u32(u64(a) * pw[h - 1] % P));
  }
  const u32* row(int h, int b) const { return h == 0 ? V0() + (std::size_t(b) << 4) : LV(h)[b].s; }
@@ -198,8 +206,8 @@ template <class Z, unsigned P> class Lazy {
   }
   for(int h= 1; h < H; ++h) {
    const int sh= 4 * h, sm= (1 << sh) - 1;
-   if(l & sm) LV(h)[l >> (sh + 4)].s[(l >> sh) & 15]= block_sum(h - 1, l >> sh);
-   if(r & sm) LV(h)[x >> (sh + 4)].s[(x >> sh) & 15]= block_sum(h - 1, x >> sh);
+   if(l & sm) put_lane(LV(h)[l >> (sh + 4)].s, (l >> sh) & 15, block_sum(h - 1, l >> sh));
+   if(r & sm) put_lane(LV(h)[x >> (sh + 4)].s, (x >> sh) & 15, block_sum(h - 1, x >> sh));
   }
  }
  // 区間の和に当てる 1 次関数 (x, 個数) -> m x + a 個数。m と a は p 未満。
@@ -295,8 +303,8 @@ public:
  Z operator[](int i) const { return get(i); }
  void set(int i, Z x) {
   for(int h= H - 1; h >= 1; --h) push(h, i >> (4 * h));
-  V0()[i]= x.val();
-  for(int h= 1; h < H; ++h) LV(h)[i >> (4 * h + 4)].s[(i >> (4 * h)) & 15]= block_sum(h - 1, i >> (4 * h));
+  put_lane(V0() + ((i >> 4) << 4), i & 15, x.val());
+  for(int h= 1; h < H; ++h) put_lane(LV(h)[i >> (4 * h + 4)].s, (i >> (4 * h)) & 15, block_sum(h - 1, i >> (4 * h)));
  }
  void mul(int i, Z x) { set(i, get(i) + x); }
  [[gnu::always_inline]] Z prod(int l, int r) const { return l < r ? Z::raw(sum(l, r)) : Z(); }
@@ -361,7 +369,7 @@ template <class Z, unsigned P> class Dual {
   const int j= c & 15;
   const u32 m= B.m[j], a= B.a[j];
   if(m == 1 && a == 0) return;
-  B.m[j]= 1, B.a[j]= 0;
+  put_lane(B.m, j, 1), put_lane(B.a, j, 0);
   apply_lanes<true>(h - 1, c, 0, 16, Mul(m), a);
  }
  void prefetch(int l, int r) const {
@@ -406,7 +414,7 @@ public:
  Z operator[](int i) const { return get(i); }
  void set(int i, Z x) {
   for(int h= H - 1; h >= 1; --h) push(h, i >> (4 * h));
-  V0()[i]= x.val();
+  put_lane(V0() + ((i >> 4) << 4), i & 15, x.val());
  }
  [[gnu::always_inline]] void apply(int l, int r, const E& f) {
   if(l >= r) return;

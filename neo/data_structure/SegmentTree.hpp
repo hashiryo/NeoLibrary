@@ -18,8 +18,8 @@
 // モノイドだけなら点の更新と区間の積、両方あれば遅延セグ木、作用だけなら双対セグ木になる。
 // neo/data_structure/segtree/ の標準の構造体 (monoid::Sum など) を渡すと、そのヘッダが中身を速い形に替える。
 // ここにあるのは、それ以外の構造体を受ける二分木の汎用の形。大きさは 2 の冪に揃え、ACL と同じ非再帰で書く。
-// 区間の積は、覆う節の番号を分岐なしで集めてから左と右の 2 本の鎖で畳む。作用が残っているかは別の配列の印で
-// 持つので、作用の型に恒等元は要らない。
+// 区間の積は、値が算術型なら節が決まった段ですぐ畳み、それ以外は覆う節の番号を分岐なしで集めてから左と右の 2 本の
+// 鎖で畳む。作用が残っているかは別の配列の印で持つので、作用の型に恒等元は要らない。
 namespace segment_tree_internal {
 template <class M, class= void> struct monoid: std::false_type {};
 template <class M> struct monoid<M, std::void_t<typename M::T, decltype(&M::op), decltype(&M::ti)>>: std::true_type {};
@@ -70,7 +70,9 @@ template <class M> class Generic {
   else if constexpr(std::is_invocable_v<decltype(M::mp), T&, const E&, int>) return M::mp(v, x, len), true;
   else return M::mp(v, x), true;
  }
- void update(int k) { d[k]= M::op(d[2 * k], d[2 * k + 1]); }
+ // 子の添字は 2k と 2k | 1 と書く。2k + 1 と書くと gcc が 2 つの子を 16 byte の 1 回の読み込みにまとめ、直前の段で
+ // 8 byte で書いた子から値を受け取れずに、書き込みが終わるまで段ごとに待つ (procon-judge の self-segtree-point-set-range-min)。
+ void update(int k) { d[k]= M::op(d[k << 1], d[k << 1 | 1]); }
  // 節 k (長さ len) に作用 x を当てる。
  void all_apply(int k, const E& x, int len) {
   if(k < sz) {
@@ -82,7 +84,7 @@ template <class M> class Generic {
   } else if(k >= sz) map(d[k - sz], x, 1);
  }
  void push(int k, int len) {
-  if(fl[k]) all_apply(2 * k, lz[k], len >> 1), all_apply(2 * k + 1, lz[k], len >> 1), fl[k]= 0;
+  if(fl[k]) all_apply(k << 1, lz[k], len >> 1), all_apply(k << 1 | 1, lz[k], len >> 1), fl[k]= 0;
  }
  // 葉 l と r - 1 (どちらも sz を足した番号) の祖先のうち、区間の途中で切れるものを根から配る。
  void push_ends(int l, int r) {
@@ -146,7 +148,19 @@ public:
   static_assert(MO, "prod はモノイドがあるときだけ");
   l+= sz, r+= sz;
   if constexpr(AC) push_ends(l, r);
-  // 覆う節を分岐なしで集める。左は見つけた順 (左から右)、右は見つけた順 (右から左)。
+  if constexpr(std::is_arithmetic_v<T>) {
+   // 値が算術型なら演算は軽いとみなし、節が決まった段ですぐ値を読む 1 本のループにする。分岐なしで集めてから
+   // 読む形は、値の読み込みが集め終わるまで始まらず、x64 の最小で今の Library より遅かった (procon-judge の
+   // self-segtree-point-set-range-min)。
+   T sl= M::ti(), sr= M::ti();
+   for(; l < r; l>>= 1, r>>= 1) {
+    if(l & 1) sl= M::op(sl, d[l++]);
+    if(r & 1) sr= M::op(d[--r], sr);
+   }
+   return M::op(sl, sr);
+  }
+  // 覆う節を分岐なしで集める。左は見つけた順 (左から右)、右は見つけた順 (右から左)。重い演算 (1 次関数の合成や
+  // 行列の積) では、分岐の予測の外れが無くなるぶん、こちらが速い (procon-judge の yosupo-point-set-range-composite)。
   int L[32], R[32], nl= 0, nr= 0;
   for(; l < r; l>>= 1, r>>= 1) {
    L[nl]= l, nl+= l & 1, l+= l & 1;
