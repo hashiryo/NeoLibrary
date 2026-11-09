@@ -243,7 +243,7 @@ inline Result cost_scaling(int n, const std::vector<i64>& b, const std::vector<A
 }
 // ネットワーク単体法。木を LEMON の NetworkSimplex と同じ形で持つ。木の頂点を先行順に並べた thread (と逆向きの rev_thread)、
 // 部分木の頂点の数 succ_num、部分木の thread の上で最後の頂点 last_succ を持ち、動かした部分木のポテンシャルは thread を
-// たどるだけで付け直す。入る辺は block search (大きさは ceil(sqrt(m + n)) の 2 倍) で選ぶ。根 n と、各頂点から根へ (または
+// たどるだけで付け直す。入る辺は block search (大きさは ceil(sqrt(m + n))) で選ぶ。根 n と、各頂点から根へ (または
 // 根から) の人工の辺 (費用は費用の絶対値の和 + 1) から始める。
 inline Result network_simplex(int n, const std::vector<i64>& b, const std::vector<Arc>& es) {
  Result res;
@@ -278,7 +278,7 @@ inline Result network_simplex(int n, const std::vector<i64>& b, const std::vecto
  }
  if(n > 0) thread[n - 1]= root, rev_thread[root]= n - 1;
  std::vector<int> dirty;
- const int block_size= std::max(1, std::max(int(std::ceil(std::sqrt((double)M))) * 2, std::min(10, n + 1)));
+ const int block_size= std::max(1, std::max(int(std::ceil(std::sqrt((double)M))), std::min(10, n + 1)));
  int next_arc= 0;
  for(;;) {
   // 入る辺 (block search)。
@@ -438,7 +438,7 @@ public:
   assert(0 <= s && s < n_ && 0 <= t && t < n_ && limit >= 0);
   if(s == t) return run(b_) ? 0 : -1;
   const i64 f= max_extra(s, t, limit);
-  if(f < 0) return ok_= false, pot_.clear(), flow_.clear(), -1;
+  if(f < 0) return ok_= false, cost_= 0, pot_.clear(), flow_.clear(), -1;
   std::vector<i64> b(b_);
   b[s]+= f, b[t]-= f;
   run(b);
