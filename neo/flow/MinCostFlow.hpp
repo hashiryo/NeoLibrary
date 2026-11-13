@@ -19,38 +19,42 @@
 // partial augment (長さ 4 まで)、段ごとに元の費用で最適かを確かめて打ち切る手を足したもの。第 3 引数を true にすると、
 // ネットワーク単体法 (LEMON 型の木と block search) で解く。cost scaling は一般の網では頂点の数にほぼ比例して伸びるが、鎖や
 // 星の形の網 (保序回帰、株の売買、締切付きの仕事など) では段ごとに流し直す量が鎖の長さに比例し、2 乗で伸びる。そういう網では
-// ネットワーク単体法を選ぶ。
+// ネットワーク単体法を選ぶ。Cost が浮動小数点数の型なら、第 3 引数によらずネットワーク単体法で解き、費用の和を Cost の型で
+// 返す (cost scaling は費用が整数であることを使う)。浮動小数点数の費用の解は、丸めの誤差の分だけ最適からずれうる。
 //
 // cost scaling は費用を (頂点の数 + 1) 倍して整数で扱う。費用の絶対値の最大に (頂点の数 + 1) を掛けたものが 2^61 を超える
 // ときと、途中でポテンシャルが 2^61 を超えて動いたときは、ネットワーク単体法で解き直す。ネットワーク単体法は、費用の絶対値の
-// 和が 2^60 以下であること。どちらも、辺ごとの (上限 - 下限) の和と b の絶対値の和が long long に収まること。
+// 和が 2^60 以下であること (整数の費用のとき)。どちらも、辺ごとの (上限 - 下限) の和と b の絶対値の和が long long に収まること。
 // 方式は procon-judge の yosupo-min-cost-b-flow、self-flow-mincostflow、self-flow-mincostflow-chain で比べて選んだ。記録は
 // algo-notes の notes/network-flow.md。
 namespace min_cost_flow_internal {
 using i64= long long;
-struct Arc {
+// 辺。C は中で使う費用の型 (整数の費用なら long long、浮動小数点数の費用なら long double)。
+template <class C> struct Arc {
  int s, t;
- i64 l, u, c;
+ i64 l, u;
+ C c;
 };
-struct Result {
+template <class C> struct Result {
  bool ok= false, fallback= false;
- std::vector<i64> pot, flow;
+ std::vector<C> pot;
+ std::vector<i64> flow;
 };
 // cost scaling。解けなければ ok が false、整数があふれそうならそこで止めて fallback を立てる。
-inline Result cost_scaling(int n, const std::vector<i64>& b, const std::vector<Arc>& es) {
+inline Result<i64> cost_scaling(int n, const std::vector<i64>& b, const std::vector<Arc<i64>>& es) {
  constexpr int ALPHA= 16, MAXLEN= 4, ET= 100;
  constexpr i64 LIM= i64(1) << 61;
  const int m= es.size();
- Result res;
+ Result<i64> res;
  std::vector<i64> ex(b);
- for(const Arc& e: es) ex[e.s]-= e.l, ex[e.t]+= e.l;
+ for(const Arc<i64>& e: es) ex[e.s]-= e.l, ex[e.t]+= e.l;
  {
   i64 sum= 0, need= 0;
   for(int v= 0; v < n; ++v) sum+= ex[v], need+= ex[v] > 0 ? ex[v] : 0;
   if(sum != 0) return res;
   if(need > 0) {
    MaxFlow<i64> mf(n + 2);
-   for(const Arc& e: es)
+   for(const Arc<i64>& e: es)
     if(e.s != e.t && e.u > e.l) mf.add_edge(e.s, e.t, e.u - e.l);
    for(int v= 0; v < n; ++v)
     if(ex[v] > 0) mf.add_edge(n, v, ex[v]);
@@ -61,13 +65,13 @@ inline Result cost_scaling(int n, const std::vector<i64>& b, const std::vector<A
  const i64 S= n + 1;
  {
   i64 mx= 0;
-  for(const Arc& e: es)
+  for(const Arc<i64>& e: es)
    if(e.s != e.t) mx= std::max(mx, std::abs(e.c));
   if(mx > LIM / S) return res.fallback= true, res;
  }
  // 弧 k の容量と、逆向きの弧 rev[k] の容量を cp[k] に並べて持つ。逆向きの弧の費用は -cost[k]。
  std::vector<int> st(n + 1), pos(m, -1);
- for(const Arc& e: es)
+ for(const Arc<i64>& e: es)
   if(e.s != e.t) ++st[e.s + 1], ++st[e.t + 1];
  for(int v= 0; v < n; ++v) st[v + 1]+= st[v];
  const int A= st[n];
@@ -78,7 +82,7 @@ inline Result cost_scaling(int n, const std::vector<i64>& b, const std::vector<A
  {
   std::vector<int> p(st.begin(), st.end() - 1);
   for(int i= 0; i < m; ++i) {
-   const Arc& e= es[i];
+   const Arc<i64>& e= es[i];
    if(e.s == e.t) continue;
    const int a= p[e.s]++, r= p[e.t]++;
    to[a]= e.t, from[a]= e.s, rev[a]= r, cp[a]= {e.u - e.l, 0}, cost[a]= e.c * S;
@@ -236,7 +240,7 @@ inline Result cost_scaling(int n, const std::vector<i64>& b, const std::vector<A
  res.pot= std::move(pi);
  res.flow.resize(m);
  for(int i= 0; i < m; ++i) {
-  const Arc& e= es[i];
+  const Arc<i64>& e= es[i];
   res.flow[i]= pos[i] < 0 ? (e.c < 0 ? e.u : e.l) : e.l + cp[pos[i]][1];
  }
  return res;
@@ -244,9 +248,15 @@ inline Result cost_scaling(int n, const std::vector<i64>& b, const std::vector<A
 // ネットワーク単体法。木を LEMON の NetworkSimplex と同じ形で持つ。木の頂点を先行順に並べた thread (と逆向きの rev_thread)、
 // 部分木の頂点の数 succ_num、部分木の thread の上で最後の頂点 last_succ を持ち、動かした部分木のポテンシャルは thread を
 // たどるだけで付け直す。入る辺は block search (大きさは ceil(sqrt(m + n))) で選ぶ。根 n と、各頂点から根へ (または
-// 根から) の人工の辺 (費用は費用の絶対値の和 + 1) から始める。
-inline Result network_simplex(int n, const std::vector<i64>& b, const std::vector<Arc>& es) {
- Result res;
+// 根から) の人工の辺から始める。人工の辺の費用は、整数なら費用の絶対値の和 + 1、浮動小数点数なら (費用の絶対値の最大 + 1)
+// (n + 1) (LEMON と同じく、ポテンシャルを小さく保って丸めの誤差を抑える)。
+// 浮動小数点数の費用では、丸めの誤差で同じ pivot を繰り返さないように、縮約費用が -tol より小さい辺だけを入れる。tol は
+// ポテンシャルの大きさ (人工の辺の費用) に、1024 回の更新でたまる丸めの誤差の 64 倍を掛けたもの。ポテンシャルは pivot
+// 1024 回ごとと最後に、木の辺の費用から付け直して誤差をなくす。
+template <class C> Result<C> network_simplex(int n, const std::vector<i64>& b, const std::vector<Arc<C>>& es) {
+ constexpr bool FP= std::is_floating_point_v<C>;
+ constexpr int RECOMPUTE= 1024;
+ Result<C> res;
  const int m= es.size(), M= m + n, root= n;
  {
   i64 sum= 0;
@@ -254,21 +264,26 @@ inline Result network_simplex(int n, const std::vector<i64>& b, const std::vecto
   if(sum != 0) return res;
  }
  std::vector<int> src(M), dst(M);
- std::vector<i64> cap(M), flow(M, 0), cost(M);
+ std::vector<i64> cap(M), flow(M, 0);
+ std::vector<C> cost(M);
  std::vector<int8_t> state(M, 1);  // 1 が下限、-1 が上限、0 が木
  std::vector<i64> sup(b);
- i64 art= 1;
+ C art= 1;
+ [[maybe_unused]] C mx= 0;
  for(int e= 0; e < m; ++e) {
-  const Arc& a= es[e];
+  const Arc<C>& a= es[e];
   src[e]= a.s, dst[e]= a.t, cap[e]= a.u - a.l, cost[e]= a.c;
   sup[a.s]-= a.l, sup[a.t]+= a.l;
-  art+= std::abs(a.c);
-  assert(art <= (i64(1) << 60));
+  const C ac= a.c < 0 ? -a.c : a.c;
+  if constexpr(FP) mx= std::max(mx, ac);
+  else art+= ac, assert(art <= (i64(1) << 60));
  }
+ if constexpr(FP) art= (mx + 1) * (n + 1);
+ const C tol= FP ? art * (C)(64 * RECOMPUTE) * std::numeric_limits<C>::epsilon() : C(0);
  // 木。pred_dir は木の辺が子から親へ向いていれば 1、親から子なら -1。
  std::vector<int> parent(n + 1), pred(n + 1), thread(n + 1), rev_thread(n + 1), succ_num(n + 1), last_succ(n + 1);
  std::vector<int8_t> pred_dir(n + 1);
- std::vector<i64> pi(n + 1);
+ std::vector<C> pi(n + 1);
  parent[root]= -1, pred[root]= -1, thread[root]= 0, rev_thread[0]= root, succ_num[root]= n + 1, last_succ[root]= root - 1, pi[root]= 0;
  for(int u= 0, e= m; u < n; ++u, ++e) {
   parent[u]= root, pred[u]= e, thread[u]= u + 1, rev_thread[u + 1]= u, succ_num[u]= 1, last_succ[u]= u;
@@ -279,17 +294,24 @@ inline Result network_simplex(int n, const std::vector<i64>& b, const std::vecto
  if(n > 0) thread[n - 1]= root, rev_thread[root]= n - 1;
  std::vector<int> dirty;
  const int block_size= std::max(1, std::max(int(std::ceil(std::sqrt((double)M))), std::min(10, n + 1)));
+ // 木の辺の縮約費用が 0 になるように、ポテンシャルを根から thread の順 (先行順) に付け直す。
+ [[maybe_unused]] auto recompute= [&] {
+  for(int u= thread[root]; u != root; u= thread[u]) pi[u]= pi[parent[u]] - pred_dir[u] * cost[pred[u]];
+ };
  int next_arc= 0;
+ [[maybe_unused]] int pivots= 0;
  for(;;) {
+  if constexpr(FP)
+   if(++pivots % RECOMPUTE == 0) recompute();
   // 入る辺 (block search)。
   int in_arc= -1;
   {
-   i64 mn= 0;
+   C mn= -tol;
    int cnt= block_size, e= next_arc;
    for(int seen= M; seen--; e= e + 1 == M ? 0 : e + 1) {
-    if(const i64 c= state[e] * (cost[e] + pi[src[e]] - pi[dst[e]]); c < mn) mn= c, in_arc= e;
+    if(const C c= state[e] * (cost[e] + pi[src[e]] - pi[dst[e]]); c < mn) mn= c, in_arc= e;
     if(--cnt == 0) {
-     if(mn < 0) break;
+     if(in_arc >= 0) break;
      cnt= block_size;
     }
    }
@@ -393,13 +415,14 @@ inline Result network_simplex(int n, const std::vector<i64>& b, const std::vecto
   }
   // 動かした部分木のポテンシャルを付け直す。
   {
-   const i64 sigma= pi[v_in] - pi[u_in] - pred_dir[u_in] * cost[in_arc];
+   const C sigma= pi[v_in] - pi[u_in] - pred_dir[u_in] * cost[in_arc];
    const int end= thread[last_succ[u_in]];
    for(int u= u_in; u != end; u= thread[u]) pi[u]+= sigma;
   }
  }
  for(int e= m; e < M; ++e)
   if(flow[e] != 0) return res;
+ if constexpr(FP) recompute();
  res.ok= true;
  res.pot.assign(pi.begin(), pi.begin() + n);
  res.flow.resize(m);
@@ -408,9 +431,13 @@ inline Result network_simplex(int n, const std::vector<i64>& b, const std::vecto
 }
 }
 template <class Flow, class Cost, bool UseNetworkSimplex= false> class MinCostFlow {
- static_assert(std::is_integral_v<Flow> && std::is_integral_v<Cost> && sizeof(Flow) <= 8 && sizeof(Cost) <= 8, "流量と費用は 64 bit までの整数の型");
+ static_assert(std::is_integral_v<Flow> && sizeof(Flow) <= 8, "流量は 64 bit までの整数の型");
+ static_assert((std::is_integral_v<Cost> && sizeof(Cost) <= 8) || std::is_floating_point_v<Cost>, "費用は 64 bit までの整数の型か浮動小数点数の型");
+ static constexpr bool FP= std::is_floating_point_v<Cost>;
  using i64= long long;
- using Arc= min_cost_flow_internal::Arc;
+ using C= std::conditional_t<FP, long double, i64>;  // 中で使う費用の型
+ using Arc= min_cost_flow_internal::Arc<C>;
+ using Sum= std::conditional_t<FP, Cost, __int128>;  // 費用の和の型
 public:
  struct Edge {
   int from, to;
@@ -424,7 +451,7 @@ public:
  // 流量が lower 以上 upper 以下の辺。
  int add_edge(int from, int to, Flow lower, Flow upper, Cost cost) {
   assert(0 <= from && from < n_ && 0 <= to && to < n_ && lower <= upper);
-  es_.push_back({from, to, (i64)lower, (i64)upper, (i64)cost});
+  es_.push_back({from, to, (i64)lower, (i64)upper, (C)cost});
   return (int)es_.size() - 1;
  }
  // 頂点 v の湧き出しに x を足す (負なら吸い込み)。
@@ -438,7 +465,7 @@ public:
   assert(0 <= s && s < n_ && 0 <= t && t < n_ && limit >= 0);
   if(s == t) return run(b_) ? 0 : -1;
   const i64 f= max_extra(s, t, limit);
-  if(f < 0) return ok_= false, cost_= 0, pot_.clear(), flow_.clear(), -1;
+  if(f < 0) return ok_= false, cost_= Sum(0), pot_.clear(), flow_.clear(), -1;
   std::vector<i64> b(b_);
   b[s]+= f, b[t]-= f;
   run(b);
@@ -446,7 +473,7 @@ public:
  }
  // 直前の solve か flow の結果。
  bool feasible() const { return ok_; }
- __int128 cost() const { return cost_; }
+ Sum cost() const { return cost_; }
  // 相補性を満たすポテンシャル p。縮約費用 cost + p[from] - p[to] が正の辺は下限まで、負の辺は上限まで流れている。
  std::vector<Cost> potential() const { return std::vector<Cost>(pot_.begin(), pot_.end()); }
  Edge get_edge(int i) const {
@@ -464,16 +491,23 @@ private:
  std::vector<i64> b_;
  std::vector<Arc> es_;
  bool ok_= false;
- __int128 cost_= 0;
- std::vector<i64> pot_, flow_;
+ Sum cost_= Sum(0);
+ std::vector<C> pot_;
+ std::vector<i64> flow_;
  bool run(const std::vector<i64>& b) {
-  min_cost_flow_internal::Result r;
-  if constexpr(!UseNetworkSimplex) r= min_cost_flow_internal::cost_scaling(n_, b, es_);
-  if(UseNetworkSimplex || r.fallback) r= min_cost_flow_internal::network_simplex(n_, b, es_);
-  ok_= r.ok, cost_= 0;
+  min_cost_flow_internal::Result<C> r;
+  if constexpr(!UseNetworkSimplex && !FP) r= min_cost_flow_internal::cost_scaling(n_, b, es_);
+  if(UseNetworkSimplex || FP || r.fallback) r= min_cost_flow_internal::network_simplex<C>(n_, b, es_);
+  ok_= r.ok, cost_= Sum(0);
   if(!ok_) return pot_.clear(), flow_.clear(), false;
   pot_= std::move(r.pot), flow_= std::move(r.flow);
-  for(int i= 0; i < (int)es_.size(); ++i) cost_+= (__int128)flow_[i] * es_[i].c;
+  if constexpr(FP) {
+   long double sum= 0;
+   for(int i= 0; i < (int)es_.size(); ++i) sum+= (long double)flow_[i] * es_[i].c;
+   cost_= (Sum)sum;
+  } else {
+   for(int i= 0; i < (int)es_.size(); ++i) cost_+= (__int128)flow_[i] * es_[i].c;
+  }
   return true;
  }
  // 下限を流したあとの余り ex から、超頂点 S = n から余りの正の頂点へ、余りの負の頂点から超頂点 T = n + 1 へ辺を張った網。
