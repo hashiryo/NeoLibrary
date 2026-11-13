@@ -1,6 +1,6 @@
 ---
 title: 割り当て問題
-documentation_of: ../../neo/graph/assignment.hpp
+documentation_of: ../../neo/combinatorial_optimization/assignment.hpp
 ---
 
 行列の各行に違う列を 1 つずつ割り当て、割り当てた成分の和を最小 (または最大) にします。

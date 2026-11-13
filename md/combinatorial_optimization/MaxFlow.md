@@ -1,6 +1,6 @@
 ---
 title: 最大流
-documentation_of: ../../neo/flow/MaxFlow.hpp
+documentation_of: ../../neo/combinatorial_optimization/MaxFlow.hpp
 ---
 
 有向グラフの s から t への最大流を求めます。値だけでなく、最小カット、辺ごとの流量、道への分解も取り出せます。

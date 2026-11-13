@@ -1,6 +1,6 @@
 ---
 title: 二部マッチング
-documentation_of: ../../neo/graph/BipartiteMatching.hpp
+documentation_of: ../../neo/combinatorial_optimization/BipartiteMatching.hpp
 ---
 
 二部グラフの最大マッチングを求めます。最小点被覆、最大独立集合、最小辺被覆、Dulmage-Mendelsohn 分解も取り出せます。

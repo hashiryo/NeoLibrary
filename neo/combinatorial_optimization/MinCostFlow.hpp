@@ -9,7 +9,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-#include "neo/flow/MaxFlow.hpp"
+#include "neo/combinatorial_optimization/MaxFlow.hpp"
 // 最小費用の b-flow。頂点ごとの湧き出し b (負なら吸い込み) と、辺ごとの下限、上限、費用を受け、流量が下限と上限の間にあり、
 // 各頂点の出る量から入る量を引いたものが b に等しい流れのうち、費用の和が最小のものを求める。費用は負でもよく、自己ループも
 // 受ける。solve() で解き、費用の和 cost()、辺ごとの流量 get_edge(i).flow、相補性を満たすポテンシャル potential() を取り出す。

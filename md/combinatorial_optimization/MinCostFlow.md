@@ -1,6 +1,6 @@
 ---
 title: 最小費用流
-documentation_of: ../../neo/flow/MinCostFlow.hpp
+documentation_of: ../../neo/combinatorial_optimization/MinCostFlow.hpp
 ---
 
 頂点ごとの湧き出しと、辺ごとの下限、上限、費用を受け、費用の和が最小の流れ (最小費用の b-flow) を求めます。s から t へ流せるだけ流す形 (最小費用最大流) も解けます。

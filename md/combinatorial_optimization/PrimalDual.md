@@ -1,6 +1,6 @@
 ---
 title: 最小費用流 (逐次最短路、slope)
-documentation_of: ../../neo/flow/PrimalDual.hpp
+documentation_of: ../../neo/combinatorial_optimization/PrimalDual.hpp
 ---
 
 s から t へ、費用の安い道から順に流す最小費用流です。流す量ごとの費用の最小 (slope) を返せます。流したあとに頂点や辺を足して、続けて流せます。
