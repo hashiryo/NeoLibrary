@@ -42,9 +42,10 @@ template <class Z> Matrix<Z> zmod(const Matrix<Z>& A) {
  const int n= A.h;
  Matrix<Z> res(n, n);
  Elim<Z> e(A);
- if(!e.run(1)) return res;
+ if(!(Z::mod() & 1 ? e.run_v(1) : e.run(1))) return res;
  Z c= Z::raw(1);
  for(u32 p: e.pval) c*= Z::raw(p);
+ if(e.scaled) c*= Z(u64(1) << 32).pow(e.prow.size());  // run_v の要の値は 2^{-32} 倍
  int wx;
  if((int)e.prow.size() == n) {  // 正則。adj(A) = det(A) A^{-1}
   if(e.odd()) c= -c;

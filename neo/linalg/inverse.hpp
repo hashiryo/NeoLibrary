@@ -23,7 +23,11 @@
 // 2 つの位置は、まだ持ち主の行にしか値がない)。すると要の行の右半分は位置 t 以下にしか値がなく、残りの行の更新は列
 // [今の列, n + 要の数) で済む。前進消去の手間は 5n^3/6 から n^3/2 に減る。後退代入は下から 8 行ずつの組にして、組より下の行の
 // 分を 8 行まとめて足す。n <= 16 の ZMod とほかの体は、素朴な掃き出し (浮動小数点数は絶対値が最大の要を選ぶ) にする。
-// procon-judge の yosupo-inverse-matrix で書き比べた zmod_inv_relabel を写したもの。neo/linalg/adjugate.hpp もこの核を使う。
+// 法が奇数なら、前進消去の要を探す列、要の行、行ごとの掛ける数を AVX2 で 4 個ずつ求める (Elim::run_v、neo/linalg/solve.hpp の
+// run_v と同じ形で、単位行列の列の付け替えは右半分の列だけを触る)。要の行と要の値は本当の値の 2^{-32} 倍になる (scaled) が、
+// T の各行と Y の行が同じ倍率なので、T X = Y の解は変わらない。行列と要の行は 2 MB 境界の mmap に置いて huge page を頼む (hvec)。
+// procon-judge の yosupo-inverse-matrix で書き比べた zmod_inv_relabel を写し、前進消去を zmod_inv_hpv の形にしたもの。
+// neo/linalg/adjugate.hpp もこの核を使う。
 namespace inverse_internal {
 using u32= unsigned;
 using u64= unsigned long long;
@@ -81,15 +85,32 @@ inline void block_update(u64* __restrict acc, const u64* __restrict X, const u32
   _mm256_storeu_si256((__m256i*)(ap + 6 * wx), a6), _mm256_storeu_si256((__m256i*)(ap + 7 * wx), a7);
  }
 }
+// 4 個の u64 (2^63 未満) を、2^32 の位を R = 2^32 mod M に掛けて畳んでから Montgomery の還元で 2^{-32} 倍し、M 未満に直す。
+struct Mont {
+ __m256i R, LO, NIV, M, M32;
+ explicit Mont(u32 m) {
+  u32 x= m;
+  for(int i= 0; i < 5; ++i) x*= 2 - m * x;
+  R= _mm256_set1_epi64x((u64(1) << 32) % m), LO= _mm256_set1_epi64x(0xffffffffll), NIV= _mm256_set1_epi64x(u32(-x));
+  M= _mm256_set1_epi64x(m), M32= _mm256_set1_epi32(m);
+ }
+ [[gnu::always_inline]] __m256i redc(__m256i x) const {
+  x= _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(x, 32), R), _mm256_and_si256(x, LO));
+  const __m256i t= _mm256_srli_epi64(_mm256_add_epi64(x, _mm256_mul_epu32(_mm256_mul_epu32(x, NIV), M)), 32);
+  return _mm256_min_epu32(t, _mm256_sub_epi32(t, M32));  // 上の 32 bit は 0 のまま (0 - M は大きいので min で 0)
+ }
+};
+[[gnu::always_inline]] inline __m128i pack_lo(__m256i x) { return _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 2, 4, 6, 0, 0, 0, 0))); }
 // [A | I] の前進消去 (右半分の付け替えつき)。要は列の順に探し、その列で値が 0 でない最初の行を選ぶ (まだ要にしていない行の
 // 並び rem は、要を抜くたびに末尾の行で埋める)。t 番目の要の行の右半分は位置 t 以下にしか値がない。右半分の位置 q の列は、
-// 単位行列の列 pos2row[q] を付け替えたもの。
+// 単位行列の列 pos2row[q] を付け替えたもの。a は後ろに 8 個の余りを持つ (run_v が行の後ろを 8 個まで読む)。
 template <class Z> struct Elim {
  int n, w;
  linalg_internal::hvec<u64> a, U;  // a は n × w (2^62 + 2^32 未満)。U は要の行を M 未満に直したもの (要にした順に w 個ずつ)
  std::vector<int> rem, prow, pcol, pos2row, row2pos;
  std::vector<u32> pval;
- explicit Elim(const Matrix<Z>& A): n(A.h), w((2 * A.h + 3) & ~3), a((size_t)n * w), rem(n), pos2row(n), row2pos(n) {
+ bool scaled= false;  // run_v で消した (要の行と要の値が 2^{-32} 倍)
+ explicit Elim(const Matrix<Z>& A): n(A.h), w((2 * A.h + 3) & ~3), a((size_t)n * w + 8), rem(n), pos2row(n), row2pos(n) {
   for(int i= 0; i < n; ++i) {
    u64* r= row(i);
    for(int j= 0; j < n; ++j) r[j]= A[i][j].val();
@@ -160,6 +181,118 @@ template <class Z> struct Elim {
   }
   return true;
  }
+ // run と同じ前進消去を、要を探す列、要の行、行ごとの掛ける数を 4 個ずつ求めて行う。法は奇数。選ぶ要は run と同じ。
+ // 組の初めに残りの行の次の 8 列を列ごとの配列 C (残りの行の並びの順) に 4 × 4 の転置で写し、要を探す列はそこから読む
+ // (付け替えは右半分の列だけを触るので、C に写した左半分の列は変わらない)。行ごとの掛ける数 F も残りの行の並びの順に列ごとに
+ // 持ち、要の行を抜くときは末尾の行の分をその位置へ移す。値は Montgomery の還元で M 未満に直し、要の行 U と要の値 pval は
+ // 本当の値の 2^{-32} 倍、F は 2^32 倍で持つ。
+ bool run_v(int skip) {
+  const u32 M= Z::mod();
+  const u64 R= (u64(1) << 32) % M;
+  const Mont mt(M);
+  const int n4= (n + 3) & ~3;
+  scaled= true;
+  U.assign((size_t)n * w, 0);
+  std::vector<u64> C((size_t)K * n4), zero(w + 8);
+  std::vector<u32> F((size_t)K * n4), V(n4);
+  const u64* Ub[K];
+  auto fill_cache= [&](int c0) {
+   const int nr= rem.size();
+   for(int i= 0; i < nr; i+= 4) {
+    const u64* r0= row(rem[i]) + c0;
+    const u64* r1= i + 1 < nr ? row(rem[i + 1]) + c0 : zero.data();
+    const u64* r2= i + 2 < nr ? row(rem[i + 2]) + c0 : zero.data();
+    const u64* r3= i + 3 < nr ? row(rem[i + 3]) + c0 : zero.data();
+    for(int h= 0; h < 8; h+= 4) {
+     const __m256i x0= _mm256_loadu_si256((const __m256i*)(r0 + h)), x1= _mm256_loadu_si256((const __m256i*)(r1 + h));
+     const __m256i x2= _mm256_loadu_si256((const __m256i*)(r2 + h)), x3= _mm256_loadu_si256((const __m256i*)(r3 + h));
+     const __m256i t0= _mm256_unpacklo_epi64(x0, x1), t1= _mm256_unpackhi_epi64(x0, x1);
+     const __m256i t2= _mm256_unpacklo_epi64(x2, x3), t3= _mm256_unpackhi_epi64(x2, x3);
+     _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 0) * n4 + i], _mm256_permute2x128_si256(t0, t2, 0x20));
+     _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 1) * n4 + i], _mm256_permute2x128_si256(t1, t3, 0x20));
+     _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 2) * n4 + i], _mm256_permute2x128_si256(t0, t2, 0x31));
+     _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 3) * n4 + i], _mm256_permute2x128_si256(t1, t3, 0x31));
+    }
+   }
+  };
+  int skipped= 0;
+  for(int col= 0; col < n;) {
+   int bt= 0, c0= col;
+   fill_cache(c0);
+   for(; bt < K && col < n; ++col) {
+    if(col == c0 + 8) fill_cache(c0= col);
+    const int nr= rem.size(), nr4= (nr + 3) & ~3;
+    const u64* cc= &C[(size_t)(col - c0) * n4];
+    __m256i us[K];
+    for(int s= 0; s < bt; ++s) us[s]= _mm256_set1_epi64x(Ub[s][col]);
+    int pi= -1;
+    for(int i= 0; i < nr4; i+= 4) {
+     __m256i x= _mm256_loadu_si256((const __m256i*)(cc + i));
+     for(int s= 0; s < bt; ++s) x= _mm256_add_epi64(x, _mm256_mul_epu32(_mm256_cvtepu32_epi64(_mm_loadu_si128((const __m128i*)&F[(size_t)s * n4 + i])), us[s]));
+     const __m256i y= mt.redc(x);
+     _mm_storeu_si128((__m128i*)&V[i], pack_lo(y));
+     if(pi < 0) {
+      const int nz= ~_mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(y, _mm256_setzero_si256()))) & 15;
+      if(nz) pi= i + __builtin_ctz(nz);
+     }
+    }
+    if(pi >= nr) pi= -1;  // 余りの位置 (値は 0) は選ばない
+    if(pi < 0) {
+     if(++skipped > skip) return false;
+     continue;
+    }
+    const int p= rem[pi], t= prow.size(), q= row2pos[p];
+    if(q != t) {  // 行 p の 1 を位置 t に、位置 t にあった行 r2 の 1 を位置 q に移す
+     const int r2= pos2row[t];
+     u64 *ap= row(p), *ar= row(r2);
+     ap[n + q]= 0, ap[n + t]= 1, ar[n + t]= 0, ar[n + q]= 1;
+     pos2row[q]= r2, row2pos[r2]= q, pos2row[t]= p, row2pos[p]= t;
+    }
+    u64* up= &U[(size_t)t * w];
+    {  // 要の行 U[j] = (a[p][j] + sum_s F[s][pi] U[s][j]) 2^{-32} mod M (右半分は位置 t まで。U は 0 で埋めてある)
+     __m256i fs[K];
+     for(int s= 0; s < bt; ++s) fs[s]= _mm256_set1_epi64x(F[(size_t)s * n4 + pi]);
+     const u64* ap= row(p);
+     const int je= std::min(w, (n + t + 1 + 3) & ~3);
+     for(int j= col & ~3; j < je; j+= 4) {
+      __m256i x= _mm256_loadu_si256((const __m256i*)(ap + j));
+      for(int s= 0; s < bt; ++s) x= _mm256_add_epi64(x, _mm256_mul_epu32(_mm256_loadu_si256((const __m256i*)(Ub[s] + j)), fs[s]));
+      _mm256_storeu_si256((__m256i*)(up + j), mt.redc(x));
+     }
+    }
+    {  // F[bt][i] = -V[i] c mod M (c = V[pi]^{-1} 2^32)。Shoup の方法で 4 個ずつ。
+     const u32 c= (Z::raw(V[pi]).inv() * Z::raw(u32(R))).val(), cs= u32((u64(c) << 32) / M);
+     const __m256i Cv= _mm256_set1_epi64x(c), CS= _mm256_set1_epi64x(cs);
+     u32* fb= &F[(size_t)bt * n4];
+     for(int i= 0; i < nr4; i+= 4) {
+      const __m256i vv= _mm256_cvtepu32_epi64(_mm_loadu_si128((const __m128i*)&V[i]));
+      const __m256i qq= _mm256_srli_epi64(_mm256_mul_epu32(vv, CS), 32);
+      __m256i x= _mm256_sub_epi64(_mm256_mul_epu32(vv, Cv), _mm256_mul_epu32(qq, mt.M));  // [0, 2M)
+      x= _mm256_min_epu32(x, _mm256_sub_epi32(x, mt.M32));
+      x= _mm256_sub_epi32(mt.M32, x);
+      x= _mm256_min_epu32(x, _mm256_sub_epi32(x, mt.M32));
+      _mm_storeu_si128((__m128i*)(fb + i), pack_lo(x));
+     }
+    }
+    prow.push_back(p), pcol.push_back(col), pval.push_back(V[pi]);
+    Ub[bt++]= up;
+    const int last= nr - 1;  // 要の行を抜き、末尾の行の分を位置 pi へ移して、末尾を 0 にする
+    rem[pi]= rem[last], rem.pop_back();
+    for(int s= 0; s < bt; ++s) F[(size_t)s * n4 + pi]= F[(size_t)s * n4 + last], F[(size_t)s * n4 + last]= 0;
+    for(int qq= 0; qq < K; ++qq) C[(size_t)qq * n4 + pi]= C[(size_t)qq * n4 + last], C[(size_t)qq * n4 + last]= 0;
+   }
+   if(!bt) continue;
+   for(int s= bt; s < K; ++s) Ub[s]= zero.data();
+   const int jb= col & ~3, je= std::min(w, (n + (int)prow.size() + 3) & ~3), nr= rem.size();
+   for(int i= 0; i < nr; ++i) {  // 最後の組も足す (余因子行列が残りの行を読む)
+    u32 f[K], any= 0;
+    for(int s= 0; s < K; ++s) any|= (f[s]= s < bt ? F[(size_t)s * n4 + i] : 0);
+    if(any) update_row(row(rem[i]), Ub, f, jb, je, R);
+   }
+   for(int s= 0; s < bt; ++s) std::fill(&F[(size_t)s * n4], &F[(size_t)s * n4] + n4, 0u);
+  }
+  return true;
+ }
  // 要にした行の並び (t 番目の要が行 prow[t]) の置換が奇置換か。要が n 本のときだけ使う。
  bool odd() const {
   std::vector<char> seen(n);
@@ -222,7 +355,7 @@ template <class Z> linalg_internal::hvec<u64> tri_solve(const Elim<Z>& e, const 
 template <class Z> std::optional<Matrix<Z>> zmod(const Matrix<Z>& A) {
  const int n= A.h;
  Elim<Z> e(A);
- if(!e.run(0)) return std::nullopt;
+ if(!(Z::mod() & 1 ? e.run_v(0) : e.run(0))) return std::nullopt;
  std::vector<int> cols(n);
  std::iota(cols.begin(), cols.end(), n);
  int wx;

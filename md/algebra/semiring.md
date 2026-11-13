@@ -28,9 +28,10 @@ static constexpr bool fast_one_sided(const MinPlus* p, const MinPlus* q, std::si
 static constexpr bool fast_bounded(const MinPlus* p, std::size_t n);
 static constexpr MinPlus fast_mul(MinPlus l, MinPlus r);
 static constexpr MinPlus fast_fix(MinPlus v, bool bounded);
+static void fast_fix_all(MinPlus* p, std::size_t n, bool bounded);
 ```
 
-行列の積の速い道です。積は INF の比べのない和 `fast_mul` ($x + y$) とし、和 (min か max) で足します。足し終えた成分は `fast_fix` で INF へ直します。掛ける 2 つの行列の値がどれも `fast_one_sided` の範囲にあるか、どれも `fast_bounded` の範囲にあれば、厳密な積と同じ値になります。`fast_one_sided` の範囲は、`MinPlus` なら 0 以上 INF 以下、`MaxPlus` なら -INF 以上 0 以下です。`fast_bounded` の範囲は ±INF か、絶対値が INF / 4 以下の値で、負の重みと正の重みが混ざっていてもかまいません。`bounded` には、`fast_bounded` の範囲で掛けたかを渡します。2 つの配列を受ける `fast_one_sided` は、p と q の n 個ずつを 1 本のループで調べます (x86 で AVX2 が使えれば、先頭から 32 byte ずつの塊を vptest で調べます)。`Matrix` と `SquareMatrix` の積は、まず `fast_one_sided` を調べ、外れたときだけ `fast_bounded` を調べます。
+行列の積の速い道です。積は INF の比べのない和 `fast_mul` ($x + y$) とし、和 (min か max) で足します。足し終えた成分は `fast_fix` で INF へ直します。掛ける 2 つの行列の値がどれも `fast_one_sided` の範囲にあるか、どれも `fast_bounded` の範囲にあれば、厳密な積と同じ値になります。`fast_one_sided` の範囲は、`MinPlus` なら 0 以上 INF 以下、`MaxPlus` なら -INF 以上 0 以下です。`fast_bounded` の範囲は ±INF か、絶対値が INF / 4 以下の値で、負の重みと正の重みが混ざっていてもかまいません。`bounded` には、`fast_bounded` の範囲で掛けたかを渡します。`fast_fix_all` は、配列の n 個に `fast_fix` を当てます。2 つの配列を受ける `fast_one_sided` は、p と q の n 個ずつを 1 本のループで調べます (x86 で AVX2 が使えれば、先頭から 32 byte ずつの塊を vptest で調べます)。`Matrix` と `SquareMatrix` の積は、まず `fast_one_sided` を調べ、外れたときだけ `fast_bounded` を調べます。
 
 ## 中身
 
@@ -45,3 +46,5 @@ static constexpr MinPlus fast_fix(MinPlus v, bool bounded);
 procon-judge の cf-1609-e は、3 × 3 の min-plus の行列をセグメント木に載せる問題です。EPYC 7763 の x64-gcc で、比べを分岐で書いていた形の lib-neo は 86.67 ms (run 40306505343)、分岐なしにした形は 68.06 ms (run 40310861931) でした。INF の比べを持たない minplus_fixed は 39.32 ms です。速い道を足したあとは 48.28 ms で (run 42352552289)、minplus_fixed (39.36 ms) との差の大半は積ごとの範囲の判定でした。判定を省いた写しは 39.97 ms です。
 
 2 つの配列を受ける `fast_one_sided` は、x86 で AVX2 が使えれば、先頭から 32 byte ずつの塊を or して vptest で調べ、残りをスカラーの or で調べます。スカラーの or のループだけでは、x64 の GCC 15 は 32 byte の or を横に畳む 7 命令を付けて組み、3 × 3 の行列の判定が 14 命令ほどになっていました。vptest の形では 8 命令です。同じ回の写しで、x64-gcc は 48.28 ms から 43.32 ms に、x64-clang は 41.09 ms から 33.66 ms になりました。最後の塊を末尾から重ねて読む形も試しましたが、3 × 3 の行列では直前の積の 32 byte と 4 byte の書き込みにまたがり、書き込みからの受け渡しが効かずに 53.62 ms と遅くなりました。arm ではスカラーの or のままにします (SIMDe の形は arm の clang で 6% 遅くなりました)。
+
+`fast_bounded` と `fast_fix_all` も、x86 で AVX2 が使えれば 8 個 (64 bit なら 4 個) ずつ調べて直します。スカラーのループのままでは、x64 の GCC 15 はどちらもベクトル化せず、`fast_bounded` が 1 個に 11 命令、`fast_fix` の一巡が 1 個に 8 命令かかっていました。procon-judge の cf-147-b では、辺 300 の積 1 回ごとに 2 つの行列の 18 万個を調べ、9 万個を直すので、写し元のタイルとの差の大半はここと見ています。

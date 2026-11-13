@@ -48,6 +48,63 @@ template <class T, bool NEG> inline long long chunks_within(const void* p, const
  (void)p, (void)q, (void)n, (void)mask;
  return 0;
 }
+// 4 byte か 8 byte の整数の値を持つ p の n 個のうち、先頭から 32 byte ずつの塊の値がどれも z (INF か -INF) か、絶対値が L 以下かを、
+// x86 で AVX2 が使えれば 8 個 (4 個) ずつ調べ、調べた個数を返す (外れがあれば -1)。残りは呼び出し元がスカラーで調べる。使えなければ
+// 0 を返す。スカラーのループは x64 の GCC 15 がベクトル化せず、1 個に 11 命令かかっていた。
+template <class T> inline long long chunks_bounded(const void* p, std::size_t n, T z, T L) {
+#if defined(__x86_64__) && defined(__AVX2__)
+ if constexpr(sizeof(T) == 4 || sizeof(T) == 8) {
+  constexpr std::size_t S= 32 / sizeof(T);
+  const char* a= static_cast<const char*>(p);
+  std::size_t i= 0;
+  if constexpr(sizeof(T) == 4) {
+   const __m256i Z= _mm256_set1_epi32(int(z)), Lv= _mm256_set1_epi32(int(L)), L2= _mm256_set1_epi32(int(2 * L));
+   __m256i in= _mm256_set1_epi32(-1);
+   for(; i + S <= n; i+= S) {
+    const __m256i v= _mm256_loadu_si256((const __m256i*)(a + i * 4)), t= _mm256_add_epi32(v, Lv);
+    in= _mm256_and_si256(in, _mm256_or_si256(_mm256_cmpeq_epi32(v, Z), _mm256_cmpeq_epi32(_mm256_max_epu32(t, L2), L2)));  // t <= 2L (符号なし)
+   }
+   return _mm256_testc_si256(in, _mm256_set1_epi32(-1)) ? (long long)i : -1;
+  } else {
+   const __m256i Z= _mm256_set1_epi64x((long long)z), Lv= _mm256_set1_epi64x((long long)L), SB= _mm256_set1_epi64x((long long)(1ull << 63));
+   const __m256i L2= _mm256_xor_si256(_mm256_set1_epi64x((long long)(2 * L)), SB);
+   __m256i out= _mm256_setzero_si256();
+   for(; i + S <= n; i+= S) {
+    const __m256i v= _mm256_loadu_si256((const __m256i*)(a + i * 8)), t= _mm256_xor_si256(_mm256_add_epi64(v, Lv), SB);
+    out= _mm256_or_si256(out, _mm256_andnot_si256(_mm256_cmpeq_epi64(v, Z), _mm256_cmpgt_epi64(t, L2)));  // t > 2L (符号なし)
+   }
+   return _mm256_testz_si256(out, out) ? (long long)i : -1;
+  }
+ }
+#endif
+ (void)p, (void)n, (void)z, (void)L;
+ return 0;
+}
+// 4 byte か 8 byte の符号付き整数の値を持つ p の n 個のうち、先頭から 32 byte ずつの塊の値を、MIN なら t 以上を、そうでなければ
+// t 以下を z に直し、直した個数を返す (x86 で AVX2 が使えるときだけ。使えなければ 0)。残りは呼び出し元が直す。
+template <class T, bool MIN> inline std::size_t chunks_fix(void* p, std::size_t n, T t, T z) {
+#if defined(__x86_64__) && defined(__AVX2__)
+ if constexpr(sizeof(T) == 4 || sizeof(T) == 8) {
+  constexpr std::size_t S= 32 / sizeof(T);
+  char* a= static_cast<char*>(p);
+  const T u= MIN ? T(t - 1) : T(t + 1);  // MIN: v > t - 1、MAX: t + 1 > v
+  const __m256i Tv= sizeof(T) == 4 ? _mm256_set1_epi32(int(u)) : _mm256_set1_epi64x((long long)u);
+  const __m256i Z= sizeof(T) == 4 ? _mm256_set1_epi32(int(z)) : _mm256_set1_epi64x((long long)z);
+  std::size_t i= 0;
+  for(; i + S <= n; i+= S) {
+   __m256i* q= (__m256i*)(a + i * sizeof(T));
+   const __m256i v= _mm256_loadu_si256(q);
+   __m256i m;
+   if constexpr(sizeof(T) == 4) m= MIN ? _mm256_cmpgt_epi32(v, Tv) : _mm256_cmpgt_epi32(Tv, v);
+   else m= MIN ? _mm256_cmpgt_epi64(v, Tv) : _mm256_cmpgt_epi64(Tv, v);
+   _mm256_storeu_si256(q, _mm256_blendv_epi8(v, Z, m));
+  }
+  return i;
+ }
+#endif
+ (void)p, (void)n, (void)t, (void)z;
+ return 0;
+}
 }
 template <class T> struct MinPlus {
  static constexpr T INF= semiring_internal::inf<T>();
@@ -80,8 +137,10 @@ template <class T> struct MinPlus {
   else {
    using U= std::make_unsigned_t<T>;
    constexpr U L= U(INF) >> 2;
+   long long i= 0;
+   if(!std::is_constant_evaluated() && (i= semiring_internal::chunks_bounded<T>(p, n, INF, T(L))) < 0) return false;
    bool ok= true;
-   for(std::size_t i= 0; i < n; ++i) ok&= (U(p[i].x) == U(INF)) | (U(U(p[i].x) + L) <= 2 * L);
+   for(std::size_t j= i; j < n; ++j) ok&= (U(p[j].x) == U(INF)) | (U(U(p[j].x) + L) <= 2 * L);
    return ok;
   }
  }
@@ -90,6 +149,12 @@ template <class T> struct MinPlus {
  static constexpr MinPlus fast_fix(MinPlus v, bool bounded) {
   const T t= bounded ? T(INF >> 1) : INF;
   return MinPlus(v.x >= t ? INF : v.x);
+ }
+ // p の n 個に fast_fix を当てる (行列の積の速い道の最後。x86 で AVX2 が使えれば 32 byte ずつ)。
+ static void fast_fix_all(MinPlus* p, std::size_t n, bool bounded) {
+  std::size_t i= 0;
+  if constexpr(!std::is_floating_point_v<T> && std::is_signed_v<T>) i= semiring_internal::chunks_fix<T, true>(p, n, bounded ? T(INF >> 1) : INF, INF);
+  for(; i < n; ++i) p[i]= fast_fix(p[i], bounded);
  }
  constexpr MinPlus& operator+=(MinPlus r) { return x= r.x < x ? r.x : x, *this; }
  constexpr MinPlus& operator*=(MinPlus r) {
@@ -134,8 +199,10 @@ template <class T> struct MaxPlus {
   else {
    using U= std::make_unsigned_t<T>;
    constexpr U L= U(INF) >> 2;
+   long long i= 0;
+   if(!std::is_constant_evaluated() && (i= semiring_internal::chunks_bounded<T>(p, n, T(-INF), T(L))) < 0) return false;
    bool ok= true;
-   for(std::size_t i= 0; i < n; ++i) ok&= (U(p[i].x) == U(-INF)) | (U(U(p[i].x) + L) <= 2 * L);
+   for(std::size_t j= i; j < n; ++j) ok&= (U(p[j].x) == U(-INF)) | (U(U(p[j].x) + L) <= 2 * L);
    return ok;
   }
  }
@@ -143,6 +210,11 @@ template <class T> struct MaxPlus {
  static constexpr MaxPlus fast_fix(MaxPlus v, bool bounded) {
   const T t= bounded ? T(INF >> 1) : INF;
   return MaxPlus(v.x <= -t ? -INF : v.x);
+ }
+ static void fast_fix_all(MaxPlus* p, std::size_t n, bool bounded) {
+  std::size_t i= 0;
+  if constexpr(!std::is_floating_point_v<T> && std::is_signed_v<T>) i= semiring_internal::chunks_fix<T, false>(p, n, bounded ? T(-(INF >> 1)) : T(-INF), T(-INF));
+  for(; i < n; ++i) p[i]= fast_fix(p[i], bounded);
  }
  constexpr MaxPlus& operator+=(MaxPlus r) { return x= r.x > x ? r.x : x, *this; }
  constexpr MaxPlus& operator*=(MaxPlus r) {

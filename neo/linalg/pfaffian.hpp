@@ -21,7 +21,12 @@
 // 積に入らないので、要がなければ (列 c の行 c + 1 以降がすべて 0 なら) 何もせずに次の列へ進む (0 を返さない)。
 // ZMod は、行を u64 で持ち、要を 8 本ずつ貯めて残りの各行を 1 回だけ読み書きする (遅らせた更新)。列を入れ替えるときは、残りの行と、
 // 貯めている要の行の両方で入れ替える。n <= 16 の ZMod とほかの体は素朴な形 (浮動小数点数は絶対値が最大の要を選ぶ) にする。
-// procon-judge の yosupo-pfaffian-of-matrix で書き比べた zmod_pf_blk8 を写したもの。
+// 法が奇数なら、要を探す列、要の行、行ごとの掛ける数を AVX2 で 4 個ずつ求める (zmod_v)。組の初めに、残りの行の次の 8 列を位置で
+// 引く列ごとの配列 C に 4 × 4 の転置で写し、掛ける数 F も位置で引く列ごとの配列に持つ。位置 c + 1 と sel の行を入れ替えるときは
+// C と F と今の列の値 V も入れ替え、列 c + 1 と sel が両方とも写した 8 列の中なら C の 2 列を入れ替え、c + 1 だけが中なら
+// 入れ替えたあとの行から読み直す。値は Montgomery の還元で M 未満に直し、要の行を 2^{-32} 倍、掛ける数を 2^32 倍で持つので、
+// 偶数の列で掛ける要の値も 2^{-32} 倍になり、最後に掛けた数だけ 2^32 を掛けて戻す。選ぶ要は zmod と同じ。
+// procon-judge の yosupo-pfaffian-of-matrix で書き比べた zmod_pf_blk8 と zmod_pf_hpv を写したもの。
 namespace pfaffian_internal {
 using u32= unsigned;
 using u64= unsigned long long;
@@ -116,6 +121,146 @@ template <class Z> Z zmod(const Matrix<Z>& A) {
  }
  return res;
 }
+// 4 個の u64 を、2^32 の位を R = 2^32 mod M に掛けて畳んでから Montgomery の還元で 2^{-32} 倍し、M 未満に直す (M は奇数)。
+struct Mont {
+ __m256i R, LO, NIV, M, M32;
+ explicit Mont(u32 m) {
+  u32 x= m;
+  for(int i= 0; i < 5; ++i) x*= 2 - m * x;
+  R= _mm256_set1_epi64x((u64(1) << 32) % m), LO= _mm256_set1_epi64x(0xffffffffll), NIV= _mm256_set1_epi64x(u32(-x));
+  M= _mm256_set1_epi64x(m), M32= _mm256_set1_epi32(m);
+ }
+ [[gnu::always_inline]] __m256i redc(__m256i x) const {
+  x= _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(x, 32), R), _mm256_and_si256(x, LO));
+  const __m256i t= _mm256_srli_epi64(_mm256_add_epi64(x, _mm256_mul_epu32(_mm256_mul_epu32(x, NIV), M)), 32);
+  return _mm256_min_epu32(t, _mm256_sub_epi32(t, M32));  // 上の 32 bit は 0 のまま (0 - M は大きいので min で 0)
+ }
+};
+// u64 の 4 個の下の 32 bit を u32 の 4 個に詰める。
+[[gnu::always_inline]] inline __m128i pack_lo(__m256i x) { return _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 2, 4, 6, 0, 0, 0, 0))); }
+template <class Z> Z zmod_v(const Matrix<Z>& A) {
+ const int n= A.h, w= (n + 3) & ~3, n4= w;
+ const u32 M= Z::mod();
+ const u64 R= (u64(1) << 32) % M;
+ const Mont mt(M);
+ linalg_internal::hvec<u64> a((size_t)n * w + 8);  // 写した 8 列を読むとき、最後の行の後ろを 8 個まで読む
+ for(int i= 0; i < n; ++i) {
+  u64* r= &a[(size_t)i * w];
+  for(int j= 0; j < n; ++j) r[j]= A[i][j].val();
+  for(int j= n; j < w; ++j) r[j]= 0;
+ }
+ std::fill(a.begin() + (size_t)n * w, a.end(), 0);
+ auto row= [&](int r) { return &a[(size_t)r * w]; };
+ std::vector<int> pos(n);  // pos[t] は位置 t にある行
+ std::iota(pos.begin(), pos.end(), 0);
+ std::vector<u64> C((size_t)K * n4), U((size_t)K * w + 8), zero(w + 8);
+ std::vector<u32> F((size_t)K * n4), V(n4);
+ const u64* Ub[K];
+ Z res= Z::raw(1);
+ int bt= 0, first= 1, c0= -1000, ne= 0;  // first は残りの行の最初の位置、c0 は C に写した最初の列、ne は掛けた要の値の数
+ auto fill_cache= [&](int cs) {
+  c0= cs;
+  for(int t= first & ~3; t < n; t+= 4) {
+   const u64* r0= row(pos[t]) + cs;
+   const u64* r1= t + 1 < n ? row(pos[t + 1]) + cs : zero.data();
+   const u64* r2= t + 2 < n ? row(pos[t + 2]) + cs : zero.data();
+   const u64* r3= t + 3 < n ? row(pos[t + 3]) + cs : zero.data();
+   for(int h= 0; h < 8; h+= 4) {
+    const __m256i x0= _mm256_loadu_si256((const __m256i*)(r0 + h)), x1= _mm256_loadu_si256((const __m256i*)(r1 + h));
+    const __m256i x2= _mm256_loadu_si256((const __m256i*)(r2 + h)), x3= _mm256_loadu_si256((const __m256i*)(r3 + h));
+    const __m256i t0= _mm256_unpacklo_epi64(x0, x1), t1= _mm256_unpackhi_epi64(x0, x1);
+    const __m256i t2= _mm256_unpacklo_epi64(x2, x3), t3= _mm256_unpackhi_epi64(x2, x3);
+    _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 0) * n4 + t], _mm256_permute2x128_si256(t0, t2, 0x20));
+    _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 1) * n4 + t], _mm256_permute2x128_si256(t1, t3, 0x20));
+    _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 2) * n4 + t], _mm256_permute2x128_si256(t0, t2, 0x31));
+    _mm256_storeu_si256((__m256i*)&C[(size_t)(h + 3) * n4 + t], _mm256_permute2x128_si256(t1, t3, 0x31));
+   }
+  }
+ };
+ auto flush= [&](int col) {
+  if(!bt) return;
+  for(int s= bt; s < K; ++s) Ub[s]= zero.data();
+  for(int t= first; t < n; ++t) {
+   u32 f[K], any= 0;
+   for(int s= 0; s < K; ++s) any|= (f[s]= s < bt ? F[(size_t)s * n4 + t] : 0);
+   if(any) update_row(row(pos[t]), Ub, f, col & ~3, w, R);
+  }
+  for(int s= 0; s < bt; ++s) std::fill(&F[(size_t)s * n4], &F[(size_t)s * n4] + n4, 0u);
+  bt= 0, c0= -1000;  // 行が変わったので写し直す
+ };
+ for(int c= 0; c + 1 < n; ++c) {
+  if(c < c0 || c >= c0 + 8) fill_cache(c);
+  const u64* cc= &C[(size_t)(c - c0) * n4];
+  __m256i us[K];
+  for(int s= 0; s < bt; ++s) us[s]= _mm256_set1_epi64x(Ub[s][c]);
+  int sel= -1;
+  for(int t= first & ~3; t < n4; t+= 4) {
+   __m256i x= _mm256_loadu_si256((const __m256i*)(cc + t));
+   for(int s= 0; s < bt; ++s) x= _mm256_add_epi64(x, _mm256_mul_epu32(_mm256_cvtepu32_epi64(_mm_loadu_si128((const __m128i*)&F[(size_t)s * n4 + t])), us[s]));
+   const __m256i y= mt.redc(x);
+   _mm_storeu_si128((__m128i*)&V[t], pack_lo(y));
+   if(sel < 0) {
+    int nz= ~_mm256_movemask_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(y, _mm256_setzero_si256()))) & 15;
+    if(t < first) nz&= ~((1 << (first - t)) - 1);  // 位置 first より前は終わった行
+    if(nz) sel= t + __builtin_ctz(nz);
+   }
+  }
+  if(sel >= n) sel= -1;
+  if(sel < 0) {  // 列 c が消えている。c が奇数なら H[c + 1][c] = 0 は積に入らないので、そのまま次の列へ進む
+   if(!(c & 1)) return Z();
+   first= c + 2;
+   continue;
+  }
+  if(sel != c + 1) {
+   std::swap(pos[c + 1], pos[sel]), std::swap(V[c + 1], V[sel]);
+   for(int q= 0; q < K; ++q) std::swap(C[(size_t)q * n4 + c + 1], C[(size_t)q * n4 + sel]);
+   for(int s= 0; s < bt; ++s) std::swap(F[(size_t)s * n4 + c + 1], F[(size_t)s * n4 + sel]);
+   for(int t= c + 1; t < n; ++t) {
+    u64* r= row(pos[t]);
+    std::swap(r[c + 1], r[sel]);
+   }
+   for(int s= 0; s < bt; ++s) std::swap(U[(size_t)s * w + c + 1], U[(size_t)s * w + sel]);
+   const int q1= c + 1 - c0, q2= sel - c0;
+   if(q1 < 8 && q2 < 8) {
+    for(int t= first & ~3; t < n4; ++t) std::swap(C[(size_t)q1 * n4 + t], C[(size_t)q2 * n4 + t]);
+   } else if(q1 < 8) {
+    for(int t= first; t < n; ++t) C[(size_t)q1 * n4 + t]= row(pos[t])[c + 1];
+   }
+   res= -res;
+  }
+  const int p= pos[c + 1];
+  if(!(c & 1)) res*= -Z::raw(V[c + 1]), ++ne;
+  u64* up= &U[(size_t)bt * w];
+  {  // 要の行 U[j] = (a[p][j] + sum_s F[s][c + 1] U[s][j]) 2^{-32} mod M
+   __m256i fs[K];
+   for(int s= 0; s < bt; ++s) fs[s]= _mm256_set1_epi64x(F[(size_t)s * n4 + c + 1]);
+   const u64* ap= row(p);
+   for(int j= c & ~3; j < w; j+= 4) {
+    __m256i x= _mm256_loadu_si256((const __m256i*)(ap + j));
+    for(int s= 0; s < bt; ++s) x= _mm256_add_epi64(x, _mm256_mul_epu32(_mm256_loadu_si256((const __m256i*)(Ub[s] + j)), fs[s]));
+    _mm256_storeu_si256((__m256i*)(up + j), mt.redc(x));
+   }
+  }
+  {  // F[bt][t] = -V[t] cinv mod M (t >= c + 2、cinv = V[c + 1]^{-1} 2^32)。Shoup の方法で 4 個ずつ
+   const u32 ci= (Z::raw(V[c + 1]).inv() * Z::raw(u32(R))).val(), cs= u32((u64(ci) << 32) / M);
+   const __m256i Cv= _mm256_set1_epi64x(ci), CS= _mm256_set1_epi64x(cs);
+   u32* fb= &F[(size_t)bt * n4];
+   for(int t= (c + 2) & ~3; t < n4; t+= 4) {
+    const __m256i vv= _mm256_cvtepu32_epi64(_mm_loadu_si128((const __m128i*)&V[t]));
+    const __m256i qq= _mm256_srli_epi64(_mm256_mul_epu32(vv, CS), 32);
+    __m256i x= _mm256_sub_epi64(_mm256_mul_epu32(vv, Cv), _mm256_mul_epu32(qq, mt.M));
+    x= _mm256_min_epu32(x, _mm256_sub_epi32(x, mt.M32));
+    x= _mm256_sub_epi32(mt.M32, x);
+    x= _mm256_min_epu32(x, _mm256_sub_epi32(x, mt.M32));
+    _mm_storeu_si128((__m128i*)(fb + t), pack_lo(x));
+   }
+  }
+  Ub[bt++]= up;
+  first= c + 2;
+  if(bt == K) flush(c + 1);
+ }
+ return res * Z(R).pow(ne);  // 掛けた要の値は 2^{-32} 倍
+}
 template <class T> T field(Matrix<T> A) {
  const int n= A.h;
  const T zero= linalg_internal::zero<T>(), one= linalg_internal::one<T>();
@@ -153,7 +298,7 @@ template <class T> T pfaffian(Matrix<T> A) {
  assert(A.h == A.w);
  if(A.h & 1) return linalg_internal::zero<T>();
  if constexpr(linalg_internal::is_zmod_v<T>) {
-  if(A.h > 16) return pfaffian_internal::zmod(A);
+  if(A.h > 16) return T::mod() & 1 ? pfaffian_internal::zmod_v(A) : pfaffian_internal::zmod(A);
  }
  return pfaffian_internal::field(std::move(A));
 }

@@ -883,7 +883,9 @@ template <class T> struct Matrix {
         std::fill(bk + w, bk + w16, z);
        }
        linalg_internal::semiring_tile<(z > 0)>(a.data(), b.data(), reinterpret_cast<int*>(c.a.data()), h, m, w, w16, z);
-       for(auto& v: c.a) v= T::fast_fix(v, !one);
+       if constexpr(requires { T::fast_fix_all(c.a.data(), c.a.size(), true); }) T::fast_fix_all(c.a.data(), c.a.size(), !one);
+       else
+        for(auto& v: c.a) v= T::fast_fix(v, !one);
        return c;
       }
      }
@@ -891,7 +893,9 @@ template <class T> struct Matrix {
      for(int i= 0; i < l.h; ++i) {
       T* ci= c[i];
       for(int k= 0; k < l.w; ++k) linalg_internal::fast_axpy(ci, r[k], l[i][k], r.w);
-      for(int j= 0; j < r.w; ++j) ci[j]= T::fast_fix(ci[j], !one);
+      if constexpr(requires { T::fast_fix_all(ci, std::size_t(r.w), true); }) T::fast_fix_all(ci, r.w, !one);
+      else
+       for(int j= 0; j < r.w; ++j) ci[j]= T::fast_fix(ci[j], !one);
      }
      return c;
     }
