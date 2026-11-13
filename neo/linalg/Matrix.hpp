@@ -226,6 +226,19 @@ template <class I> inline u32 vin(const I& x) {
  if constexpr(std::is_same_v<I, u32>) return x;
  else return x.val();
 }
+// vin の 8 個版。p から I を 8 個読み、M 未満に直す。I が Z なら値は 2M 未満で、M 以上なら M を引く (min(x, x - M))。I は Z か
+// u32 で、どちらも 4 byte の値 1 つなので、8 個をそのまま 32 byte で読む。m は vin_mod<I>() (u32 なら使わない)。x64 の GCC 15 は
+// 1 個ずつの vin のループをベクトル化しなかった (Z の配列と書き込み先が重なりうるため)。
+template <class I> inline __m256i vin_mod() {
+ if constexpr(std::is_same_v<I, u32>) return _mm256_setzero_si256();
+ else return _mm256_set1_epi32(I::mod());
+}
+template <class I> [[gnu::always_inline]] inline __m256i vin8(const I* p, __m256i m) {
+ static_assert(sizeof(I) == sizeof(u32));
+ const __m256i x= _mm256_loadu_si256((const __m256i*)p);
+ if constexpr(std::is_same_v<I, u32>) return (void)m, x;
+ else return _mm256_min_epu32(x, _mm256_sub_epi32(x, m));
+}
 template <class O> inline O vout(u32 x) {
  if constexpr(std::is_same_v<O, u32>) return x;
  else return O::raw(x);
@@ -312,13 +325,24 @@ template <int MODE, class Z, class O> void tile(const u32* a, const u32* bp, int
 }
 // A (行 h、列 w、行の間隔 ld) の値を M 未満に直し、行の間隔 w8 の a に写す。a の残り (広げた分) は 0 にしておく。
 template <class I> void load_rows(const I* A, int h, int w, std::size_t ld, u32* a, int w8) {
- for(int i= 0; i < h; ++i)
-  for(int j= 0; j < w; ++j) a[std::size_t(i) * w8 + j]= vin(A[std::size_t(i) * ld + j]);
+ const __m256i m= vin_mod<I>();
+ for(int i= 0; i < h; ++i) {
+  const I* src= A + std::size_t(i) * ld;
+  u32* dst= a + std::size_t(i) * w8;
+  int j= 0;
+  for(; j + 8 <= w; j+= 8) _mm256_storeu_si256((__m256i*)(dst + j), vin8(src + j, m));
+  for(; j < w; ++j) dst[j]= vin(src[j]);
+ }
 }
 // B (行 h、列 w、行の間隔 ld) の値を M 未満に直し、8 列ずつの帯 [帯][k][8] (k < h8) に詰める。bp の残りは 0 にしておく。
 template <class I> void pack_bands(const I* B, int h, int w, std::size_t ld, u32* bp, int h8) {
- for(int k= 0; k < h; ++k)
-  for(int j= 0; j < w; ++j) bp[std::size_t(j & ~7) * h8 + k * 8 + (j & 7)]= vin(B[std::size_t(k) * ld + j]);
+ const __m256i m= vin_mod<I>();
+ const int w8= w & ~7;
+ for(int k= 0; k < h; ++k) {
+  const I* src= B + std::size_t(k) * ld;
+  for(int j= 0; j < w8; j+= 8) _mm256_storeu_si256((__m256i*)(bp + std::size_t(j) * h8 + k * 8), vin8(src + j, m));
+  for(int j= w8; j < w; ++j) bp[std::size_t(w8) * h8 + k * 8 + (j & 7)]= vin(src[j]);
+ }
 }
 // C = A B をタイルの核で。A、B は I (u32 なら M 未満) の行優先、C は O の行優先。
 template <class Z, class I, class O> void tile_mul(const I* A, const I* B, O* C, int n, int m, int p, const Mod& md) {
@@ -355,14 +379,15 @@ template <class Z> void small_mul(const Z* A, const Z* B, Z* C, int n, int m, in
   for(int j= 0; j < p; ++j) C[std::size_t(i) * p + j]= Z(s[j]);
  }
 }
-// Strassen の再帰。1 辺 64 のブロックを Morton 順に並べ、ブロックの積 c = a b 2^{-32} を 4 行 × 8 列のタイル (tile と同じく、
+// Strassen の再帰。1 辺 SB のブロックを Morton 順に並べ、ブロックの積 c = a b 2^{-32} を 4 行 × 8 列のタイル (tile と同じく、
 // 奇数番目の列は 4 byte ずらして読む。b の後ろは同じ領域の続きなので、はみ出しても読める) で求める。
 // 再帰の中は足し算と引き算だけなので、どのブロックも同じ 2^{-32} 倍を持ち、最後に 2^64 mod M を掛けて戻す。値は M 未満。
 // 7 回の積は Winograd の形で、1 段の足し算と引き算は 15 回 (並べ方は Boyer、Dumas、Pernet、Zhou (2009) の表 1 の、作業の
 // 領域 X、Y の 2 つで C = A B を求める順)。作業の配列は 1 つの領域にまとめて huge page を頼む (Region)。
 // procon-judge の yosupo-matrix-product の zmod_winograd_hpo (_strassen_hp.hpp) の法を実行時の奇数に広げたもの。
-constexpr int SB= 64;
-[[gnu::noinline]] inline void s_kernel(const u32* __restrict a, const u32* __restrict b, u32* __restrict c, const Mod& md) {
+// SB は 64。32 にすると再帰が 1 段深くなり、積和が 7/8 になる代わりに足し算と引き算が 1 段分増える (procon-judge の
+// yosupo-matrix-product で、1024 次の積を lib-neo-core32 と lib-neo-core で比べている)。
+template <int SB> [[gnu::noinline]] void s_kernel(const u32* __restrict a, const u32* __restrict b, u32* __restrict c, const Mod& md) {
  const __m256i M1= _mm256_set1_epi32(md.m), M2= _mm256_set1_epi32(2 * md.m), TOP= _mm256_set1_epi64x((long long)(1ull << 63));
  const __m256i NIV= _mm256_set1_epi32(md.niv), R32= _mm256_set1_epi64x(md.r32), LO= _mm256_set1_epi64x(0xffffffffll);
  for(int i= 0; i < SB; i+= 4) {
@@ -401,41 +426,47 @@ inline void s_sub(u32* x, const u32* y, const u32* z, std::size_t d, __m256i m) 
 // T1 = B12 - B11、T2 = B22 - T1、T3 = B22 - B12、T4 = T2 - B21、P1 = A11 B11、P2 = A12 B21、P3 = S4 B22、P4 = A22 T4、
 // P5 = S1 T1、P6 = S2 T2、P7 = S3 T3、U2 = P1 + P6、U3 = U2 + P7、U4 = U2 + P5 として C11 = P1 + P2、C12 = U4 + P3、
 // C21 = U3 - P4、C22 = U3 + P5。X、Y は 1 辺 n / 2 の作業の領域で、深い段はその後ろを使う (どちらも n^2 / 3 ほど)。
-inline void s_mul(const u32* a, const u32* b, u32* c, std::size_t n, u32* X, u32* Y, const Mod& md) {
- if(n == SB) return s_kernel(a, b, c, md);
+template <int SB> void s_mul(const u32* a, const u32* b, u32* c, std::size_t n, u32* X, u32* Y, const Mod& md) {
+ if(n == SB) return s_kernel<SB>(a, b, c, md);
  const __m256i m= _mm256_set1_epi32(md.m);
  const std::size_t h= n / 2, d= h * h;
  const u32 *a11= a, *a12= a + d, *a21= a + 2 * d, *a22= a + 3 * d;
  const u32 *b11= b, *b12= b + d, *b21= b + 2 * d, *b22= b + 3 * d;
  u32 *c11= c, *c12= c + d, *c21= c + 2 * d, *c22= c + 3 * d, *X2= X + d, *Y2= Y + d;
- s_sub(X, a11, a21, d, m), s_sub(Y, b22, b12, d, m), s_mul(X, Y, c21, h, X2, Y2, md);  // C21 = P7
- s_add(X, a21, a22, d, m), s_sub(Y, b12, b11, d, m), s_mul(X, Y, c22, h, X2, Y2, md);  // C22 = P5
- s_sub(X, X, a11, d, m), s_sub(Y, b22, Y, d, m), s_mul(X, Y, c12, h, X2, Y2, md);  // X = S2、Y = T2、C12 = P6
- s_sub(X, a12, X, d, m), s_mul(X, b22, c11, h, X2, Y2, md);  // X = S4、C11 = P3
- s_mul(a11, b11, X, h, X2, Y2, md);  // X = P1
+ s_sub(X, a11, a21, d, m), s_sub(Y, b22, b12, d, m), s_mul<SB>(X, Y, c21, h, X2, Y2, md);  // C21 = P7
+ s_add(X, a21, a22, d, m), s_sub(Y, b12, b11, d, m), s_mul<SB>(X, Y, c22, h, X2, Y2, md);  // C22 = P5
+ s_sub(X, X, a11, d, m), s_sub(Y, b22, Y, d, m), s_mul<SB>(X, Y, c12, h, X2, Y2, md);  // X = S2、Y = T2、C12 = P6
+ s_sub(X, a12, X, d, m), s_mul<SB>(X, b22, c11, h, X2, Y2, md);  // X = S4、C11 = P3
+ s_mul<SB>(a11, b11, X, h, X2, Y2, md);  // X = P1
  s_add(c12, X, c12, d, m), s_add(c21, c12, c21, d, m), s_add(c12, c12, c22, d, m), s_add(c22, c21, c22, d, m), s_add(c12, c12, c11, d, m);
- s_sub(Y, Y, b21, d, m), s_mul(a22, Y, c11, h, X2, Y2, md), s_sub(c21, c21, c11, d, m);  // Y = T4、C11 = P4、C21 = U6
- s_mul(a12, b21, c11, h, X2, Y2, md), s_add(c11, X, c11, d, m);  // C11 = P2、U1
+ s_sub(Y, Y, b21, d, m), s_mul<SB>(a22, Y, c11, h, X2, Y2, md), s_sub(c21, c21, c11, d, m);  // Y = T4、C11 = P4、C21 = U6
+ s_mul<SB>(a12, b21, c11, h, X2, Y2, md), s_add(c11, X, c11, d, m);  // C11 = P2、U1
 }
 // 行 rows、列 cols の行列 src (行の間隔 ld) の値を M 未満に直し、1 辺 n のブロック列 (Morton 順) に写す。範囲の外は 0。
-template <class Z> void s_place(const Z* src, int rows, int cols, std::size_t ld, std::size_t n, u32* dst) {
+template <int SB, class Z> void s_place(const Z* src, int rows, int cols, std::size_t ld, std::size_t n, u32* dst) {
  if(n == SB) {
+  const __m256i m= vin_mod<Z>();
   for(int i= 0; i < SB; ++i) {
    u32* d= dst + i * SB;
    const int w= i < rows ? std::clamp(cols, 0, SB) : 0;
-   for(int j= 0; j < w; ++j) d[j]= src[i * ld + j].val();
+   if(w > 0) {
+    const Z* r= src + i * ld;
+    int j= 0;
+    for(; j + 8 <= w; j+= 8) _mm256_storeu_si256((__m256i*)(d + j), vin8(r + j, m));
+    for(; j < w; ++j) d[j]= r[j].val();
+   }
    std::fill(d + w, d + SB, 0u);
   }
   return;
  }
  const std::size_t h= n / 2, d= h * h;
- s_place(src, rows, cols, ld, h, dst);
- s_place(src + h, rows, int(cols - h), ld, h, dst + d);
- s_place(src + h * ld, int(rows - h), cols, ld, h, dst + 2 * d);
- s_place(src + h * ld + h, int(rows - h), int(cols - h), ld, h, dst + 3 * d);
+ s_place<SB>(src, rows, cols, ld, h, dst);
+ s_place<SB>(src + h, rows, int(cols - h), ld, h, dst + d);
+ s_place<SB>(src + h * ld, int(rows - h), cols, ld, h, dst + 2 * d);
+ s_place<SB>(src + h * ld + h, int(rows - h), int(cols - h), ld, h, dst + 3 * d);
 }
 // ブロック列 src (1 辺 n、値は a b 2^{-32}) に 2^64 mod M を Montgomery の掛け算で掛け、行列 dst (行の間隔 ld) の範囲内に書く。
-template <class Z> void s_unplace(const u32* src, int rows, int cols, std::size_t ld, std::size_t n, Z* dst, const Mod& md) {
+template <int SB, class Z> void s_unplace(const u32* src, int rows, int cols, std::size_t ld, std::size_t n, Z* dst, const Mod& md) {
  if(rows <= 0 || cols <= 0) return;
  if(n == SB) {
   const __m256i r2= _mm256_set1_epi64x(md.r2), m= _mm256_set1_epi32(md.m), niv= _mm256_set1_epi32(md.niv);
@@ -453,26 +484,28 @@ template <class Z> void s_unplace(const u32* src, int rows, int cols, std::size_
   return;
  }
  const std::size_t h= n / 2, d= h * h;
- s_unplace(src, rows, cols, ld, h, dst, md);
- s_unplace(src + d, rows, int(cols - h), ld, h, dst + h, md);
- s_unplace(src + 2 * d, int(rows - h), cols, ld, h, dst + h * ld, md);
- s_unplace(src + 3 * d, int(rows - h), int(cols - h), ld, h, dst + h * ld + h, md);
+ s_unplace<SB>(src, rows, cols, ld, h, dst, md);
+ s_unplace<SB>(src + d, rows, int(cols - h), ld, h, dst + h, md);
+ s_unplace<SB>(src + 2 * d, int(rows - h), cols, ld, h, dst + h * ld, md);
+ s_unplace<SB>(src + 3 * d, int(rows - h), int(cols - h), ld, h, dst + h * ld + h, md);
 }
 // Strassen の 1 辺 (2 の冪に広げたもの)。タイルの核より積和が少ないと見込めるときだけ 0 より大きい値を返す。
-// 積和の数は 7^d 64^3 (d は再帰の段数) で、足し算と並べ替えの分を 1.25 倍と見て、タイルの n p m (広げた分を含む) と比べる。
+// 積和の数は 7^d 64^3 (d はブロックの 1 辺を 64 としたときの再帰の段数) で、足し算と並べ替えの分を 1.25 倍と見て、タイルの
+// n p m (広げた分を含む) と比べる。
 inline std::size_t strassen_side(int n, int m, int p) {
- std::size_t N= SB, c= std::size_t(SB) * SB * SB;
+ constexpr int B= 64;
+ std::size_t N= B, c= std::size_t(B) * B * B;
  while(N < std::size_t(std::max({n, m, p}))) N*= 2, c*= 7;
  const double tile= double((n + 3) & ~3) * ((m + 7) & ~7) * ((p + 7) & ~7);
- return N >= 4 * SB && 1.25 * double(c) < tile ? N : 0;
+ return N >= 4 * B && 1.25 * double(c) < tile ? N : 0;
 }
-template <class Z> void strassen_mul(const Z* a, const Z* b, Z* c, int n, int m, int p, std::size_t N, const Mod& md) {
+template <int SB, class Z> void strassen_mul(const Z* a, const Z* b, Z* c, int n, int m, int p, std::size_t N, const Mod& md) {
  const std::size_t NN= N * N, W= NN / 3 + SB * SB;
  Region R(3 * NN + 2 * W);  // A、B、C、X、Y
  u32 *A= R.p, *B= A + NN, *C= B + NN, *X= C + NN, *Y= X + W;
- s_place(a, n, m, m, N, A), s_place(b, m, p, p, N, B);
- s_mul(A, B, C, N, X, Y, md);
- s_unplace(C, n, p, p, N, c, md);
+ s_place<SB>(a, n, m, m, N, A), s_place<SB>(b, m, p, p, N, B);
+ s_mul<SB>(A, B, C, N, X, Y, md);
+ s_unplace<SB>(C, n, p, p, N, c, md);
 }
 // C = A B (A は n × m、B は m × p、C は n × p)。
 template <class Z> void mul(const Z* A, const Z* B, Z* C, int n, int m, int p) {
@@ -482,7 +515,7 @@ template <class Z> void mul(const Z* A, const Z* B, Z* C, int n, int m, int p) {
  if(vol < 128 || padded > 2.5 * vol) return small_mul(A, B, C, n, m, p);
  const Mod md(Z::mod());
  if(md.odd)
-  if(const std::size_t N= strassen_side(n, m, p)) return strassen_mul(A, B, C, n, m, p, N, md);
+  if(const std::size_t N= strassen_side(n, m, p)) return strassen_mul<64>(A, B, C, n, m, p, N, md);
  tile_mul<Z>(A, B, C, n, m, p, md);
 }
 // 列ベクトルとの積 r = A v。値を M 未満に直して、行ごとの内積を 16 個ずつ u64 にためる。
