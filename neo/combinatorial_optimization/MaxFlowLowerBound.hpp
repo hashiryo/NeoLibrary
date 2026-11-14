@@ -13,15 +13,21 @@
 // 負の下限は、to から from へ流れてよい量を表す (無向辺は add_edge(u, v, -c, c))。
 // 中身は MaxFlow を使う決まった形。辺ごとに、下限と上限の間で 0 にいちばん近い量を先に流しておき、残りの幅を容量にした
 // 辺を MaxFlow に張る。先に流した分で頂点に出る過不足は、超頂点 S から過剰な頂点へ、不足の頂点から超頂点 T への辺で
-// 埋め、S から T へ全部流れるかを見る。s と t のあるときは、t から s へ容量の無限大の辺 (補助の辺) を足して同じことを
-// する。流れが見つかったら、補助の辺の流量 f0 が今の F になる。最大と最小は、元の辺の残余の容量だけで網を組み直し、最大は
-// s から t へ流せるだけ流して f0 に足し、最小は t から s へ f0 まで流して f0 から引く。組み直すのは、MaxFlow の 2 回目から
-// の flow が Dinic で、少しだけ流し直す使い方向けだから。ここで流す量は F の幅の全部になりうるので、組み直した網の最初の
-// flow (push-relabel) で流す。ABC 285 G の 300 × 300 の格子では、続けて Dinic で流すより全体で 2.4 倍から 4 倍速かった。
-// t から s へ f0 までは、上限を付けると Dinic になるので、新しい頂点から t へ容量 f0 の辺を張り、上限なしで流す。下限も
-// 湧き出しも無ければ (先に流す量が全部 0)、超頂点を使わずに MaxFlow で s から t へ流すだけになる。
+// 埋め、S から T へ全部流れるかを見る (MaxFlow の最初の flow なので push-relabel)。s と t のあるときは、t から s へ容量の
+// 無限大の辺 (補助の辺) を足して同じことをする。流れが見つかったら、補助の辺の流量 f0 が今の F になる。下限も湧き出しも
+// 無ければ (先に流す量が全部 0)、超頂点を使わずに MaxFlow で s から t へ流すだけになる。
+// 2 段目の流し方は、流れ方を測って選んだ。MaxFlow の 2 回目からの flow は Dinic で、少しだけ流し直す使い方向け。
+// - 最大は、同じ網のまま s から t へ流せるだけ流す。補助の辺の逆向きの弧は s から t への直接の弧で、最大流は必ずそれを
+//   使い切るので、流した量がそのまま F の最大になる。ただ辺が REBUILD 本以上の網では、元の辺の残余の容量だけで網を組み
+//   直し、その最初の flow (push-relabel) で流して f0 に足す。ABC 285 G の形の格子では、2 段目に増加路の長い流れが多く
+//   残り、Dinic の時間は大きさの 3 乗近くで伸びた (辺 2 万本で組み直しの 1.5 倍、18 万本で 3 倍)。辺の少ない網では
+//   組み直しの手間のほうが重かった (LOJ 116 の辺 1 万本で 1.45 倍)。
+// - 最小は、補助の辺の容量を f0 に下げて止め、同じ網のまま t から s へ f0 まで流して f0 から引く。LOJ 117 (s と t が
+//   全部の頂点とつながる網) では戻す道が短く、途中で止まる BFS の Dinic が 55 us、組み直して push-relabel で流すと 2.1 ms
+//   だった。
 // 辺は MaxFlow に直接溜め、最初の問い合わせは、その網に超頂点と補助の辺を足して流す。2 回目からの問い合わせと、問い合わせ
-// のあとの辺や頂点の追加では、溜めた辺から MaxFlow を組み直す (前の流れは捨てる)。辺の端点と下限と上限は別にも持つ。
+// のあとの辺や頂点の追加では、溜めた辺の元の容量から MaxFlow を組み直す (前の流れは捨てる)。辺ごとに持つのは、先に流した
+// 量と、2 段目で組み直したときの 1 段目の流量だけ。
 // Cap は符号付きの整数の型。辺ごとの upper - lower、下限の絶対値の和と湧き出しの絶対値の和、s から t への流量の答えが
 // Cap に収まること。
 template <class Cap> class MaxFlowLowerBound {
@@ -37,9 +43,8 @@ public:
  int add_edge(int from, int to, Cap lower, Cap upper) {
   assert(0 <= from && from < n_ && 0 <= to && to < n_ && lower <= upper);
   reset(), ok_= false;
-  es_.push_back({from, to, lower, upper});
-  const Cap b= base_of(es_.back());
-  ex_[from]-= b, ex_[to]+= b;
+  const Cap b= lower > 0 ? lower : upper < 0 ? upper : Cap(0);  // 先に流しておく量
+  base_.push_back(b), ex_[from]-= b, ex_[to]+= b;
   return mf_.add_edge(from, to, upper - b, b - lower);
  }
  // 頂点 v の湧き出しに x を足す (負なら吸い込み)。
@@ -52,7 +57,7 @@ public:
   if(s == t) return solve() ? std::optional<Cap>(Cap(0)) : std::nullopt;
   if(!(ok_= saturate(s, t))) return std::nullopt;
   used_= true;
-  if(aux_ < 0) return mf_.flow(s, t);  // 先に流した流れが F = 0 の流れなので、そこから流す
+  if(aux_ < 0 || (int)base_.size() < REBUILD) return mf_.flow(s, t);
   const Cap f0= residual();
   return f0 + mf_.flow(s, t);
  }
@@ -62,58 +67,55 @@ public:
   if(s == t) return solve() ? std::optional<Cap>(Cap(0)) : std::nullopt;
   if(!(ok_= saturate(s, t))) return std::nullopt;
   if(aux_ < 0) return Cap(0);  // 先に流した流れのままで F = 0
-  const Cap f0= residual();
-  if(f0 == 0) return Cap(0);
-  const int x= mf_.add_vertex();
-  mf_.add_edge(x, t, f0);
-  return f0 - mf_.flow(x, s);
+  const Cap f0= mf_.get_edge(aux_).flow;
+  mf_.change_cap(aux_, f0, 0, t, s);  // 流量は新しい容量に収まるので、流れは動かない
+  return f0 - mf_.flow(t, s, f0);
  }
  // 直前の solve、max_flow、min_flow の流れ。流れが無かったときと、そのあとに辺や頂点や湧き出しを足したときは、flow は
  // 下限になる。
  Edge get_edge(int i) {
-  const E& e= es_[i];
-  if(!ok_) return {e.from, e.to, e.lower, e.upper, e.lower};
-  // mf_ の辺の残余の容量は、上限から今の流量を引いたもの (組み直した網でも同じ)。
   const typename MaxFlow<Cap>::Edge a= mf_.get_edge(i);
-  return {e.from, e.to, e.lower, e.upper, Cap(e.upper - (a.cap - a.flow))};
+  const Cap b= base_[i], f1= f1_.empty() ? Cap(0) : f1_[i];
+  const Cap cap= a.cap + f1, rev= a.rev_cap - f1;  // 元の容量 (組み直した網では、残余の容量に 1 段目の流量を戻す)
+  return {a.from, a.to, Cap(b - rev), Cap(b + cap), Cap(ok_ ? b + f1 + a.flow : b - rev)};
  }
  std::vector<Edge> edges() {
-  std::vector<Edge> ret(es_.size());
+  std::vector<Edge> ret(base_.size());
   for(int i= 0; i < (int)ret.size(); ++i) ret[i]= get_edge(i);
   return ret;
  }
  int size() const { return n_; }
 private:
- struct E {
-  int from, to;
-  Cap lower, upper;
- };
+ static constexpr int REBUILD= 1 << 14;  // 最大の 2 段目で網を組み直す辺の数
  int n_;
- std::vector<Cap> ex_;  // 先に流した分と湧き出しで頂点に残る過剰 (負なら不足)
- std::vector<E> es_;
+ std::vector<Cap> ex_;    // 先に流した分と湧き出しで頂点に残る過剰 (負なら不足)
+ std::vector<Cap> base_;  // 辺ごとの先に流した量
+ std::vector<Cap> f1_;    // 2 段目で組み直したときの、辺ごとの 1 段目の流量 (組み直していなければ空)
  MaxFlow<Cap> mf_;
  bool used_= false, ok_= false;  // used_: mf_ に超頂点や流れがあるか、組み直した網になっている
  int aux_= -1;                   // 補助の辺の番号 (足していなければ -1)
- static Cap base_of(const E& e) { return e.lower > 0 ? e.lower : e.upper < 0 ? e.upper : Cap(0); }  // 先に流しておく量
  // mf_ を、溜めた辺の元の容量だけの網に戻す。
  void reset() {
   if(!used_) return;
   MaxFlow<Cap> g(n_);
-  for(const E& e: es_) {
-   const Cap b= base_of(e);
-   g.add_edge(e.from, e.to, e.upper - b, b - e.lower);
+  for(int i= 0; i < (int)base_.size(); ++i) {
+   const typename MaxFlow<Cap>::Edge a= mf_.get_edge(i);
+   const Cap f1= f1_.empty() ? Cap(0) : f1_[i];
+   g.add_edge(a.from, a.to, a.cap + f1, a.rev_cap - f1);
   }
-  mf_= std::move(g), used_= false;
+  mf_= std::move(g), used_= false, f1_.clear();
  }
  // 流れを見つけた mf_ を、元の辺の残余の容量だけの網 (超頂点と補助の辺を除く) に組み直し、補助の辺の流量 f0 を返す。辺の
  // 番号は変わらない。
  Cap residual() {
   const Cap f0= mf_.get_edge(aux_).flow;
+  const int m= (int)base_.size();
   MaxFlow<Cap> g(n_);
-  for(int i= 0; i < (int)es_.size(); ++i) {
-   const E& e= es_[i];
-   const Cap b= base_of(e), f= mf_.get_edge(i).flow;
-   g.add_edge(e.from, e.to, e.upper - b - f, b - e.lower + f);
+  f1_.resize(m);
+  for(int i= 0; i < m; ++i) {
+   const typename MaxFlow<Cap>::Edge a= mf_.get_edge(i);
+   f1_[i]= a.flow;
+   g.add_edge(a.from, a.to, a.cap - a.flow, a.rev_cap + a.flow);
   }
   mf_= std::move(g);
   return f0;
