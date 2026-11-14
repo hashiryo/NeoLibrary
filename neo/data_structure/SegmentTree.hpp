@@ -54,15 +54,20 @@ template <class T> struct Alloc {
  template <class U> bool operator==(const Alloc<U>&) const { return true; }
 };
 template <class T> using Vec= std::vector<T, Alloc<T>>;
+// 作用が残っているかの印。unsigned char の配列だと、印を書くたびに gcc がほかのメンバと重なりうるとみなして、配列の
+// 先頭や大きさを読み直す (char の型はどの型とも重なりうる決まり)。bool を下に持つ enum なら重ならない。
+enum class Flag: bool { off, on };
 template <class M> class Generic {
  using T= typename M::T;
  using E= typename action_type<M>::type;
+ // 小さい作用は値で渡す。参照で渡すと、子の lz への書き込みと重なりうるとみなされて、書くたびに読み直しが入る。
+ using Ea= std::conditional_t<std::is_trivially_copyable_v<E> && sizeof(E) <= 32, E, const E&>;
  static constexpr bool MO= monoid<M>::value, AC= action<M>::value;
  static_assert(MO || AC, "M にはモノイド (T, ti, op) か作用 (T, E, mp, cp) が要る");
  int n= 0, lg= 0, sz= 1;
  Vec<T> d;  // モノイドがあれば節 1..2sz-1 の値、作用だけなら葉の値 (sz 個)
  Vec<E> lz;
- std::vector<unsigned char> fl;
+ Vec<Flag> fl;
  // mp の 4 つの形をそろえる。偽を返したら作用が節に収まらなかった (Beats)。
  static bool map(T& v, const E& x, int len) {
   if constexpr(std::is_invocable_r_v<bool, decltype(M::mp), T&, const E&, int>) return M::mp(v, x, len);
@@ -73,21 +78,26 @@ template <class M> class Generic {
  // 子の添字は 2k と 2k | 1 と書く。2k + 1 と書くと gcc が 2 つの子を 16 byte の 1 回の読み込みにまとめ、直前の段で
  // 8 byte で書いた子から値を受け取れずに、書き込みが終わるまで段ごとに待つ (procon-judge の self-segtree-point-set-range-min)。
  void update(int k) { d[k]= M::op(d[k << 1], d[k << 1 | 1]); }
- // 節 k (長さ len) に作用 x を当てる。
- void all_apply(int k, const E& x, int len) {
+ // 節 k (長さ len) に作用 x を当てる。印は分岐の外で書く。印で分けて書くと、子の印の有無で決まる予測しにくい分岐が
+ // 子ごとに残る。cp が代入 (pre = suf) なら、両方の枝が lz[k] = x になって分岐が消える。
+ void all_apply(int k, Ea x, int len) {
   if(k < sz) {
-   if(fl[k]) M::cp(lz[k], x);
-   else lz[k]= x, fl[k]= 1;
+   if(fl[k] == Flag::on) M::cp(lz[k], x);
+   else lz[k]= x;
+   fl[k]= Flag::on;
   }
   if constexpr(MO) {
    if(!map(d[k], x, len)) push(k, len), update(k);
   } else if(k >= sz) map(d[k - sz], x, 1);
  }
  void push(int k, int len) {
-  if(fl[k]) all_apply(k << 1, lz[k], len >> 1), all_apply(k << 1 | 1, lz[k], len >> 1), fl[k]= 0;
+  if(fl[k] == Flag::on) {
+   Ea x= lz[k];
+   all_apply(k << 1, x, len >> 1), all_apply(k << 1 | 1, x, len >> 1), fl[k]= Flag::off;
+  }
  }
  // 葉 l と r - 1 (どちらも sz を足した番号) の祖先のうち、区間の途中で切れるものを根から配る。
- void push_ends(int l, int r) {
+ [[gnu::always_inline]] void push_ends(int l, int r) {
   for(int i= lg; i >= 1; --i) {
    if(((l >> i) << i) != l) push(l >> i, 1 << i);
    if(((r >> i) << i) != r) push((r - 1) >> i, 1 << i);
@@ -106,7 +116,7 @@ template <class M> class Generic {
    d.assign(sz, T());
    for(int i= 0; i < n; ++i) d[i]= init(i);
   }
-  if constexpr(AC) lz.assign(sz, E()), fl.assign(sz, 0);
+  if constexpr(AC) lz.assign(sz, E()), fl.assign(sz, Flag::off);
  }
 public:
  Generic()= default;
@@ -127,7 +137,7 @@ public:
    // 根から葉への道では上の節ほど新しい作用なので、葉の値に下の節から順に当てる (書き込みなし)。
    T v= MO ? d[sz + i] : d[i];
    for(int k= (sz + i) >> 1; k >= 1; k>>= 1)
-    if(fl[k]) map(v, lz[k], 1);
+    if(fl[k] == Flag::on) map(v, lz[k], 1);
    return v;
   } else return d[sz + i];
  }
