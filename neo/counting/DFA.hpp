@@ -19,9 +19,9 @@
 // 有限オートマトン (DFA) と、受理される長さ n の記号の列の上の DP。今の Library の Automaton (mylib/counting/Automaton.hpp)
 // の作り直しで、口 (遷移の関数から作る、NFA と ε 遷移、&、DP の op と f(値, 記号, 位置)) は同じにしてある。
 // 構築は、初期状態から幅優先にたどって状態に番号を振り、状態の数 × 記号の数の表にする。番号を引く表は、状態の型が
-// 64 bit に詰められる (整数、bool、それらの pair や tuple や array) なら NeoLibrary の HashMap、ほかは要素のハッシュを
-// 混ぜる unordered_map、ハッシュを作れない型だけ std::map にする。NFA は、NFA の状態に先に番号を振ってから部分集合構成を
-// する (状態が 64 個以下なら部分集合を u64 の bit で持つ)。
+// 64 bit に詰められる (整数、bool、それらの pair や tuple や array) なら、整数の葉ごとの値の範囲を広げる密な配列
+// (まばらなら NeoLibrary の HashMap)、ほかは要素のハッシュを混ぜる unordered_map、ハッシュを作れない型だけ std::map に
+// する。NFA は、NFA の状態に先に番号を振ってから部分集合構成をする (状態が 64 個以下なら部分集合を u64 の bit で持つ)。
 // 積 (&) は表を作らず、成分の表を共有して並べるだけにする。DP は 1 歩ずつ進め、成分ごとにその歩で来られる状態の集合を
 // その成分だけで求めて 0 から番号を振り、成分ごとの番号を 2 の冪に切り上げた幅の bit に並べた値を、密な配列 (来た組の
 // 置き場所を引く表) の添字にする。ハッシュも待ち行列も使わない。成分の集合が前の歩と同じになったら、以後は求め直さない。
@@ -30,6 +30,9 @@
 // 「N 以下」の DFA (位置を状態に持つ) との積では、その成分の集合が毎歩 2 つになるので、手で書く桁 DP の
 // dp[i][tight][...] と同じ大きさの配列で進む。添字の bit が 24 を超えたら (成分どうしが連動していて組の大半には来られない
 // とき)、bit の多い 2 つの成分を、来られる組だけの表にした積に替えて最初からやり直す。
+// ただし、長さが 32 以上で、積の来られる組が少なく DP で同じ組を何歩も使い回すとき (「N 以下」の DFA と小さい成分の積で、
+// 小さいと決まった側の組が毎歩同じもの) は、はじめに積を来られる組だけの表にして、成分が 1 つのときと同じ道で進める。
+// 表にするかは、積を幅優先で作りながら組の増え方から見積もる (product_table)。
 namespace dfa_internal {
 using u64= unsigned long long;
 template <class T> struct is_pair: std::false_type {};
@@ -136,13 +139,130 @@ struct Hasher {
  template <class T> std::size_t operator()(const T& x) const { return hash_of(x); }
 };
 // 状態に 0 から番号を振る表。insert は (番号, 新しく入れたか) を返す。
+// 詰められる型の状態に番号を振る表。詰めた値を整数の葉 (bool、enum、整数) ごとの値に分け、葉ごとの値の範囲
+// [lo, lo + 2^lb) を広げながら、葉の値を並べた添字の密な配列で番号を引く。位置や余りを状態に持つ DFA は値が詰まって
+// いて、HashMap より速い (ハッシュで散らさないので、順に増える状態がメモリを順に触る)。範囲を広げるときは配列を作り
+// 直し、配列が番号の数の 8 倍 (と 2^10) を超えるほどまばらなら HashMap で引く。HashMap のあいだも範囲は追い、番号の
+// 数が 2 倍になるたび、密な配列へ戻せるか見直す。
+struct Leaf {
+ int off, w;
+ bool sgn;
+};
+template <class T> constexpr int leaf_count() {
+ if constexpr(std::is_same_v<T, bool> || std::is_enum_v<T> || std::is_integral_v<T>) return 1;
+ else if constexpr(is_pair<T>::value) return leaf_count<typename T::first_type>() + leaf_count<typename T::second_type>();
+ else if constexpr(is_array<T>::value) return leaf_count<typename T::value_type>() * int(std::tuple_size_v<T>);
+ else return []<std::size_t... I>(std::index_sequence<I...>) { return (0 + ... + leaf_count<std::tuple_element_t<I, T>>()); }(std::make_index_sequence<std::tuple_size_v<T>>());
+}
+// pack と同じ並びで、葉の bit の位置、幅、符号の有無を out に書く
+template <class T> constexpr void leaves(Leaf* out, int& i, int off) {
+ if constexpr(std::is_enum_v<T>) leaves<std::underlying_type_t<T>>(out, i, off);
+ else if constexpr(std::is_same_v<T, bool>) out[i++]= {off, 1, false};
+ else if constexpr(std::is_integral_v<T>) out[i++]= {off, int(sizeof(T)) * 8, std::is_signed_v<T>};
+ else if constexpr(is_pair<T>::value) leaves<typename T::first_type>(out, i, off), leaves<typename T::second_type>(out, i, off + pack_bits<typename T::first_type>());
+ else if constexpr(is_array<T>::value) {
+  for(std::size_t j= 0; j < std::tuple_size_v<T>; ++j) leaves<typename T::value_type>(out, i, off + pack_bits<typename T::value_type>() * int(j));
+ } else
+  [&]<std::size_t... I>(std::index_sequence<I...>) {
+   int o= off;
+   ((leaves<std::tuple_element_t<I, T>>(out, i, o), o+= pack_bits<std::tuple_element_t<I, T>>()), ...);
+  }(std::make_index_sequence<std::tuple_size_v<T>>());
+}
+template <class T> constexpr auto leaf_list() {
+ std::array<Leaf, leaf_count<T>()> a{};
+ int i= 0;
+ leaves<T>(a.data(), i, 0);
+ return a;
+}
 template <class K> struct NumPack {
- HashMap<int> h;
- int n= 0;
+ static constexpr auto LF= leaf_list<K>();
+ static constexpr int F= int(LF.size()), F1= F > 0 ? F : 1;
+ u64 lo[F1];
+ int lb[F1], sh[F1], tot= 0;
+ std::vector<int> id;  // 密なとき、葉の値を並べた添字から番号 + 1
+ std::vector<u64> keys;  // 番号の順の詰めた値 (表を作り直すときに使う)
+ HashMap<int> h;  // まばらなときの表
+ int n= 0, next_check= 1024;
+ bool dense= true, never= false;  // never: 範囲が広すぎて密にできない
+ // 葉 f の値を、大小の順を保つ符号なしの値にしたもの
+ static u64 val(u64 p, int f) {
+  const Leaf& L= LF[f];
+  const u64 x= L.w == 64 ? p >> L.off : (p >> L.off) & ((u64(1) << L.w) - 1);
+  return L.sgn ? x ^ (u64(1) << (L.w - 1)) : x;
+ }
+ std::size_t index(u64 p) const {
+  std::size_t r= 0;
+  for(int f= 0; f < F; ++f) r|= std::size_t(val(p, f) - lo[f]) << sh[f];
+  return r;
+ }
+ // p が今の範囲にあれば、その添字を r に入れて true
+ bool find(u64 p, std::size_t& r) const {
+  r= 0;
+  for(int f= 0; f < F; ++f) {
+   const u64 d= val(p, f) - lo[f];
+   if(d >> lb[f]) return false;
+   r|= std::size_t(d) << sh[f];
+  }
+  return true;
+ }
+ // 範囲を p が入るように広げる (幅は 2 倍以上ずつ)。2^40 を超える幅が要るなら never にする。
+ void widen(u64 p) {
+  tot= 0;
+  for(int f= 0; f < F; ++f) {
+   const u64 v= val(p, f), size= u64(1) << lb[f];
+   if(v - lo[f] >= size) {
+    const u64 span= v < lo[f] ? lo[f] + size - v : v - lo[f] + 1;
+    int b= lb[f] + 1;
+    while(b < 40 && (u64(1) << b) < span) ++b;
+    if((u64(1) << b) < span) {
+     never= true;
+     return;
+    }
+    if(v < lo[f]) lo[f]= lo[f] + size - (u64(1) << b);  // 下へ広げるときは上の端を保つ
+    lb[f]= b;
+   }
+   sh[f]= tot, tot+= lb[f];
+  }
+ }
+ bool fits() const { return !never && tot <= 34 && (std::size_t(1) << tot) <= std::max<std::size_t>(1024, std::size_t(8) * (n + 1)); }
+ void to_dense() {
+  dense= true, id.assign(std::size_t(1) << tot, 0), h.clear();
+  for(int i= 0; i < n; ++i) id[index(keys[i])]= i + 1;
+ }
+ void to_hash() {
+  dense= false, std::vector<int>().swap(id);
+  for(int i= 0; i < n; ++i) h[keys[i]]= i + 1;
+ }
  std::pair<int, bool> insert(const K& k) {
-  int& v= h[pack(k)];
+  const u64 p= pack(k);
+  if(n == 0) {
+   for(int f= 0; f < F; ++f) lo[f]= val(p, f), lb[f]= sh[f]= 0;
+   id.assign(1, 0);
+  }
+  std::size_t r;
+  if(dense) {
+   if(!find(p, r)) {
+    widen(p);
+    if(fits()) to_dense(), r= index(p);
+    else to_hash();
+   }
+   if(dense) {
+    int& v= id[r];
+    if(v) return {v - 1, false};
+    return v= ++n, keys.push_back(p), std::pair{n - 1, true};
+   }
+  }
+  // まばらなとき。範囲は追い続け、番号の数が 2 倍になるごとに密にできるか見直す (はじめに離れた状態が出て、あとで
+  // その間が埋まる DFA のため)
+  int& v= h[p];
   if(v) return {v - 1, false};
-  return v= ++n, std::pair{n - 1, true};
+  v= ++n, keys.push_back(p);
+  if(!never && !find(p, r)) widen(p);
+  if(n >= next_check) {
+   next_check*= 2;
+   if(fits()) to_dense();
+  }
+  return {n - 1, true};
  }
 };
 template <class K> struct NumHash {
@@ -338,6 +458,84 @@ inline CompPtr product(const Comp& A, const Comp& B, int m) {
  auto C= std::make_shared<Comp>();
  C->n= int(dec.size()), C->tab= std::move(tab), C->acc.resize(C->n);
  for(int i= 0; i < C->n; ++i) C->acc[i]= A.acc[dec[i].first] && B.acc[dec[i].second];
+ return C;
+}
+// k 個の成分の積を、初期状態から n - 1 歩までに来られる組だけの表にする (n 歩目に初めて来る組の行は -1)。表にすると
+// 得かを見積もり、得でなければ途中でやめて nullptr を返す。見積もりは、幅優先で段ごとに進め、L_MIN 段目とその 2 倍、
+// 4 倍…の段と、組の数が allow を超えてから前の見積もりの 2 倍を超えた段で行う。後ろ半分の段の組の増え方 rate を毎段
+// 増え続ける分とみなし、残り (P) を毎歩使われる組とみなして、DP で積の 1 状態を使い回す回数を (P + rate) n / (P + rate n)
+// とする。これが REUSE より少なければやめる。ただし、増え方が段に WAIT 個以下で組が allow 以下のうちは続ける (はじめは
+// 上限と等しい道しか無く、2 つの数の上の桁が分かれてから組が広がる形のため)。位置を状態に持つ DFA との積で、どの位置の
+// 組も多くの組と並ぶもの (毎段同じだけ組が増える) は、使い回しが無いので表にしない。組が lim を超えてもやめる。allow と
+// lim は、表の升目 (組の数 × 記号の数) が 2^16 と 2^20 になる組の数。
+inline CompPtr product_table(const std::vector<CompPtr>& cs, int m, int n) {
+ constexpr int L_MIN= 16;
+ constexpr double REUSE= 32, WAIT= 4;
+ const std::size_t lim= (std::size_t(1) << 20) / m, allow= (std::size_t(1) << 16) / m;
+ const int k= int(cs.size());
+ std::vector<int> sh(k);
+ int tb= 0;
+ for(int j= 0; j < k; ++j) {
+  int b= 0;
+  while((1ll << b) < cs[j]->n) ++b;
+  sh[j]= tb, tb+= b;
+ }
+ if(tb > 64) return nullptr;
+ HashMap<int> h;
+ std::vector<int> dec(k, 0), tab, tg(k);
+ std::vector<std::size_t> lv{1};  // lv[d]: 段 d までの組の数
+ h[0]= 1;
+ std::size_t head= 0, cnt= 1, last= 1;
+ int next_check= L_MIN;
+ for(int d= 0; d < n && head < cnt; ++d) {
+  for(; head < lv[d]; ++head) {
+   tab.resize(tab.size() + m);
+   int* row= tab.data() + head * m;
+   const int* tp= dec.data() + head * k;
+   for(int c= 0; c < m; ++c) {
+    u64 key= 0;
+    bool ok= true;
+    for(int j= 0; j < k; ++j) {
+     const int t= cs[j]->tab[std::size_t(tp[j]) * m + c];
+     if(t < 0) {
+      ok= false;
+      break;
+     }
+     tg[j]= t, key|= u64(t) << sh[j];
+    }
+    if(!ok) {
+     row[c]= -1;
+     continue;
+    }
+    int& v= h[key];
+    if(!v) {
+     v= int(++cnt);
+     dec.insert(dec.end(), tg.begin(), tg.end());
+     tp= dec.data() + head * k;
+    }
+    row[c]= v - 1;
+   }
+  }
+  lv.push_back(cnt);
+  if(cnt > lim) return nullptr;
+  const int L= d + 1;
+  if(head < cnt && L >= L_MIN && (L == next_check || (cnt > allow && cnt > 2 * last))) {
+   const double rate= double(lv[L] - lv[L / 2]) / (L - L / 2);
+   const double P= std::max(0.0, double(cnt) - rate * L), total= P + rate * (n + 1);
+   const bool good= total <= double(lim) && (P + rate) * n >= REUSE * total, wait= cnt <= allow && rate <= WAIT;
+   if(!good && !wait) return nullptr;
+   last= cnt;
+   while(next_check <= L) next_check*= 2;
+  }
+ }
+ tab.resize(cnt * m, -1);
+ auto C= std::make_shared<Comp>();
+ C->n= int(cnt), C->tab= std::move(tab), C->acc.resize(cnt);
+ for(std::size_t i= 0; i < cnt; ++i) {
+  bool a= true;
+  for(int j= 0; j < k && a; ++j) a= cs[j]->acc[dec[i * k + j]];
+  C->acc[i]= a;
+ }
  return C;
 }
 struct Access;
@@ -578,6 +776,8 @@ template <class symbol_t> class DFA {
   if(n < 0) return std::vector<T>(ALL ? 0 : 1, e);
   std::vector<CompPtr> cs= comps;
   std::vector<T> out;
+  if(cs.size() >= 2 && n >= 32)
+   if(CompPtr P= dfa_internal::product_table(cs, int(alph.size()), n)) return run1<ALL>(*P, n, op, e, f, init);
   for(int a, b;;) {
    if(cs.size() == 1) return run1<ALL>(*cs[0], n, op, e, f, init);
    if(runk<ALL>(cs, n, op, e, f, init, out, a, b)) return out;
