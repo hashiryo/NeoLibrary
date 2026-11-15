@@ -20,7 +20,7 @@ int xor_max(int x) const;  // y xor x が最大になる要素 y。空なら -1
 
 `contains`、`insert`、`erase` は $0 \le i < n$ で使います。`next` と `prev` には範囲の外の i も渡せます。どの操作も $O(\log_{64} n)$ で、構築は $O(n)$ です。ビットの列から作る形は、`bits` の n 以上の位置の bit を 0 にしておきます。
 
-`xor_min` と `xor_max` は、根から段ごとに、立っている子の番号 j のうち j と x の対応する 6 bit の xor が最小 (最大) の子へ下ります。値は返さず要素 y を返すので、xor の値が要るときは `xor_min(x) ^ x` とします。どちらも $O(\log_{64} n)$ で、ほかの操作とメモリには何も足しません。集合の要素との xor の最小を問う Library Checker の set_xor_min (値は $2^{30}$ 未満) では、葉の段だけで 128 MB になります。
+`xor_min` と `xor_max` は、根から段ごとに、立っている子の番号 j のうち j と x の対応する 6 bit の xor が最小 (最大) の子へ下ります。値は返さず要素 y を返すので、xor の値が要るときは `xor_min(x) ^ x` とします。どちらも $O(\log_{64} n)$ で、ほかの操作とメモリには何も足しません。集合の要素との xor の最小を問う Library Checker の set_xor_min (値は $2^{30}$ 未満) では、葉の段だけで 128 MB になります。procon-judge の yosupo-set-xor-min ($Q = 5 \times 10^5$) では、EPYC 9V74 の x64-gcc で 48.0 ms でした。今の Library の SegmentTree_Patricia は同じ回で 209.1 ms です。64 分岐の下の段を値が入ったときだけ作る形の提出は 14.2 ms で、その差の多くは 128 MB の葉の段を読む分です。
 
 ## 使い分け
 
