@@ -17,7 +17,9 @@
 // ときだけ、s を普通の頂点として、s から出る和と t へ入る和の小さい方の余りを s に持たせる。どちらでも余りの合計が
 // Cap に収まるので、大きな容量の辺を張っても溢れない。
 // 2 回目からの flow と、上限が効く最初の flow は Dinic で流す (DFS は再帰しない)。容量を少し変えて少しだけ流し直す
-// 使い方では、呼ぶたびにグラフ全体の BFS がかかる push-relabel より速い。辺は flow を呼んだときに CSR に組み、そのあと
+// 使い方では、呼ぶたびにグラフ全体の BFS がかかる push-relabel より速い。ただし 2 回目からの上限の無い flow は、Dinic の
+// 仕事量 (BFS と DFS で見た頂点と弧の数) が網を 4 回なめる分を超えたら、残りを push-relabel で流す。大きく流し直す使い方
+// (下限付きの最大流の 2 段目など) で、Dinic の段が何百回も続くのを避けるため。辺は flow を呼んだときに CSR に組み、そのあと
 // 辺を足したら、流量を保ったまま組み直す。今の流れから続けて流すので、終点の違う flow を何度呼んでもよい。
 // メモリは、組んだあとに、弧 1 本 (辺ごとに 2 本) につき 8 + sizeof(Cap) バイト、辺ごとに 5 バイト (順向きの弧の位置と容量の
 // 形)、頂点ごとに int 6 つと Cap 1 つ (と、使った高さの分の表) を使う。逆向きの容量が 0 でも容量と同じでもない辺があると、
@@ -176,6 +178,7 @@ private:
  static constexpr int CH= 1 << 14;
  int n_, m_= 0, npe_= 0;
  bool built_= false, pending_= false, used_= false;  // used_: 一度 flow を呼んだ
+ bool over_= false;                                  // 直前の augment が仕事量の上限で止まった
  int ps_= -1, pt_= -1;                               // 余りを戻す段が残っている flow の s と t
  std::vector<std::vector<P>> pe_;
  std::vector<L> loops_;
@@ -543,12 +546,19 @@ private:
    } else global_relabel<0>(sink, excl, alive);
   }
  }
- // Dinic で s から t へ limit まで流す。今の流れから続け、流し終えても正しい流れのまま。DFS は再帰しない。
- Cap augment(int s, int t, Cap limit) {
+ // Dinic で s から t へ limit まで流す。今の流れから続け、流し終えても正しい流れのまま。DFS は再帰しない。段ごとの仕事量
+ // (BFS で見た頂点と弧の数、DFS で進めた今の弧の数) の和が budget を超えたら、次の段に入らずに止め、over_ を true にする。
+ Cap augment(int s, int t, Cap limit, long long budget= std::numeric_limits<long long>::max()) {
   Cap total= 0;
+  long long work= 0;
+  over_= false;
   // 段は h_、待ち行列は bnext_、辿っている弧の列は bprev_ を借りる (余りを戻す段は global relabel で作り直す)。
   std::vector<int>&lv= h_, &q= bnext_, &stk= bprev_;
   while(total < limit) {
+   if(work > budget) {
+    over_= true;
+    break;
+   }
    std::fill(lv.begin(), lv.end(), -1);
    int qh= 0, qt= 0;
    lv[s]= 0, q[qt++]= s;
@@ -556,6 +566,10 @@ private:
     const int u= q[qh++];
     for(int k= st_[u]; k < st_[u + 1]; ++k)
      if(const A& a= as_[k]; a.cap > 0 && lv[a.to] < 0) lv[a.to]= lv[u] + 1, q[qt++]= a.to;
+   }
+   if(budget != std::numeric_limits<long long>::max()) {
+    work+= qh;
+    for(int i= 0; i < qh; ++i) work+= st_[q[i] + 1] - st_[q[i]];
    }
    if(lv[t] < 0) break;
    std::copy(st_.begin(), st_.end() - 1, cur_.begin());
@@ -586,6 +600,8 @@ private:
     }
     stk[sp++]= k, v= as_[k].to;
    }
+   if(budget != std::numeric_limits<long long>::max())
+    for(int i= 0; i < qt; ++i) work+= cur_[q[i]] - st_[q[i]];
   }
   return total;
  }
@@ -593,14 +609,21 @@ private:
  Cap run(int s, int t, bool limited, Cap limit) {
   assert(0 <= s && s < n_ && 0 <= t && t < n_ && s != t);
   build(), finish();
-  // 2 回目からは、今の流れから少しだけ増やす使い方 (容量を変えて流し直すなど) が多いので Dinic で流す。
-  if(used_) return augment(s, t, limited ? limit : std::numeric_limits<Cap>::max());
+  Cap pre= 0;
+  if(used_) {
+   // 2 回目からは、今の流れから少しだけ増やす使い方 (容量を変えて流し直すなど) が多いので、まず Dinic で流す。上限が
+   // あればそのまま Dinic で流しきる。上限が無ければ、網を 4 回なめる分の仕事で止め、流しきれていなければ残りを
+   // push-relabel で流す。大きく流し直す使い方 (下限付きの最大流の 2 段目など) で、Dinic の段が何百回も続くのを避ける。
+   if(limited) return augment(s, t, limit);
+   pre= augment(s, t, std::numeric_limits<Cap>::max(), 4LL * (n_ + st_[n_]));
+   if(!over_) return pre;
+  }
   used_= true;
   Cap out= 0, in= 0;
   for(int k= st_[s]; k < st_[s + 1]; ++k) out= add_sat(out, as_[k].cap);
   for(int k= st_[t]; k < st_[t + 1]; ++k) in= add_sat(in, as_[as_[k].rev].cap);
-  const Cap u= std::min(out, in);  // 流量はこれを超えない
-  if(!(u > 0)) return 0;
+  const Cap u= std::min(out, in);  // 増える流量はこれを超えない
+  if(!(u > 0)) return pre;
   // 上限が効くときは Dinic で流す。効かないなら上限なしと同じ。
   if(limited && limit < u) return augment(s, t, limit);
   std::fill(ex_.begin(), ex_.end(), Cap(0));
@@ -618,6 +641,6 @@ private:
   const Cap got= ex_[t];
   ex_[t]= 0, ex_[s]= 0;
   pending_= true, ps_= s, pt_= t;
-  return got;
+  return pre + got;
  }
 };
