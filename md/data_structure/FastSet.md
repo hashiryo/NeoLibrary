@@ -14,15 +14,19 @@ void insert(int i);
 void erase(int i);
 int next(int i) const;  // i 以上で最小の要素。無ければ -1
 int prev(int i) const;  // i 以下で最大の要素。無ければ -1
+int xor_min(int x) const;  // y xor x が最小になる要素 y。空なら -1
+int xor_max(int x) const;  // y xor x が最大になる要素 y。空なら -1
 ```
 
 `contains`、`insert`、`erase` は $0 \le i < n$ で使います。`next` と `prev` には範囲の外の i も渡せます。どの操作も $O(\log_{64} n)$ で、構築は $O(n)$ です。ビットの列から作る形は、`bits` の n 以上の位置の bit を 0 にしておきます。
+
+`xor_min` と `xor_max` は、根から段ごとに、立っている子の番号 j のうち j と x の対応する 6 bit の xor が最小 (最大) の子へ下ります。値は返さず要素 y を返すので、xor の値が要るときは `xor_min(x) ^ x` とします。どちらも $O(\log_{64} n)$ で、ほかの操作とメモリには何も足しません。集合の要素との xor の最小を問う Library Checker の set_xor_min (値は $2^{30}$ 未満) では、葉の段だけで 128 MB になります。
 
 ## 使い分け
 
 | 型 | 入れられる値 | メモリ | 引けるもの |
 | --- | --- | --- | --- |
-| FastSet | 0 以上 n 未満 (n は作るときに決める) | 値の範囲 n に比例 (n = $10^7$ で 1.25 MB) | 入っているか、前後の要素 |
+| FastSet | 0 以上 n 未満 (n は作るときに決める) | 値の範囲 n に比例 (n = $10^7$ で 1.25 MB) | 入っているか、前後の要素、xor の最小と最大 |
 | [OrderedSet](OrderedSet.md)`<false>` | int の全域 | 要素の数に比例 | 入っているか、前後の要素 |
 | [OrderedSet](OrderedSet.md)`<true>` | int の全域 | 要素の数に比例 | 上に加えて、k 番目と x 以下の個数 |
 | [HashMap](HashMap.md) | u64 の全域 | 要素の数に比例 | 入っているか (順序は無い) |

@@ -28,6 +28,23 @@ class FastSet {
   for(int h= 1; h < lg; ++h)
    for(int i= 0; i < nw[h - 1]; ++i) a[off[h] + i / 64]|= u64(a[off[h - 1] + i] != 0) << (i % 64);
  }
+ // 0 でない w の立っている bit の位置 j のうち、j xor t が最小のもの (t は 6 bit)。上の bit から順に、t と同じ側に立っている
+ // bit があればそちらへ絞る。
+ static int pick(u64 w, unsigned t) {
+  constexpr u64 K[6]= {0x5555555555555555, 0x3333333333333333, 0x0F0F0F0F0F0F0F0F, 0x00FF00FF00FF00FF, 0x0000FFFF0000FFFF, 0x00000000FFFFFFFF};
+  for(int k= 5; k >= 0; --k) {
+   const u64 c= w & (K[k] ^ (0 - u64(t >> k & 1)));
+   w= c ? c : w;
+  }
+  return __builtin_ctzll(w);
+ }
+ // 根から、段ごとに子の番号 j と t の 6 bit の xor が最小の子へ下りる。
+ int xor_pick(unsigned t) const {
+  if(a.empty() || !a[off[lg - 1]]) return -1;
+  int i= 0;
+  for(int h= lg - 1; h >= 0; --h) i= i * 64 + pick(a[off[h] + i], t >> (6 * h) & 63);
+  return i;
+ }
 public:
  // 空の集合。
  explicit FastSet(int n= 0) { layout(n); }
@@ -83,6 +100,10 @@ public:
   }
   return -1;
  }
+ // y xor x が最小になる要素 y。空なら -1。
+ int xor_min(int x) const { return xor_pick(unsigned(x)); }
+ // y xor x が最大になる要素 y。空なら -1。
+ int xor_max(int x) const { return xor_pick(~unsigned(x)); }
  // i 以下で最大の要素。無ければ -1。
  int prev(int i) const {
   if(i >= n) i= n - 1;
