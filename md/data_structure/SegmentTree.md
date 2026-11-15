@@ -30,6 +30,8 @@ template <class C> int min_left(int r, const C& check);
 | `using E`、`static void mp(T& v, E x)` | 作用。区間の長さが要るなら `mp(T& v, E x, int len)` |
 | `static void cp(E& pre, E suf)` | 作用の合成。pre を先に、suf をあとに当てる合成を pre に書く |
 
+添字の範囲が大きく (int に収まらない、または配列を取れない) 触る所がまばらなら、同じ決まりで long long の添字を受ける [DynamicSegmentTree](DynamicSegmentTree.md) を使います。
+
 `mp` が bool を返す形は Segment Tree Beats です。偽を返すと子へ下りて作り直します (葉では必ず真を返すこと)。`max_right` と `min_left` は ACL と同じで、`check(ti())` が真、条件が区間の伸びに対して単調であることを前提にします。
 
 [segtree/](segtree/) の標準の構造体 (`monoid::Sum`、`monoid::AddMin`、`monoid::AffineSum` など) を渡すと、そのヘッダが中身を子を 8〜16 個持つ AVX2 の木に替えます。口は同じです。それ以外の構造体は、このヘッダの二分木で受けます。
