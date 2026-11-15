@@ -573,7 +573,8 @@ template <class symbol_t> class DFA {
  DFA()= default;
  static std::vector<symbol_t> sorted(std::vector<symbol_t> a) { return std::sort(a.begin(), a.end()), a; }
  // 成分が 1 つのとき。状態の番号をそのまま来た組の置き場所を引く添字にする。
- template <bool ALL, class T, class A, class F> std::vector<T> run1(const Comp& C, int n, const A& op, const T& e, const F& f, const T& init) const {
+ // gcc は run1 を run に展開すると、積を表にした道 (aoj-0570) の DP が 2 割ほど遅くなるので、展開させない。
+ template <bool ALL, class T, class A, class F> [[gnu::noinline]] std::vector<T> run1(const Comp& C, int n, const A& op, const T& e, const F& f, const T& init) const {
   const int m= int(alph.size());
   std::vector<T> out, val{init}, nval;
   std::vector<int> slot(C.n), key{0}, nkey;
@@ -801,7 +802,7 @@ template <class symbol_t> class DFA {
   if(cs.size() >= 2 && n >= 32)
    if(CompPtr P= dfa_internal::product_table(cs, int(alph.size()), n)) cs= {std::move(P)};
   std::vector<T> out;
-  for(int a, b;;) {  // run1 を呼ぶ所を 1 つにする (2 つにすると gcc が run1 を展開しなくなり、DP が遅くなる)
+  for(int a, b;;) {
    if(cs.size() == 1) return run1<ALL>(*cs[0], n, op, e, f, init);
    if(runk<ALL>(cs, n, op, e, f, init, out, a, b)) return out;
    cs[a]= dfa_internal::product(*cs[a], *cs[b], int(alph.size())), cs.erase(cs.begin() + b);
