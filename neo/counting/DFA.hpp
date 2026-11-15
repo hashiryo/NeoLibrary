@@ -177,48 +177,55 @@ template <class T> constexpr auto leaf_list() {
 template <class K> struct NumPack {
  static constexpr auto LF= leaf_list<K>();
  static constexpr int F= int(LF.size()), F1= F > 0 ? F : 1;
- u64 lo[F1];
- int lb[F1], sh[F1], tot= 0;
+ using Vals= std::array<u64, F1>;
+ u64 lo[F1]{};
+ int lb[F1]{}, sh[F1]{}, tot= 0;
  std::vector<int> id;  // 密なとき、葉の値を並べた添字から番号 + 1
  std::vector<u64> keys;  // 番号の順の詰めた値 (表を作り直すときに使う)
  HashMap<int> h;  // まばらなときの表
  int n= 0, next_check= 1024;
- bool dense= true, never= false;  // never: 範囲が広すぎて密にできない
- // 葉 f の値を、大小の順を保つ符号なしの値にしたもの
- static u64 val(u64 p, int f) {
-  const Leaf& L= LF[f];
-  const u64 x= L.w == 64 ? p >> L.off : (p >> L.off) & ((u64(1) << L.w) - 1);
-  return L.sgn ? x ^ (u64(1) << (L.w - 1)) : x;
+ char mode= 0;  // 0: 空、1: 密な配列、2: HashMap
+ bool never= false;  // 範囲が広すぎて密にできない
+ // 葉 f の値を、大小の順を保つ符号なしの値にしたもの (位置と幅は定数)
+ template <int f> static u64 val(u64 p) {
+  constexpr Leaf L= LF[f];
+  u64 x= p >> L.off;
+  if constexpr(L.w < 64) x&= (u64(1) << L.w) - 1;
+  if constexpr(L.sgn) x^= u64(1) << (L.w - 1);
+  return x;
  }
- std::size_t index(u64 p) const {
-  std::size_t r= 0;
-  for(int f= 0; f < F; ++f) r|= std::size_t(val(p, f) - lo[f]) << sh[f];
-  return r;
+ static Vals vals(u64 p) {
+  Vals v{};
+  [&]<std::size_t... I>(std::index_sequence<I...>) { ((v[I]= val<I>(p)), ...); }(std::make_index_sequence<F>());
+  return v;
  }
  // p が今の範囲にあれば、その添字を r に入れて true
- bool find(u64 p, std::size_t& r) const {
+ [[gnu::always_inline]] bool find(u64 p, std::size_t& r) const {
+  u64 bad= 0;
   r= 0;
-  for(int f= 0; f < F; ++f) {
-   const u64 d= val(p, f) - lo[f];
-   if(d >> lb[f]) return false;
-   r|= std::size_t(d) << sh[f];
-  }
-  return true;
+  [&]<std::size_t... I>(std::index_sequence<I...>) { ((bad|= (val<I>(p) - lo[I]) >> lb[I], r|= std::size_t(val<I>(p) - lo[I]) << sh[I]), ...); }(std::make_index_sequence<F>());
+  return bad == 0;
+ }
+ std::size_t index(u64 p) const {
+  std::size_t r;
+  find(p, r);
+  return r;
  }
  // 範囲を p が入るように広げる (幅は 2 倍以上ずつ)。2^40 を超える幅が要るなら never にする。
  void widen(u64 p) {
+  const Vals v= vals(p);
   tot= 0;
   for(int f= 0; f < F; ++f) {
-   const u64 v= val(p, f), size= u64(1) << lb[f];
-   if(v - lo[f] >= size) {
-    const u64 span= v < lo[f] ? lo[f] + size - v : v - lo[f] + 1;
+   const u64 size= u64(1) << lb[f];
+   if(v[f] - lo[f] >= size) {
+    const u64 span= v[f] < lo[f] ? lo[f] + size - v[f] : v[f] - lo[f] + 1;
     int b= lb[f] + 1;
     while(b < 40 && (u64(1) << b) < span) ++b;
     if((u64(1) << b) < span) {
      never= true;
      return;
     }
-    if(v < lo[f]) lo[f]= lo[f] + size - (u64(1) << b);  // 下へ広げるときは上の端を保つ
+    if(v[f] < lo[f]) lo[f]= lo[f] + size - (u64(1) << b);  // 下へ広げるときは上の端を保つ
     lb[f]= b;
    }
    sh[f]= tot, tot+= lb[f];
@@ -226,27 +233,28 @@ template <class K> struct NumPack {
  }
  bool fits() const { return !never && tot <= 34 && (std::size_t(1) << tot) <= std::max<std::size_t>(1024, std::size_t(8) * (n + 1)); }
  void to_dense() {
-  dense= true, id.assign(std::size_t(1) << tot, 0), h.clear();
+  mode= 1, id.assign(std::size_t(1) << tot, 0), h.clear();
   for(int i= 0; i < n; ++i) id[index(keys[i])]= i + 1;
  }
  void to_hash() {
-  dense= false, std::vector<int>().swap(id);
+  mode= 2, std::vector<int>().swap(id);
   for(int i= 0; i < n; ++i) h[keys[i]]= i + 1;
  }
- std::pair<int, bool> insert(const K& k) {
-  const u64 p= pack(k);
-  if(n == 0) {
-   for(int f= 0; f < F; ++f) lo[f]= val(p, f), lb[f]= sh[f]= 0;
-   id.assign(1, 0);
+ // 新しい状態を入れる、範囲を広げる、表を移すなどの遅い道
+ [[gnu::noinline]] std::pair<int, bool> insert_slow(u64 p) {
+  if(mode == 0) {
+   const Vals v= vals(p);
+   for(int f= 0; f < F; ++f) lo[f]= v[f];
+   mode= 1, id.assign(1, 0);
   }
   std::size_t r;
-  if(dense) {
+  if(mode == 1) {
    if(!find(p, r)) {
     widen(p);
     if(fits()) to_dense(), r= index(p);
     else to_hash();
    }
-   if(dense) {
+   if(mode == 1) {
     int& v= id[r];
     if(v) return {v - 1, false};
     return v= ++n, keys.push_back(p), std::pair{n - 1, true};
@@ -263,6 +271,21 @@ template <class K> struct NumPack {
    if(fits()) to_dense();
   }
   return {n - 1, true};
+ }
+ // 速い道 (今の範囲の中か、HashMap にある状態) だけを展開させる。gcc は展開しないと、呼び出しと葉の位置の読み直しで
+ // 番号付けが遅くなる。
+ [[gnu::always_inline]] std::pair<int, bool> insert(const K& k) {
+  const u64 p= pack(k);
+  if(mode == 1) {
+   std::size_t r;
+   if(find(p, r)) [[likely]] {
+    int& v= id[r];
+    if(v) return {v - 1, false};
+    return v= ++n, keys.push_back(p), std::pair{n - 1, true};
+   }
+  } else if(mode == 2)
+   if(const int v= h.get(p)) return {v - 1, false};
+  return insert_slow(p);
  }
 };
 template <class K> struct NumHash {
@@ -775,10 +798,10 @@ template <class symbol_t> class DFA {
  template <bool ALL, class T, class A, class F> std::vector<T> run(int n, const A& op, const T& e, const F& f, const T& init) const {
   if(n < 0) return std::vector<T>(ALL ? 0 : 1, e);
   std::vector<CompPtr> cs= comps;
-  std::vector<T> out;
   if(cs.size() >= 2 && n >= 32)
-   if(CompPtr P= dfa_internal::product_table(cs, int(alph.size()), n)) return run1<ALL>(*P, n, op, e, f, init);
-  for(int a, b;;) {
+   if(CompPtr P= dfa_internal::product_table(cs, int(alph.size()), n)) cs= {std::move(P)};
+  std::vector<T> out;
+  for(int a, b;;) {  // run1 を呼ぶ所を 1 つにする (2 つにすると gcc が run1 を展開しなくなり、DP が遅くなる)
    if(cs.size() == 1) return run1<ALL>(*cs[0], n, op, e, f, init);
    if(runk<ALL>(cs, n, op, e, f, init, out, a, b)) return out;
    cs[a]= dfa_internal::product(*cs[a], *cs[b], int(alph.size())), cs.erase(cs.begin() + b);
