@@ -2,34 +2,80 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <new>
 #include <numeric>
 #include <utility>
 #include <vector>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 #include "neo/graph/bipartite_coloring.hpp"
 // 二部グラフの最大マッチング。中の表し方は「左の頂点 [0, L)、右の頂点 [0, R)、その間の辺」の 1 つで、入口が 2 つある。
 // - BipartiteMatching(l, r, edges): 左右の大きさと、辺 (左 a、右 b) の列を渡す。頂点は左 a を a、右 b を l + b の番号で扱う。
 // - BipartiteMatching(color, edges): 一般のグラフの辺の列と 2 色の塗り分け (bipartite_coloring で求める) を渡す。頂点は
 //   元の番号で扱う。色 0 の頂点を左、色 1 の頂点を右として、番号の付け替えは型の中で持つ。
-// 辺はどちらの入口でも、渡した列の添字で扱う。多重辺があってもよい。
+// 辺はどちらの入口でも、渡した列の添字で扱う。多重辺があってもよい。渡した辺の列は写して持たない。左右の隣接の CSR と、
+// 左の CSR の並びの辺の番号を持ち、辺の番号から両端を引く問い合わせ (min_edge_cover、edge_kind) を初めて呼んだときに、
+// 辺の列を組み直す。2 MB 以上の配列は、Linux では 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼む。
 // マッチングは構築の中で求める。Karp-Sipser で初期のマッチングを作り、push-relabel (double push、FIFO、(L + R) / 2 回ごとの
 // global relabel) で仕上げる。Dulmage-Mendelsohn 分解は、点被覆、独立集合、辺と頂点の分類のどれかを初めて聞かれたときに
 // 求めるので、大きさやマッチングだけの使い方では費用がかからない。
-// 方式は procon-judge の yosupo-bipartitematching で比べて選んだ (pr_ks_half_pack)。記録は algo-notes の
-// notes/network-flow.md と notes/network-flow-api.md。
+// 方式は procon-judge の yosupo-bipartitematching で比べて選んだ (pr_ks_half_pack)。辺の列を写さない形と huge page は、
+// 辺が 155 万本の cf-1630-f で入れた。記録は algo-notes の notes/network-flow.md と notes/network-flow-api.md。
+namespace bipartite_matching_internal {
+// 2 MB 以上の確保を、Linux では 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼む allocator。辺が数百万本あると、4 KB の
+// ページに初めて触るたびに OS がページを割り当てる手間が大きい。
+template <class T> struct BigAlloc {
+ using value_type= T;
+ static constexpr std::size_t H= std::size_t(1) << 21;
+ BigAlloc()= default;
+ template <class U> BigAlloc(const BigAlloc<U>&) {}
+ T* allocate(std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   const std::size_t len= (n * sizeof(T) + H - 1) & ~(H - 1);
+   void* m= mmap(nullptr, len + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if(m == MAP_FAILED) throw std::bad_alloc();
+   char *p= static_cast<char*>(m), *a= reinterpret_cast<char*>((reinterpret_cast<std::uintptr_t>(p) + H - 1) & ~(H - 1));
+   if(a != p) munmap(p, a - p);
+   munmap(a + len, p + H - a);
+   madvise(a, len, MADV_HUGEPAGE);
+   return reinterpret_cast<T*>(a);
+  }
+#endif
+  return static_cast<T*>(::operator new(n * sizeof(T)));
+ }
+ void deallocate(T* p, [[maybe_unused]] std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   munmap(p, (n * sizeof(T) + H - 1) & ~(H - 1));
+   return;
+  }
+#endif
+  ::operator delete(p);
+ }
+ template <class U> bool operator==(const BigAlloc<U>&) const { return true; }
+};
+}  // namespace bipartite_matching_internal
 class BipartiteMatching {
 public:
- BipartiteMatching(int l, int r, const std::vector<std::array<int, 2>>& edges): L(l), R(r), es(edges) { solve(); }
- BipartiteMatching(const std::vector<int>& color, const std::vector<std::array<int, 2>>& edges): L(0), R(0), es(edges.size()) {
+ BipartiteMatching(int l, int r, const std::vector<std::array<int, 2>>& edges): L(l), R(r), M(edges.size()) {
+  build([&](int i) { return edges[i]; });
+  solve();
+ }
+ BipartiteMatching(const std::vector<int>& color, const std::vector<std::array<int, 2>>& edges): L(0), R(0), M(edges.size()) {
   const int n= color.size();
   vid.resize(n), org.resize(n);
   for(int v= 0; v < n; ++v) vid[v]= color[v] ? R++ : L++;
   for(int v= 0; v < n; ++v) org[vid[v]+= color[v] ? L : 0]= v;
-  for(size_t i= 0; i < edges.size(); ++i) {
+  build([&](int i) {
    auto [u, v]= edges[i];
    assert(color[u] != color[v]);
    if(color[u]) std::swap(u, v);
-   es[i]= {vid[u], vid[v] - L};
-  }
+   return std::array<int, 2>{vid[u], vid[v] - L};
+  });
   solve();
  }
  // 最大マッチングの辺の数。
@@ -42,11 +88,17 @@ public:
  }
  // 最大マッチングに使う辺の番号 (昇順)。
  std::vector<int> matching() const {
+  // 左の頂点ごとの並びの中で辺の番号は昇順なので、相手へ向かう最初の辺が番号の最も小さい辺。
   std::vector<int> ret;
   ret.reserve(sz);
-  std::vector<char> done(L);
-  for(int i= 0; i < (int)es.size(); ++i)
-   if(auto [a, b]= es[i]; ml[a] == b && !done[a]) done[a]= 1, ret.push_back(i);
+  for(int a= 0; a < L; ++a)
+   if(const int b= ml[a]; b >= 0)
+    for(int k= sl[a];; ++k)
+     if(al[k] == b) {
+      ret.push_back(ei[k]);
+      break;
+     }
+  std::sort(ret.begin(), ret.end());
   return ret;
  }
  // 最小点被覆。order は頂点の順列 (入口の番号) で、前の頂点ほど被覆に入れる。省けば番号の順。返す頂点は order の順。
@@ -55,6 +107,7 @@ public:
  std::vector<int> max_independent_set(std::vector<int> order= {}) { return cover(std::move(order), false); }
  // 最小辺被覆に使う辺の番号 (昇順)。辺の無い頂点があれば空。
  std::vector<int> min_edge_cover() const {
+  const auto& es= edges();
   std::vector<char> use(es.size()), ok(L + R);
   for(int i= 0; i < (int)es.size(); ++i)
    if(auto [a, b]= es[i]; ml[a] == b && !ok[a]) use[i]= ok[a]= ok[L + b]= 1;
@@ -81,7 +134,7 @@ public:
  // 辺 i が、どの最大マッチングにも入らないなら 0、入るものと入らないものがあるなら 1、どの最大マッチングにも入るなら 2。
  int edge_kind(int i) {
   dm();
-  const auto [a, b]= es[i];
+  const auto [a, b]= edges()[i];
   const int x= blk[a];
   if(x != blk[L + b]) return 0;
   return x != 0 && x != K - 1 && bl[x] == 1 && be[x] == 1 ? 2 : 1;
@@ -96,19 +149,39 @@ public:
   return blk[x] == (x < L ? K - 1 : 0) ? 1 : 2;
  }
 private:
- int L, R, sz= 0, K= -1;
- std::vector<std::array<int, 2>> es;  // 中の番号の辺 (左 a、右 b)
- std::vector<int> vid, org;           // 2 つ目の入口だけ。元の番号から中の番号 (左 a は a、右 b は L + b) へと、その逆
- std::vector<int> sl, al, sr, ar, ml, mr;
+ using Big= std::vector<int, bipartite_matching_internal::BigAlloc<int>>;
+ int L, R, M, sz= 0, K= -1;
+ std::vector<int> vid, org;  // 2 つ目の入口だけ。元の番号から中の番号 (左 a は a、右 b は L + b) へと、その逆
+ std::vector<int> sl, sr, ml, mr;
+ Big al, ei, ar;                               // 左の CSR (右の頂点と辺の番号) と、右の CSR (左の頂点)
+ mutable std::vector<std::array<int, 2>> es;  // 中の番号の辺 (左 a、右 b)。edges() で初めて要るときに組む
  std::vector<int> blk, bl, be;          // 中の番号の頂点のブロック、ブロックの左の頂点の数、ブロックの中の辺の数
  std::vector<int> fst, fto, bst, bto;  // ブロックの DAG (前向きと後ろ向き)
- void solve() {
-  const int M= es.size(), INF= 2 * R;
-  sl.assign(L + 1, 0), al.resize(M), sr.assign(R + 1, 0), ar.resize(M);
-  for(auto& [a, b]: es) ++sl[a], ++sr[b];
+ // get(i) は辺 i の中の番号 (左 a、右 b)。後ろから詰めるので、左の頂点ごとの並びの中で辺の番号は昇順になる。
+ template <class G> void build(G&& get) {
+  sl.assign(L + 1, 0), al.resize(M), ei.resize(M), sr.assign(R + 1, 0), ar.resize(M);
+  for(int i= 0; i < M; ++i) {
+   const auto [a, b]= get(i);
+   ++sl[a], ++sr[b];
+  }
   for(int i= 0; i < L; ++i) sl[i + 1]+= sl[i];
   for(int i= 0; i < R; ++i) sr[i + 1]+= sr[i];
-  for(int i= M; i--;) al[--sl[es[i][0]]]= es[i][1], ar[--sr[es[i][1]]]= es[i][0];
+  for(int i= M; i--;) {
+   const auto [a, b]= get(i);
+   const int k= --sl[a];
+   al[k]= b, ei[k]= i, ar[--sr[b]]= a;
+  }
+ }
+ const std::vector<std::array<int, 2>>& edges() const {
+  if((int)es.size() != M) {
+   es.resize(M);
+   for(int a= 0; a < L; ++a)
+    for(int k= sl[a]; k < sl[a + 1]; ++k) es[ei[k]]= {a, al[k]};
+  }
+  return es;
+ }
+ void solve() {
+  const int INF= 2 * R;
   ml.assign(L, -1), mr.assign(R, -1);
   {
    // Karp-Sipser。dl, dr は空いている隣の数。次数が 1 に落ちた頂点を stk に積む (右の頂点 r は L + r で積む)。
@@ -119,10 +192,13 @@ private:
     if((dl[l]= sl[l + 1] - sl[l]) == 1) stk[sp++]= l;
    for(int r= 0; r < R; ++r)
     if((dr[r]= sr[r + 1] - sr[r]) == 1) stk[sp++]= L + r;
-   auto take= [&](int l, int r) {
-    ml[l]= r, mr[r]= l;
+   // 左 l が組んだあと、l の空いている右の隣の次数を減らす (drop_r は右 r について同じ)。次数 1 の規則で組んだ頂点は、
+   // 空いている隣が相手だけなので、その頂点の隣をなめても次数は減らない。相手の側だけなめる。
+   auto drop_l= [&](int l) {
     for(int k= sl[l]; k < sl[l + 1]; ++k)
      if(const int r2= al[k]; mr[r2] < 0 && --dr[r2] == 1) stk[sp++]= L + r2;
+   };
+   auto drop_r= [&](int r) {
     for(int k= sr[r]; k < sr[r + 1]; ++k)
      if(const int l2= ar[k]; ml[l2] < 0 && --dl[l2] == 1) stk[sp++]= l2;
    };
@@ -133,7 +209,8 @@ private:
       if(ml[x] >= 0) continue;
       for(int k= sl[x]; k < sl[x + 1]; ++k)
        if(const int r= al[k]; mr[r] < 0) {
-        take(x, r);
+        ml[x]= r, mr[r]= x;
+        drop_r(r);
         break;
        }
      } else {
@@ -141,7 +218,8 @@ private:
       if(mr[r] >= 0) continue;
       for(int k= sr[r]; k < sr[r + 1]; ++k)
        if(const int l= ar[k]; ml[l] < 0) {
-        take(l, r);
+        ml[l]= r, mr[r]= l;
+        drop_l(l);
         break;
        }
      }
@@ -150,7 +228,8 @@ private:
     if(cur == L) break;
     for(int k= sl[cur]; k < sl[cur + 1]; ++k)
      if(const int r= al[k]; mr[r] < 0) {
-      take(cur, r);
+      ml[cur]= r, mr[r]= cur;
+      drop_l(cur), drop_r(r);
       break;
      }
    }
@@ -272,21 +351,24 @@ private:
    else if(blk[L + b] == -1) blk[L + b]= blk[mr[b]];
   bl.assign(K, 0), be.assign(K, 0);
   for(int a= 0; a < L; ++a) ++bl[blk[a]];
-  for(auto& [a, b]: es)
-   if(blk[a] == blk[L + b]) ++be[blk[a]];
+  for(int a= 0; a < L; ++a)
+   for(int k= sl[a]; k < sl[a + 1]; ++k)
+    if(blk[a] == blk[L + al[k]]) ++be[blk[a]];
  }
  // ブロックの DAG。ブロック 0 と K - 1 は被覆の側が決まっているので、そこに触れる辺は持たない。
  void dag() {
   if(!fst.empty()) return;
   fst.assign(K + 1, 0), bst.assign(K + 1, 0);
   auto inner= [&](int x, int y) { return x != y && x != 0 && y != K - 1; };
-  for(auto& [a, b]: es)
-   if(const int x= blk[a], y= blk[L + b]; inner(x, y)) ++fst[x + 1], ++bst[y + 1];
+  for(int a= 0; a < L; ++a)
+   for(int k= sl[a]; k < sl[a + 1]; ++k)
+    if(const int x= blk[a], y= blk[L + al[k]]; inner(x, y)) ++fst[x + 1], ++bst[y + 1];
   for(int k= 0; k < K; ++k) fst[k + 1]+= fst[k], bst[k + 1]+= bst[k];
   fto.resize(fst[K]), bto.resize(bst[K]);
   std::vector<int> pf(fst.begin(), fst.end() - 1), pb(bst.begin(), bst.end() - 1);
-  for(auto& [a, b]: es)
-   if(const int x= blk[a], y= blk[L + b]; inner(x, y)) fto[pf[x]++]= y, bto[pb[y]++]= x;
+  for(int a= 0; a < L; ++a)
+   for(int k= sl[a]; k < sl[a + 1]; ++k)
+    if(const int x= blk[a], y= blk[L + al[k]]; inner(x, y)) fto[pf[x]++]= y, bto[pb[y]++]= x;
  }
  // order の順に、まだ側が決まっていないブロックの側を決める。z[k] が 1 ならブロック k の左の頂点を、0 なら右の頂点を
  // 被覆に入れる。辺 (a, b) が x = block[a] < y = block[b] を結ぶとき、z[x] = 0 なら z[y] = 0、z[y] = 1 なら z[x] = 1 で

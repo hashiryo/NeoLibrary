@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <vector>
@@ -21,6 +22,23 @@
 // 比べられる組を全部辺で渡すなら min_path_cover のほうが 2〜3 倍速く、Hasse 図の辺だけを渡せるなら min_chain_cover と
 // max_antichain に渡すほうが速い。鎖が多く深い疎な DAG では MaxFlow が遅い (手元の M2 で、頂点 20 万、辺 50 万に 0.15〜2.5 s)。
 // 記録は algo-notes の notes/network-flow.md。
+namespace path_cover_internal {
+// head[v] が 1 の頂点 v から nx をたどった列を、本数 k の道の列にする。道ごとに長さを数えてから、長さちょうどの vector で取る
+// (push_back で伸ばすと、道が多いときに確保が 2〜3 倍になる)。
+inline std::vector<std::vector<int>> paths(int n, int k, const std::vector<int>& nx, const std::vector<char>& head) {
+ std::vector<std::vector<int>> ret;
+ ret.reserve(k);
+ for(int v= 0; v < n; ++v)
+  if(head[v]) {
+   int len= 0;
+   for(int x= v; x >= 0; x= nx[x]) ++len;
+   auto& p= ret.emplace_back(len);
+   int i= 0;
+   for(int x= v; x >= 0; x= nx[x]) p[i++]= x;
+  }
+ return ret;
+}
+}  // namespace path_cover_internal
 inline std::vector<std::vector<int>> min_path_cover(int n, const std::vector<std::array<int, 2>>& edges) {
  for([[maybe_unused]] auto [u, v]: edges) assert(0 <= u && u < n && 0 <= v && v < n && u != v);
  const BipartiteMatching bm(n, n, edges);
@@ -28,14 +46,7 @@ inline std::vector<std::vector<int>> min_path_cover(int n, const std::vector<std
  std::vector<char> head(n, 1);
  for(int u= 0; u < n; ++u)
   if(const int w= bm.mate(u); w >= 0) nx[u]= w - n, head[w - n]= 0;
- std::vector<std::vector<int>> ret;
- ret.reserve(n - bm.size());
- for(int v= 0; v < n; ++v)
-  if(head[v]) {
-   auto& p= ret.emplace_back();
-   for(int x= v; x >= 0; x= nx[x]) p.push_back(x);
-  }
- return ret;
+ return path_cover_internal::paths(n, n - bm.size(), nx, head);
 }
 namespace path_cover_internal {
 // 頂点 v を出る側を v、入る側を n + v、s を 2n、t を 2n + 1 とする網に流す。辺の番号は、s から u が u、v'' から t が n + v、
@@ -85,13 +96,7 @@ inline std::vector<std::vector<int>> min_chain_cover(int n, const std::vector<st
    --pass[y], x= y;
   }
  }
- std::vector<std::vector<int>> ret;
- for(int v= 0; v < n; ++v)
-  if(head[v]) {
-   auto& p= ret.emplace_back();
-   for(int x= v; x >= 0; x= nx[x]) p.push_back(x);
-  }
- return ret;
+ return path_cover_internal::paths(n, std::count(head.begin(), head.end(), 1), nx, head);
 }
 inline std::vector<int> max_antichain(int n, const std::vector<std::array<int, 2>>& edges) {
  if(n == 0) return {};
