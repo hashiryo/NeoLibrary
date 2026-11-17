@@ -31,29 +31,38 @@ template <class M, class= void> struct action_type {
 template <class M> struct action_type<M, std::void_t<typename M::E>> {
  using type= typename M::E;
 };
-// 1 MB 以上の確保は 2 MB 境界に寄せ、Linux では huge page を頼む。
-template <class T> struct Alloc {
+// 1 MB 以上の確保は 2 MB 境界に寄せ、Linux では huge page を頼む。先頭を OFF byte だけずらして返す。
+template <class T, std::size_t OFF= 0> struct Alloc {
  using value_type= T;
+ template <class U> struct rebind {
+  using other= Alloc<U, OFF>;
+ };
  Alloc()= default;
- template <class U> Alloc(const Alloc<U>&) {}
+ template <class U> Alloc(const Alloc<U, OFF>&) {}
  T* allocate(std::size_t n) {
-  const std::size_t want= n * sizeof(T);
-  if(want < (std::size_t(1) << 20)) return static_cast<T*>(::operator new(want, std::align_val_t(64)));
+  const std::size_t want= n * sizeof(T) + OFF;
+  if(want < (std::size_t(1) << 20)) return reinterpret_cast<T*>(static_cast<char*>(::operator new(want, std::align_val_t(64))) + OFF);
   const std::size_t H= std::size_t(1) << 21, bytes= (want + H - 1) & ~(H - 1);
-  T* p= static_cast<T*>(::operator new(bytes, std::align_val_t(H)));
+  char* p= static_cast<char*>(::operator new(bytes, std::align_val_t(H)));
 #ifdef __linux__
   madvise(p, bytes, MADV_HUGEPAGE);
 #endif
-  return p;
+  return reinterpret_cast<T*>(p + OFF);
  }
  void deallocate(T* p, std::size_t n) {
-  const std::size_t want= n * sizeof(T);
-  if(want < (std::size_t(1) << 20)) ::operator delete(p, std::align_val_t(64));
-  else ::operator delete(p, std::align_val_t(std::size_t(1) << 21));
+  const std::size_t want= n * sizeof(T) + OFF;
+  char* q= reinterpret_cast<char*>(p) - OFF;
+  if(want < (std::size_t(1) << 20)) ::operator delete(q, std::align_val_t(64));
+  else ::operator delete(q, std::align_val_t(std::size_t(1) << 21));
  }
- template <class U> bool operator==(const Alloc<U>&) const { return true; }
+ template <class U> bool operator==(const Alloc<U, OFF>&) const { return true; }
 };
 template <class T> using Vec= std::vector<T, Alloc<T>>;
+// 同じ添字で引く 2 本目の配列 (遅延の lz と印) は、先頭を 2 KB と 64 byte ずらす。どちらも 2 MB 境界から始めると、要素が
+// 同じ大きさなら d[k] と lz[k] の番地の下位 21 bit がいつもそろい、Xeon 6975P-C で 2 割遅かった
+// (procon-judge の self-segtree-range-assign-range-sum、ずらすと 132 ms が 108 ms)。
+inline constexpr std::size_t STAGGER= 2048 + 64;
+template <class T> using VecS= std::vector<T, Alloc<T, STAGGER>>;
 // 作用が残っているかの印。unsigned char の配列だと、印を書くたびに gcc がほかのメンバと重なりうるとみなして、配列の
 // 先頭や大きさを読み直す (char の型はどの型とも重なりうる決まり)。bool を下に持つ enum なら重ならない。
 enum class Flag: bool { off, on };
@@ -66,8 +75,8 @@ template <class M> class Generic {
  static_assert(MO || AC, "M にはモノイド (T, ti, op) か作用 (T, E, mp, cp) が要る");
  int n= 0, lg= 0, sz= 1;
  Vec<T> d;  // モノイドがあれば節 1..2sz-1 の値、作用だけなら葉の値 (sz 個)
- Vec<E> lz;
- Vec<Flag> fl;
+ VecS<E> lz;
+ VecS<Flag> fl;
  // mp の 4 つの形をそろえる。偽を返したら作用が節に収まらなかった (Beats)。
  static bool map(T& v, const E& x, int len) {
   if constexpr(std::is_invocable_r_v<bool, decltype(M::mp), T&, const E&, int>) return M::mp(v, x, len);
