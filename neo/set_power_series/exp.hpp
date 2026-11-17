@@ -1,11 +1,13 @@
 #pragma once
 #include "neo/set_power_series/generic.hpp"
 #include "neo/set_power_series/ranked_xor.hpp"
+#include "neo/set_power_series/semiring_simd.hpp"
 // 集合冪級数の exp(f) = sum_k f^k / k! (部分集合畳み込みの冪)。f の長さは 2 冪。
 //   環: f[∅] = 0 が要る。法が奇数の ZMod (5 <= n <= 22) は rank 付きの XOR 変換の領域で 1 bit ずつ伸ばす速い核、ほかの環は
 //   ランク付きのゼータ変換。どちらも割り算を使わず O(n^2 2^n)。
 //   引き算の無い半環 (MinPlus など、T::one() が要る): h[∅] = 1、h[S] = sum_{S の最小の要素を含む T ⊆ S} f[T] h[S \ T]
-//   (集合を塊に分ける和。MinPlus なら塊の費用の和の最小)。f[∅] は読まない。3^n。
+//   (集合を塊に分ける和。MinPlus なら塊の費用の和の最小)。f[∅] は読まない。3^n。MinPlus、MaxPlus、MaxMin で値が 32 bit か
+//   64 bit の符号付き整数なら、AVX2 の核 (semiring_simd.hpp) で行う。
 namespace sps {
 template <class T> std::vector<T> exp(const std::vector<T>& f) {
  const int n= sps_xor::log2_size<T>(f.size());
@@ -20,6 +22,6 @@ template <class T> std::vector<T> exp(const std::vector<T>& f) {
    }
   }
   return sps_generic::exp(f);
- } else return sps_generic::semiring_exp(f, T::one());
+ } else return sps_semi::exp(f);
 }
 }  // namespace sps
