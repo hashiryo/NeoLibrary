@@ -1,6 +1,6 @@
 ---
 title: ハフニアン
-documentation_of: ../../neo/linalg/hafnian.hpp
+documentation_of: ../../neo/set_power_series/hafnian.hpp
 ---
 
 対角が 0 の $n \times n$ の対称行列 $A$ のハフニアン $\mathrm{haf}(A)$ を求めます。$A$ を頂点 $n$ 個の完全グラフの辺の重みとみたときの、完全マッチングの重み (辺の重みの積) の和です。
