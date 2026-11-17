@@ -176,6 +176,14 @@ template <int E, class B> void bfly_rec(char* A, std::size_t L, B b) {
   for(std::size_t j= 0; j < h; ++j) two(A + 32 * j, A + 32 * (j + h));
  }
 }
+// k 進の変換の 1 つの列。d[r] = f(d[r], s[r]) (r < cnt、値 E byte) を 32 byte ずつ行い、済んだ個数を返す (残りは呼び出し元)。
+// d と s は cnt 個ずつで、32 byte の中で重ならないこと (d と s の差が 32 byte 以上)。
+template <int E, class F> inline std::size_t run_vec(char* d, const char* s, std::size_t cnt, F f) {
+ constexpr std::size_t L= 32 / E;
+ std::size_t r= 0;
+ for(; r + L <= cnt; r+= L) st(d + r * E, f(ld(d + r * E), ld(s + r * E)));
+ return r;
+}
 // 値 E byte の n 個 (2 冪) を変換する。32 byte に満たなければ false を返す (呼び出し元が汎用の道で行う)。
 template <int E, bool UP, class F> inline bool directed(void* p, std::size_t n, F f) {
  if(n * E < 32) return false;

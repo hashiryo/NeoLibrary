@@ -16,6 +16,13 @@ template <class T> std::vector<T> sps::and_convolve(std::vector<T> f, std::vecto
 template <class T> std::vector<T> sps::xor_convolve(std::vector<T> f, std::vector<T> g);
 template <class M> void sps::subset_zeta(std::vector<typename M::T>& f);  // f[S] <- op_{T ⊆ S} f[T]
 template <class M> void sps::supset_zeta(std::vector<typename M::T>& f);  // f[S] <- op_{S ⊆ T} f[T]
+// k 進 (長さ k^n、k >= 2)
+template <class T> void sps::subset_zeta(std::vector<T>& f, int k);     // f[x] <- sum_{y ≤ x (桁ごと)} f[y]
+template <class T> void sps::subset_mobius(std::vector<T>& f, int k);
+template <class T> void sps::supset_zeta(std::vector<T>& f, int k);     // f[x] <- sum_{y ≥ x (桁ごと)} f[y]
+template <class T> void sps::supset_mobius(std::vector<T>& f, int k);
+template <class M> void sps::subset_zeta(std::vector<typename M::T>& f, int k);
+template <class M> void sps::supset_zeta(std::vector<typename M::T>& f, int k);
 ```
 
 ## 環の変換
@@ -50,6 +57,25 @@ sps::subset_zeta<Top2>(f);  // f[K] は K の部分集合の添字の値の上�
 std::vector<int> g = ...;
 sps::subset_zeta<monoid::Max<int>>(g);  // 標準の構造体は AVX2 の核に回る
 ```
+
+## k 進
+
+`k` を渡す形は、長さ $k^n$ の列の添字を k 進の n 桁と見て、桁ごとに $y \le x$ (`subset`) か $y \ge x$ (`supset`) で畳みます。多次元の累積和で、$O(n k^n)$ です。各要素を $k - 1$ 個まで重ねてよい多重集合と見ると、部分多重集合の和になり、$k = 2$ なら上の形と同じ答えです。環の形とモノイドの形があり、どちらも上と同じ型で AVX2 の核に回ります (桁の重みが 32 byte 以上の段だけ。下の段は値を 1 つずつ合わせる)。
+
+```cpp
+// ARC136 D (Without Carry): 筆算で繰り上がらない組 (i < j) の数
+std::vector<long long> c(1000000);  // c[x] = x の個数
+for (int v : a) ++c[v];
+sps::subset_zeta(c, 10);  // c[x] = 桁ごとに x 以下の値の個数
+long long ans = 0;
+for (int v : a) ans += c[999999 - v] - (どの桁も 4 以下 ? 1 : 0);
+ans /= 2;
+```
+
+次の 2 つの畳み込みは置いていません。どちらも 1 の k 乗根や次数の変数が要り、NTT の側の話に近いからです。
+
+- 桁ごとに mod k で足す畳み込み (XOR 畳み込みの k 進版)。
+- 桁ごとに繰り上がりなしで足す畳み込み。$K[X]/(X_i^k)$ の積で、$k = 2$ なら部分集合畳み込みになる。
 
 ## 速さ
 

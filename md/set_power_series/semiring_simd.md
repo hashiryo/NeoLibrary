@@ -18,3 +18,15 @@ $h[S] = \bigoplus_{T \subseteq S} f[T] \otimes g[S \setminus T]$ を求めます
 ## exp
 
 最大の要素を含む塊を選ぶ形にします。$h[2^i + S] = \bigoplus_{T \subseteq S} f[2^i + T] \otimes h[S \setminus T]$ を求める部分集合畳み込みを、$i = 0, \ldots, n-1$ と続けます。どの段も上の核で、段ごとに値の範囲を確かめます。範囲の外の段が出たら、全体を汎用の道 (最小の要素を含む塊を選ぶ形) でやり直します。値が INF に近いときの止め方を、今までの形と同じにするためです。
+
+## 速さ
+
+procon-judge の self-sps-semiring で、x64-gcc の Xeon 6975P-C の回 (run 44086219142) の値です。今までの道は sps_generic の 3^n の形です。
+
+| 演算 | この核 | 今までの道 |
+| --- | ---: | ---: |
+| `MinPlus<int>` の畳み込み (n = 16) | 3.66 ms | 49.40 ms |
+| `MaxPlus<long long>` の畳み込み (n = 16) | 11.72 ms | 55.42 ms |
+| `MaxMin<int>` の畳み込み (n = 16) | 3.79 ms | 28.71 ms |
+| `MinPlus<int>` の exp (n = 18) | 16.23 ms | 286.46 ms |
+| `MaxPlus<long long>` の exp (n = 18) | 53.77 ms | 325.95 ms |
