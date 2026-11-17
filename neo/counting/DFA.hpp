@@ -3,12 +3,14 @@
 #include <array>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
+#include <new>
 #include <ranges>
 #include <string>
 #include <tuple>
@@ -18,6 +20,9 @@
 #include <utility>
 #include <vector>
 #include "neo/data_structure/HashMap.hpp"
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 // 有限オートマトン (DFA) と、受理される長さ n の記号の列の上の DP。今の Library の Automaton (mylib/counting/Automaton.hpp)
 // の作り直しで、口 (遷移の関数から作る、NFA と ε 遷移、&、DP の op と f(値, 記号, 位置)) は同じにしてある。
 // 構築は、初期状態から幅優先にたどって状態に番号を振り、状態の数 × 記号の数の表にする。番号を引く表は、状態の型が
@@ -37,6 +42,41 @@
 // 表にするかは、積を幅優先で作りながら組の増え方から見積もる (product_table)。
 namespace dfa_internal {
 using u64= unsigned long long;
+// 2 MB 以上の確保を、Linux では 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼む allocator。状態が数百万ある DFA の表
+// (procon-judge の abc155-e で 152 MB) は vector を倍々に伸ばすたびに新しい領域のページに初めて触るので、4 KB のページ
+// では OS がページを割り当てる手間が大きい。表、番号付けの配列、DP の置き場所の配列に使う。
+template <class T> struct BigAlloc {
+ using value_type= T;
+ static constexpr std::size_t H= std::size_t(1) << 21;
+ BigAlloc()= default;
+ template <class U> BigAlloc(const BigAlloc<U>&) {}
+ T* allocate(std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   const std::size_t len= (n * sizeof(T) + H - 1) & ~(H - 1);
+   void* m= mmap(nullptr, len + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if(m == MAP_FAILED) throw std::bad_alloc();
+   char *p= static_cast<char*>(m), *a= reinterpret_cast<char*>((reinterpret_cast<std::uintptr_t>(p) + H - 1) & ~(H - 1));
+   if(a != p) munmap(p, a - p);
+   munmap(a + len, p + H - a);
+   madvise(a, len, MADV_HUGEPAGE);
+   return reinterpret_cast<T*>(a);
+  }
+#endif
+  return static_cast<T*>(::operator new(n * sizeof(T)));
+ }
+ void deallocate(T* p, [[maybe_unused]] std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   munmap(p, (n * sizeof(T) + H - 1) & ~(H - 1));
+   return;
+  }
+#endif
+  ::operator delete(p);
+ }
+ template <class U> bool operator==(const BigAlloc<U>&) const { return true; }
+};
+template <class T> using BigVec= std::vector<T, BigAlloc<T>>;
 template <class T> struct is_pair: std::false_type {};
 template <class A, class B> struct is_pair<std::pair<A, B>>: std::true_type {};
 template <class T> struct is_tuple: std::false_type {};
@@ -182,8 +222,8 @@ template <class K> struct NumPack {
  using Vals= std::array<u64, F1>;
  u64 lo[F1]{};
  int lb[F1]{}, sh[F1]{}, tot= 0;
- std::vector<int> id;  // 密なとき、葉の値を並べた添字から番号 + 1
- std::vector<u64> keys;  // 番号の順の詰めた値 (表を作り直すときに使う)
+ BigVec<int> id;  // 密なとき、葉の値を並べた添字から番号 + 1
+ BigVec<u64> keys;  // 番号の順の詰めた値 (表を作り直すときに使う)
  HashMap<int> h;  // まばらなときの表
  int n= 0, next_check= 1024;
  char mode= 0;  // 0: 空、1: 密な配列、2: HashMap
@@ -239,7 +279,7 @@ template <class K> struct NumPack {
   for(int i= 0; i < n; ++i) id[index(keys[i])]= i + 1;
  }
  void to_hash() {
-  mode= 2, std::vector<int>().swap(id);
+  mode= 2, BigVec<int>().swap(id);
   for(int i= 0; i < n; ++i) h[keys[i]]= i + 1;
  }
  // 新しい状態を入れる、範囲を広げる、表を移すなどの遅い道
@@ -309,7 +349,7 @@ template <class K> using Numbering= std::conditional_t<packable<K>, NumPack<K>, 
 // st は利用者の状態の値 (std::deque<状態の型>、番号の順)。st_type はその型。構築で作った成分だけが持つ。
 struct Comp {
  int n= 0;
- std::vector<int> tab;
+ BigVec<int> tab;
  std::vector<char> acc;
  std::shared_ptr<const void> st;
  const std::type_info* st_type= nullptr;
@@ -326,7 +366,7 @@ template <class H, class S> concept eps_transition= std::is_invocable_v<const H&
 template <class S, class Tr, class Ac, class Rej> CompPtr build(int m, const S& init, const Tr& tr, const Ac& ac, const Rej& rej) {
  Numbering<S> num;
  std::deque<S> dec;  // 足しても前の要素への参照が保たれる
- std::vector<int> tab;
+ BigVec<int> tab;
  num.insert(init), dec.push_back(init);
  for(std::size_t i= 0; i < dec.size(); ++i) {
   const S& s= dec[i];
@@ -405,7 +445,7 @@ template <bool EPS, class S, class Tr, class Ac, class Eps> CompPtr build_nfa(in
   start.assign(clst.begin(), clst.begin() + coff[1]);
  } else toff= std::move(off), tlst= std::move(lst), start= {0};
  auto C= std::make_shared<Comp>();
- std::vector<int> tab;
+ BigVec<int> tab;
  if(N <= 64) {
   std::vector<u64> tm(std::size_t(N) * m);
   u64 am= 0, s0= 0;
@@ -467,7 +507,7 @@ template <bool EPS, class S, class Tr, class Ac, class Eps> CompPtr build_nfa(in
 inline CompPtr product(const Comp& A, const Comp& B, int m) {
  HashMap<int> h;
  std::vector<std::pair<int, int>> dec{{0, 0}};
- std::vector<int> tab;
+ BigVec<int> tab;
  h[0]= 1;
  for(std::size_t i= 0; i < dec.size(); ++i) {
   const auto [a, b]= dec[i];
@@ -511,7 +551,8 @@ inline CompPtr product_table(const std::vector<CompPtr>& cs, int m, int n) {
  }
  if(tb > 64) return nullptr;
  HashMap<int> h;
- std::vector<int> dec(k, 0), tab, tg(k);
+ std::vector<int> dec(k, 0), tg(k);
+ BigVec<int> tab;
  std::vector<std::size_t> lv{1};  // lv[d]: 段 d までの組の数
  h[0]= 1;
  std::size_t head= 0, cnt= 1, last= 1;
@@ -590,7 +631,8 @@ inline TabPtr tabulate(const std::vector<CompPtr>& cs, int m) {
  }
  HashMap<int> h;
  std::unordered_map<std::vector<int>, int, Hasher> hv;
- std::vector<int> dec(k, 0), tab, tg(k);
+ std::vector<int> dec(k, 0), tg(k);
+ BigVec<int> tab;
  int cnt= 0;
  auto id= [&]() -> int {  // tg の組の番号 (無ければ足す)
   int* v;
@@ -751,7 +793,8 @@ template <class symbol_t> class DFA {
  // 数え上げを、状態ごとの (移る先, 記号の本数) の組 (gofs、gto、gmul) で進める。run1 の速い道。
  template <bool ALL, class T, class A> [[gnu::noinline]] std::vector<T> run1g(const Comp& C, int n, const A& op, const T& e, const T& init, const std::vector<int>& gofs, const std::vector<int>& gto, const std::vector<int>& gmul) const {
   std::vector<T> out, val{init}, nval;
-  std::vector<int> slot(C.n), key{0}, nkey;
+  dfa_internal::BigVec<int> slot(C.n);
+  std::vector<int> key{0}, nkey;
   for(int i= 0;; ++i) {
    if(ALL || i == n) {
     T r= e;
@@ -785,7 +828,8 @@ template <class symbol_t> class DFA {
  template <bool ALL, class T, class A, class F> [[gnu::noinline]] std::vector<T> run1(const Comp& C, int n, const A& op, const T& e, const F& f, const T& init) const {
   const int m= int(alph.size());
   std::vector<T> out, val{init}, nval;
-  std::vector<int> slot(C.n), key{0}, nkey;
+  dfa_internal::BigVec<int> slot(C.n);
+  std::vector<int> key{0}, nkey;
   const int* tab= C.tab.data();
   for(int i= 0;; ++i) {
    if(ALL || i == n) {
@@ -820,7 +864,8 @@ template <class symbol_t> class DFA {
  template <bool ALL, bool STEP, class T, class A, class F> [[gnu::noinline]] std::vector<T> run1s(const Comp& C, int n, const A& op, const T& e, const F& f, const T& init, const dfa_internal::Tab* tp= nullptr, std::vector<int>* fk= nullptr, std::vector<T>* fv= nullptr) const {
   const int m= int(alph.size());
   std::vector<T> out, val{init}, nval;
-  std::vector<int> slot(C.n), key{0}, nkey;
+  dfa_internal::BigVec<int> slot(C.n);
+  std::vector<int> key{0}, nkey;
   const int* tab= C.tab.data();
   for(int i= 0;; ++i) {
    if(ALL || i == n) {
@@ -908,7 +953,8 @@ template <class symbol_t> class DFA {
   };
   out.clear();
   std::vector<T> val{init}, nval;
-  std::vector<int> slot, key{0}, nkey, tg(m);
+  dfa_internal::BigVec<int> slot;
+  std::vector<int> key{0}, nkey, tg(m);
   for(int i= 0;; ++i) {
    if(ALL || i == n) {
     T res= e;
