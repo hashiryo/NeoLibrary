@@ -41,4 +41,14 @@ procon-judge の Library Checker の 5 問で書き比べた提出 (xw1、xe1、
 | polynomial_composite_set_power_series | 68.91 ms | 291.20 ms | 670.39 ms | EPYC 7763 |
 | power_projection_of_set_power_series | 74.24 ms | 295.35 ms | なし | EPYC 7763 |
 
+この核 (NeoLibrary 5c89acb で、積和のループと法の定数の持ち方を直したあと) は、写し元と並びます。x64-gcc の EPYC 9V45 の値は次のとおりです。subset_convolution は run 44047217621、ほかの 4 問は Solver の形にしたハーネスで測った回 (judge 5c073dd4) です。
+
+| 問題 | この核 | 写し元 | 首位の写し |
+| --- | ---: | ---: | ---: |
+| subset_convolution | 37.74 ms | 45.48 ms | 109.52 ms |
+| exp_of_set_power_series | 34.79 ms | 33.89 ms | 93.53 ms |
+| log_of_set_power_series | 34.37 ms | 33.44 ms | 113.42 ms |
+| polynomial_composite_set_power_series | 51.53 ms | 52.39 ms | 223.11 ms |
+| power_projection_of_set_power_series | 52.65 ms | 58.04 ms | 186.59 ms |
+
 記録は algo-notes の notes/set-power-series.md にあります。
