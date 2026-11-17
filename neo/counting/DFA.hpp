@@ -1082,7 +1082,11 @@ public:
  template <class state_t, class F, class G>
   requires dfa_internal::dfa_transition<F, state_t, symbol_t>
  DFA(const std::vector<symbol_t>& alphabet, const state_t& init, const F& tr, const G& ac, const state_t& reject): alph(sorted(alphabet)) {
-  comps.push_back(dfa_internal::build(int(alph.size()), init, [&](const state_t& s, int j) -> state_t { return tr(s, alph[j]); }, ac, [&](const state_t& t) { return t == reject; }));
+  auto step= [&](const state_t& s, int j) -> state_t { return tr(s, alph[j]); };
+  // 詰められる型は詰めた値で比べる。std::array の == は libstdc++ で memcmp になり、gcc は要素ごとに書いたばかりの状態を
+  // 8 byte で読み直す。x86 は 2 回の書き込みを 1 回の読み込みへ渡せず、読み込みが書き込みの完了を待つ。
+  if constexpr(dfa_internal::packable<state_t>) comps.push_back(dfa_internal::build(int(alph.size()), init, step, ac, [r= dfa_internal::pack(reject)](const state_t& t) { return dfa_internal::pack(t) == r; }));
+  else comps.push_back(dfa_internal::build(int(alph.size()), init, step, ac, [&](const state_t& t) { return t == reject; }));
  }
  // NFA。tr(状態, 記号) が次の状態の集まり (std::set や std::vector) を返す。部分集合構成で DFA に直す。
  template <class state_t, class F, class G>
