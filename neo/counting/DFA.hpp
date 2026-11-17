@@ -6,12 +6,14 @@
 #include <deque>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <ranges>
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <typeinfo>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -304,10 +306,13 @@ template <class K> struct NumTree {
 };
 template <class K> using Numbering= std::conditional_t<packable<K>, NumPack<K>, std::conditional_t<hashable<K>(), NumHash<K>, NumTree<K>>>;
 // 表にした DFA。状態 0 が初期状態で、tab[s * m + c] は状態 s から c 番目の記号で移る先 (捨てるなら -1)。
+// st は利用者の状態の値 (std::deque<状態の型>、番号の順)。st_type はその型。構築で作った成分だけが持つ。
 struct Comp {
  int n= 0;
  std::vector<int> tab;
  std::vector<char> acc;
+ std::shared_ptr<const void> st;
+ const std::type_info* st_type= nullptr;
 };
 using CompPtr= std::shared_ptr<const Comp>;
 template <class R, class S> concept state_range= !std::is_convertible_v<R, S> && requires(const R& r) {
@@ -341,6 +346,7 @@ template <class S, class Tr, class Ac, class Rej> CompPtr build(int m, const S& 
  auto C= std::make_shared<Comp>();
  C->n= int(dec.size()), C->tab= std::move(tab), C->acc.resize(C->n);
  for(int i= 0; i < C->n; ++i) C->acc[i]= bool(ac(dec[i]));
+ C->st= std::make_shared<const std::deque<S>>(std::move(dec)), C->st_type= &typeid(S);
  return C;
 }
 inline void sort_unique_tail(std::vector<int>& v, std::size_t b) {
@@ -561,6 +567,141 @@ inline CompPtr product_table(const std::vector<CompPtr>& cs, int m, int n) {
  }
  return C;
 }
+// 成分の積を、初期状態から来られる組だけの 1 つの表にしたもの。parts[s * k + j] は表の状態 s の成分 j の状態 (k = 1 なら
+// parts は空で、表は成分そのもの)。cs は成分 (状態の値を引くために持つ)。
+struct Tab {
+ CompPtr C;
+ int k= 1;
+ std::vector<int> parts;
+ std::vector<CompPtr> cs;
+};
+using TabPtr= std::shared_ptr<const Tab>;
+inline TabPtr tabulate(const std::vector<CompPtr>& cs, int m) {
+ auto T= std::make_shared<Tab>();
+ T->cs= cs, T->k= int(cs.size());
+ if(T->k == 1) return T->C= cs[0], T;
+ const int k= T->k;
+ std::vector<int> sh(k);
+ int tb= 0;
+ for(int j= 0; j < k; ++j) {
+  int b= 0;
+  while((1ll << b) < cs[j]->n) ++b;
+  sh[j]= tb, tb+= b;
+ }
+ HashMap<int> h;
+ std::unordered_map<std::vector<int>, int, Hasher> hv;
+ std::vector<int> dec(k, 0), tab, tg(k);
+ int cnt= 0;
+ auto id= [&]() -> int {  // tg の組の番号 (無ければ足す)
+  int* v;
+  if(tb <= 64) {
+   u64 key= 0;
+   for(int j= 0; j < k; ++j) key|= u64(tg[j]) << sh[j];
+   v= &h[key];
+  } else v= &hv[tg];
+  if(!*v) *v= ++cnt, dec.insert(dec.end(), tg.begin(), tg.end());
+  return *v - 1;
+ };
+ for(int j= 0; j < k; ++j) tg[j]= 0;
+ dec.clear(), id();
+ for(int s= 0; s < cnt; ++s) {
+  tab.resize(tab.size() + m);
+  for(int c= 0; c < m; ++c) {
+   bool ok= true;
+   for(int j= 0; j < k && ok; ++j) {
+    const int t= cs[j]->tab[std::size_t(dec[std::size_t(s) * k + j]) * m + c];
+    ok= t >= 0, tg[j]= t;
+   }
+   tab[std::size_t(s) * m + c]= ok ? id() : -1;
+  }
+ }
+ auto C= std::make_shared<Comp>();
+ C->n= cnt, C->tab= std::move(tab), C->acc.resize(cnt);
+ for(int s= 0; s < cnt; ++s) {
+  bool a= true;
+  for(int j= 0; j < k && a; ++j) a= cs[j]->acc[dec[std::size_t(s) * k + j]];
+  C->acc[s]= a;
+ }
+ T->C= std::move(C), T->parts= std::move(dec);
+ return T;
+}
+// 表の状態 1 つ。st[j] は成分 j の状態の番号 (成分の中での番号)、get<S>(j) は成分 j の利用者の状態の値。
+struct StateRef {
+ const Tab* T= nullptr;
+ int id= -1;
+ int operator[](int j) const { return T->k == 1 ? id : T->parts[std::size_t(id) * T->k + j]; }
+ template <class S> const S& get(int j= 0) const {
+  const Comp& c= *T->cs[j];
+  assert(c.st && *c.st_type == typeid(S));  // 状態の値を持たない成分 (NFA、leq_digits など) か、型が違う
+  return (*static_cast<const std::deque<S>*>(c.st.get()))[(*this)[j]];
+ }
+ bool accepted() const { return T->C->acc[id]; }
+};
+// DP の遷移 1 回の前後の状態。
+struct Step {
+ StateRef from, to;
+};
+// 利用者に返す状態。表を持ち続けるので、DFA が消えても使える。
+struct State: StateRef {
+ TabPtr hold;
+};
+// count の f (値をそのまま返す)。run1 はこの型を見て、同じ先へ移る記号をまとめて本数を掛ける。
+struct CountF {
+ template <class T, class X> const T& operator()(const T& x, const X&, int) const { return x; }
+};
+template <class T> T sat_add(const T& a, const T& b) {
+ if constexpr(std::is_integral_v<T>) {
+  T r;
+  return __builtin_add_overflow(a, b, &r) ? std::numeric_limits<T>::max() : r;
+ } else return a + b;
+}
+// Berlekamp–Massey。a_i = Σ_{j=1}^{L} c_j a_{i-j} を満たす最短の (c_1, ..., c_L) を返す。T は体。
+template <class T> std::vector<T> berlekamp_massey(const std::vector<T>& a) {
+ std::vector<T> C{T(1)}, B{T(1)};
+ int L= 0, m= 1;
+ T b= T(1);
+ for(std::size_t i= 0; i < a.size(); ++i, ++m) {
+  T d= a[i];
+  for(int j= 1; j <= L; ++j) d+= C[j] * a[i - j];
+  if(d == T(0)) continue;
+  const std::vector<T> Tm= C;
+  const T coef= d / b;
+  if(C.size() < B.size() + m) C.resize(B.size() + m, T(0));
+  for(std::size_t j= 0; j < B.size(); ++j) C[j + m]-= coef * B[j];
+  if(2 * L <= int(i)) L= int(i) + 1 - L, B= Tm, b= d, m= 0;
+ }
+ C.resize(L + 1, T(0));
+ std::vector<T> r(L);
+ for(int j= 0; j < L; ++j) r[j]= -C[j + 1];
+ return r;
+}
+// 漸化式 c (berlekamp_massey の形) と最初の項 a から、a_n を x^n mod (特性多項式) で求める (掛け算は素朴に O(L^2))。
+template <class T> T linear_recurrence_nth(const std::vector<T>& a, const std::vector<T>& c, unsigned long long n) {
+ const int L= int(c.size());
+ if(n < a.size()) return a[n];
+ if(L == 0) return T(0);
+ // p, q は x^k mod P の係数 (次数 < L)。P(x) = x^L - Σ c_j x^{L-j}
+ auto mul= [&](const std::vector<T>& p, const std::vector<T>& q) {
+  std::vector<T> r(2 * L - 1, T(0));
+  for(int i= 0; i < L; ++i)
+   if(!(p[i] == T(0)))
+    for(int j= 0; j < L; ++j) r[i + j]+= p[i] * q[j];
+  for(int i= 2 * L - 2; i >= L; --i)
+   if(!(r[i] == T(0)))
+    for(int j= 1; j <= L; ++j) r[i - j]+= r[i] * c[j - 1];
+  r.resize(L);
+  return r;
+ };
+ std::vector<T> res(L, T(0)), base(L, T(0));
+ res[0]= T(1);
+ if(L == 1) base[0]= c[0];
+ else base[1]= T(1);
+ for(; n; n>>= 1, base= mul(base, base))
+  if(n & 1) res= mul(res, base);
+ T ans= T(0);
+ for(int i= 0; i < L; ++i) ans+= res[i] * a[i];
+ return ans;
+}
 struct Access;
 }
 template <class symbol_t> class DFA {
@@ -570,15 +711,19 @@ template <class symbol_t> class DFA {
  using CompPtr= dfa_internal::CompPtr;
  std::vector<symbol_t> alph;
  std::vector<CompPtr> comps;
+ mutable dfa_internal::TabPtr tabc;  // 積を 1 つの表にしたもの (状態を見る口で作る)
+ const dfa_internal::TabPtr& table() const {
+  if(!tabc) tabc= dfa_internal::tabulate(comps, int(alph.size()));
+  return tabc;
+ }
  DFA()= default;
  static std::vector<symbol_t> sorted(std::vector<symbol_t> a) { return std::sort(a.begin(), a.end()), a; }
  // 成分が 1 つのとき。状態の番号をそのまま来た組の置き場所を引く添字にする。
  // gcc は run1 を run に展開すると、積を表にした道 (aoj-0570) の DP が 2 割ほど遅くなるので、展開させない。
- template <bool ALL, class T, class A, class F> [[gnu::noinline]] std::vector<T> run1(const Comp& C, int n, const A& op, const T& e, const F& f, const T& init) const {
-  const int m= int(alph.size());
+ // 数え上げを、状態ごとの (移る先, 記号の本数) の組 (gofs、gto、gmul) で進める。run1 の速い道。
+ template <bool ALL, class T, class A> [[gnu::noinline]] std::vector<T> run1g(const Comp& C, int n, const A& op, const T& e, const T& init, const std::vector<int>& gofs, const std::vector<int>& gto, const std::vector<int>& gmul) const {
   std::vector<T> out, val{init}, nval;
   std::vector<int> slot(C.n), key{0}, nkey;
-  const int* tab= C.tab.data();
   for(int i= 0;; ++i) {
    if(ALL || i == n) {
     T r= e;
@@ -589,13 +734,75 @@ template <class symbol_t> class DFA {
    if(i == n) break;
    nkey.clear(), nval.clear();
    for(std::size_t s= 0; s < key.size(); ++s) {
+    const int u= key[s];
+    const T& v= val[s];
+    for(int j= gofs[u]; j < gofs[u + 1]; ++j) {
+     const int t= gto[j];
+     const T x= gmul[j] == 1 ? v : v * T(gmul[j]);
+     if(int& p= slot[t]; !p) p= int(nkey.size()) + 1, nkey.push_back(t), nval.push_back(x);
+     else nval[p - 1]= op(nval[p - 1], x);
+    }
+   }
+   for(int t: nkey) slot[t]= 0;
+   key.swap(nkey), val.swap(nval);
+   if(key.empty()) {
+    out.resize(ALL ? n + 1 : 1, e);
+    break;
+   }
+  }
+  return out;
+ }
+ // STEP なら f に遷移の前後の状態 (Step) も渡す (C は tp の表)。fk が null でなければ、長さ n で来た状態と値を fk と fv に入れる。
+ template <bool ALL, bool STEP, class T, class A, class F> [[gnu::noinline]] std::vector<T> run1(const Comp& C, int n, const A& op, const T& e, const F& f, const T& init, const dfa_internal::Tab* tp= nullptr, std::vector<int>* fk= nullptr, std::vector<T>* fv= nullptr) const {
+  const int m= int(alph.size());
+  std::vector<T> out, val{init}, nval;
+  std::vector<int> slot(C.n), key{0}, nkey;
+  const int* tab= C.tab.data();
+  // 数え上げで記号が多いときは、同じ先へ移る記号をまとめて、移る先と本数の組で進める (run1g)。始めに全部の状態をまとめてみて、
+  // 組の数が遷移の数の 65% 以下のときだけ使う。同じ先へ多くの記号が集まると、その先の値への足し込みが 1 本の待ちの鎖になる
+  // ので、まとめると速い (26 文字で 20 語の Aho–Corasick で 2 倍、3 語で 7 倍)。先が分かれている DFA では、まとめた表を引く
+  // 分で 2〜4 割遅く、数字の 10 個では本数を掛ける手間で遅くなった (gcc で yuki-1417 が 1.6 倍) ので、記号が 16 個以上に限る。
+  if constexpr(!STEP && std::is_same_v<F, dfa_internal::CountF> && requires(const T& a) { a * T(2); })
+   if(m >= 16 && !fk) {
+    std::vector<int> gpos(C.n, 0), gofs(C.n + 1, 0), gto, gmul;
+    std::size_t valid= 0;
+    for(int u= 0; u < C.n; ++u) {
+     const int* row= tab + std::size_t(u) * m;
+     for(int c= 0; c < m; ++c)
+      if(const int t= row[c]; t >= 0) {
+       ++valid;
+       if(int& p= gpos[t]; p) ++gmul[p - 1];
+       else p= int(gto.size()) + 1, gto.push_back(t), gmul.push_back(1);
+      }
+     for(std::size_t j= gofs[u]; j < gto.size(); ++j) gpos[gto[j]]= 0;
+     gofs[u + 1]= int(gto.size());
+    }
+    if(gto.size() * 100 <= valid * 65) return run1g<ALL>(C, n, op, e, init, gofs, gto, gmul);
+   }
+  for(int i= 0;; ++i) {
+   if(ALL || i == n) {
+    T r= e;
+    for(std::size_t s= 0; s < key.size(); ++s)
+     if(C.acc[key[s]]) r= op(r, val[s]);
+    out.push_back(r);
+   }
+   if(i == n) {
+    if(fk) *fk= key, *fv= val;
+    break;
+   }
+   nkey.clear(), nval.clear();
+   for(std::size_t s= 0; s < key.size(); ++s) {
     const int* row= tab + std::size_t(key[s]) * m;
     const T& v= val[s];
     for(int c= 0; c < m; ++c) {
      const int t= row[c];
      if(t < 0) continue;
-     if(int& p= slot[t]; !p) p= int(nkey.size()) + 1, nkey.push_back(t), nval.push_back(f(v, alph[c], i));
-     else nval[p - 1]= op(nval[p - 1], f(v, alph[c], i));
+     auto g= [&]() -> T {
+      if constexpr(STEP) return f(v, alph[c], i, Step{{tp, key[s]}, {tp, t}});
+      else return f(v, alph[c], i);
+     };
+     if(int& p= slot[t]; !p) p= int(nkey.size()) + 1, nkey.push_back(t), nval.push_back(g());
+     else nval[p - 1]= op(nval[p - 1], g());
     }
    }
    for(int t: nkey) slot[t]= 0;
@@ -798,17 +1005,27 @@ template <class symbol_t> class DFA {
  }
  template <bool ALL, class T, class A, class F> std::vector<T> run(int n, const A& op, const T& e, const F& f, const T& init) const {
   if(n < 0) return std::vector<T>(ALL ? 0 : 1, e);
-  std::vector<CompPtr> cs= comps;
-  if(cs.size() >= 2 && n >= 32)
-   if(CompPtr P= dfa_internal::product_table(cs, int(alph.size()), n)) cs= {std::move(P)};
-  std::vector<T> out;
-  for(int a, b;;) {
-   if(cs.size() == 1) return run1<ALL>(*cs[0], n, op, e, f, init);
-   if(runk<ALL>(cs, n, op, e, f, init, out, a, b)) return out;
-   cs[a]= dfa_internal::product(*cs[a], *cs[b], int(alph.size())), cs.erase(cs.begin() + b);
+  if constexpr(std::is_invocable_v<const F&, const T&, const symbol_t&, int, const Step&>) {  // f が状態を見る
+   const dfa_internal::Tab& T0= *table();
+   return run1<ALL, true>(*T0.C, n, op, e, f, init, &T0);
+  } else {
+   std::vector<CompPtr> cs= comps;
+   if(cs.size() >= 2 && n >= 32)
+    if(CompPtr P= dfa_internal::product_table(cs, int(alph.size()), n)) cs= {std::move(P)};
+   std::vector<T> out;
+   for(int a, b;;) {
+    if(cs.size() == 1) return run1<ALL, false>(*cs[0], n, op, e, f, init);
+    if(runk<ALL>(cs, n, op, e, f, init, out, a, b)) return out;
+    cs[a]= dfa_internal::product(*cs[a], *cs[b], int(alph.size())), cs.erase(cs.begin() + b);
+   }
   }
  }
 public:
+ // 遷移 1 回の前後の状態 (dp の f の 4 つ目の引数)。t.to[j] は & の左から j 番目の成分の状態の番号、t.to.get<S>(j) は
+ // その成分の利用者の状態の値 (S は構築に渡した状態の型)。
+ using Step= dfa_internal::Step;
+ // 状態 (count_states と dp_states の答え)。使い方は Step の from と to と同じで、accepted() は受理されるか。
+ using State= dfa_internal::State;
  // DFA。tr(状態, 記号) が次の状態を返す。
  template <class state_t, class F, class G>
   requires dfa_internal::dfa_transition<F, state_t, symbol_t>
@@ -854,7 +1071,7 @@ public:
   }
   for(const auto& C: comps) {
    auto D= std::make_shared<Comp>();
-   D->n= C->n, D->acc= C->acc, D->tab.resize(std::size_t(C->n) * m2);
+   D->n= C->n, D->acc= C->acc, D->st= C->st, D->st_type= C->st_type, D->tab.resize(std::size_t(C->n) * m2);
    for(int s= 0; s < C->n; ++s)
     for(int j= 0; j < m2; ++j) D->tab[std::size_t(s) * m2 + j]= to[j] < 0 ? -1 : C->tab[std::size_t(s) * m + to[j]];
    ret.comps.push_back(std::move(D));
@@ -867,9 +1084,176 @@ public:
  // dp の長さ 0 から n までの答え。
  template <class T, class A, class F> std::vector<T> dp_all(int n, const A& op, const T& e, const F& f, const T& init) const { return run<true>(n, op, e, f, init); }
  // 受理される長さ n の列の数。
- template <class T> T count(int n) const { return dp(n, std::plus<>(), T(), [](const T& x, const symbol_t&, int) -> const T& { return x; }, T(1)); }
+ template <class T> T count(int n) const { return dp(n, std::plus<>(), T(), dfa_internal::CountF(), T(1)); }
  // 受理される長さ 0 から n までの列の数。
- template <class T> std::vector<T> count_all(int n) const { return dp_all(n, std::plus<>(), T(), [](const T& x, const symbol_t&, int) -> const T& { return x; }, T(1)); }
+ template <class T> std::vector<T> count_all(int n) const { return dp_all(n, std::plus<>(), T(), dfa_internal::CountF(), T(1)); }
+ // 長さ n の列で来られる状態ごとの dp の値 (受理されない状態も含む)。積は来られる組だけの表にしてから進める。
+ template <class T, class A, class F> std::vector<std::pair<State, T>> dp_states(int n, const A& op, const T& e, const F& f, const T& init) const {
+  std::vector<std::pair<State, T>> ret;
+  if(n < 0) return ret;
+  const dfa_internal::TabPtr& T0= table();
+  std::vector<int> fk;
+  std::vector<T> fv;
+  if constexpr(std::is_invocable_v<const F&, const T&, const symbol_t&, int, const Step&>) run1<false, true>(*T0->C, n, op, e, f, init, T0.get(), &fk, &fv);
+  else run1<false, false>(*T0->C, n, op, e, f, init, T0.get(), &fk, &fv);
+  for(std::size_t i= 0; i < fk.size(); ++i) {
+   State st;
+   st.T= T0.get(), st.id= fk[i], st.hold= T0;
+   ret.emplace_back(std::move(st), std::move(fv[i]));
+  }
+  return ret;
+ }
+ // 長さ n の列で来られる状態ごとの、そこに来る列の数。
+ template <class T> std::vector<std::pair<State, T>> count_states(int n) const { return dp_states(n, std::plus<>(), T(), dfa_internal::CountF(), T(1)); }
+ // 受理される列を、記号を並べた順の辞書順で数える表 (ranker が返す)。状態と残りの長さごとの受理される列の数を後ろからの
+ // DP で前もって作る (大きさは (長さの上限 + 1) × 積の来られる組の数)。T が整数型なら、和は型の最大で止める。
+ template <class T> class Ranker {
+  friend class DFA;
+  dfa_internal::TabPtr T0;
+  std::vector<symbol_t> alph;
+  int L= 0;
+  std::vector<T> cnt;  // cnt[r * 状態の数 + s]: 状態 s から長さ r の列で受理に至る数
+  const T& at(int r, int s) const { return cnt[std::size_t(r) * T0->C->n + s]; }
+  const int* row(int s) const { return T0->C->tab.data() + std::size_t(s) * alph.size(); }
+ public:
+  // 受理される長さ len (≤ 作るときの長さ) の列の数。
+  T count(int len) const { return assert(0 <= len && len <= L), at(len, 0); }
+  // 受理される長さ |w| の列のうち、w より辞書順で小さいもの。w に記号でないものがあれば、それより小さい記号で比べる。
+  T count_less(const std::vector<symbol_t>& w) const {
+   const int n= int(w.size());
+   assert(n <= L);
+   T r= T(0);
+   for(int i= 0, s= 0; i < n; ++i) {
+    const int p= int(std::lower_bound(alph.begin(), alph.end(), w[i]) - alph.begin());
+    const int* rw= row(s);
+    for(int c= 0; c < p; ++c)
+     if(rw[c] >= 0) r= dfa_internal::sat_add(r, at(n - 1 - i, rw[c]));
+    if(p == int(alph.size()) || !(alph[p] == w[i]) || rw[p] < 0) return r;
+    s= rw[p];
+   }
+   return r;
+  }
+  // w が受理されるか。
+  bool accepts(const std::vector<symbol_t>& w) const {
+   int s= 0;
+   for(const symbol_t& x: w) {
+    const int p= int(std::lower_bound(alph.begin(), alph.end(), x) - alph.begin());
+    if(p == int(alph.size()) || !(alph[p] == x) || (s= row(s)[p]) < 0) return false;
+   }
+   return T0->C->acc[s];
+  }
+  // 受理される長さ |w| の列のうち、w 以下のもの。
+  T count_leq(const std::vector<symbol_t>& w) const { return dfa_internal::sat_add(count_less(w), T(accepts(w) ? 1 : 0)); }
+  // 受理される長さ len の列のうち、辞書順で k 番目 (0 始まり) のもの。k が count(len) 以上なら空を返す。
+  std::vector<symbol_t> kth(T k, int len) const {
+   assert(0 <= len && len <= L);
+   if(!(k < at(len, 0))) return {};
+   std::vector<symbol_t> w;
+   for(int i= 0, s= 0; i < len; ++i) {
+    const int* rw= row(s);
+    for(int c= 0;; ++c) {
+     if(rw[c] < 0) continue;
+     const T& x= at(len - 1 - i, rw[c]);
+     if(k < x) {
+      w.push_back(alph[c]), s= rw[c];
+      break;
+     }
+     k-= x;
+    }
+   }
+   return w;
+  }
+ };
+ // 長さ L 以下の列についての Ranker を作る。
+ template <class T> Ranker<T> ranker(int L) const {
+  Ranker<T> R;
+  R.T0= table(), R.alph= alph, R.L= L;
+  const dfa_internal::Comp& C= *R.T0->C;
+  const int S= C.n, m= int(alph.size());
+  R.cnt.assign(std::size_t(L + 1) * S, T(0));
+  for(int s= 0; s < S; ++s) R.cnt[s]= T(C.acc[s] ? 1 : 0);
+  for(int r= 1; r <= L; ++r) {
+   const T* prv= R.cnt.data() + std::size_t(r - 1) * S;
+   T* cur= R.cnt.data() + std::size_t(r) * S;
+   for(int s= 0; s < S; ++s) {
+    const int* rw= C.tab.data() + std::size_t(s) * m;
+    T x= T(0);
+    for(int c= 0; c < m; ++c)
+     if(rw[c] >= 0) x= dfa_internal::sat_add(x, prv[rw[c]]);
+    cur[s]= x;
+   }
+  }
+  return R;
+ }
+ // 受理される列が長さによらず有限個か (初期状態から来られて受理に至れる状態に閉路が無いか)。
+ bool is_finite() const { return finite_order(nullptr); }
+ // 受理される列の、長さによらない数。有限個でなければならない (is_finite)。部分列の自動機のような閉路の無い DFA で、長さごとに
+ // 進めずに状態 × 記号の手間で数える。
+ template <class T> T count_any() const {
+  std::vector<int> ord;
+  const bool fin= finite_order(&ord);
+  assert(fin);
+  if(!fin) return T(0);
+  const dfa_internal::Comp& C= *table()->C;
+  const int m= int(alph.size());
+  std::vector<T> w(C.n, T(0));
+  w[0]= T(1);
+  T r= T(0);
+  for(int s: ord) {
+   if(C.acc[s]) r= dfa_internal::sat_add(r, w[s]);
+   const int* rw= C.tab.data() + std::size_t(s) * m;
+   for(int c= 0; c < m; ++c)
+    if(rw[c] >= 0) w[rw[c]]= dfa_internal::sat_add(w[rw[c]], w[s]);
+  }
+  return r;
+ }
+ // 受理される長さ n の列の数を、n が大きくても求める。count_all で最初の 2 × (積の来られる組の数) 項を出し、Berlekamp–Massey で
+ // 漸化式にしてから n 項目を求める。T は体 (ZMod の素数の法など)。手間は組の数 S について、S^2 × 記号の数と S^2 log n。
+ template <class T> T count_large(unsigned long long n) const {
+  const int S= table()->C->n;
+  const int K= 2 * S + 2;
+  if(n <= (unsigned long long)K) return count<T>(int(n));
+  const std::vector<T> a= count_all<T>(K);
+  return dfa_internal::linear_recurrence_nth(a, dfa_internal::berlekamp_massey(a), n);
+ }
+private:
+ // 初期状態から来られて受理に至れる状態だけで閉路が無ければ、その位相順を ord に入れて true。
+ bool finite_order(std::vector<int>* ord) const {
+  const dfa_internal::Comp& C= *table()->C;
+  const int S= C.n, m= int(alph.size());
+  std::vector<std::vector<int>> rev(S);
+  for(int s= 0; s < S; ++s)
+   for(int c= 0; c < m; ++c)
+    if(const int t= C.tab[std::size_t(s) * m + c]; t >= 0) rev[t].push_back(s);
+  std::vector<char> co(S, 0);  // 受理に至れる
+  std::vector<int> st;
+  for(int s= 0; s < S; ++s)
+   if(C.acc[s]) co[s]= 1, st.push_back(s);
+  while(!st.empty()) {
+   const int t= st.back();
+   st.pop_back();
+   for(int s: rev[t])
+    if(!co[s]) co[s]= 1, st.push_back(s);
+  }
+  // 初期状態から受理に至れる状態だけをたどって来られる状態 q を集め、その中の辺で Kahn の方法の位相順を作る
+  std::vector<int> indeg(S, 0), q;
+  std::vector<char> reach(S, 0);
+  if(co[0]) q.push_back(0), reach[0]= 1;
+  for(std::size_t i= 0; i < q.size(); ++i)
+   for(int c= 0; c < m; ++c)
+    if(const int t= C.tab[std::size_t(q[i]) * m + c]; t >= 0 && co[t] && !reach[t]) reach[t]= 1, q.push_back(t);
+  for(int s: q)
+   for(int c= 0; c < m; ++c)
+    if(const int t= C.tab[std::size_t(s) * m + c]; t >= 0 && reach[t]) ++indeg[t];
+  std::vector<int> o;
+  if(!q.empty() && indeg[0] == 0) o.push_back(0);
+  for(std::size_t i= 0; i < o.size(); ++i)
+   for(int c= 0; c < m; ++c)
+    if(const int t= C.tab[std::size_t(o[i]) * m + c]; t >= 0 && reach[t] && --indeg[t] == 0) o.push_back(t);
+  if(o.size() != q.size()) return false;
+  if(ord) *ord= std::move(o);
+  return true;
+ }
 };
 namespace dfa_internal {
 struct Access {
