@@ -102,38 +102,51 @@ template <class M, bool UP> inline void monoid_zeta(std::vector<typename M::T>& 
  if(!monoid_fast<M, UP>(f)) monoid_rec<M, UP>(f.data(), f.size());
 }
 // ---- k 進 ----
-// 長さ N = k^n の列を、桁ごとに 1 つずつ変換する。桁 d (P = k^d) では、桁 d の値が j の列 (P 個ずつ連続) を、j - 1 の列
-// (UP のとき) か j + 1 の列から受け取る。ゼータは j を受け手の順に、逆変換 (INV) は逆の順に回して、渡し手が元の値のうちに
+// 長さ N = k^n の列を、桁ごとに 1 つずつ変換する。桁の重み P (= k^d) の段では、桁 d の値が j の列 (P 個ずつ連続) を、j - 1 の
+// 列 (UP のとき) か j + 1 の列から受け取る。ゼータは j を受け手の順に、逆変換 (INV) は逆の順に回して、渡し手が元の値のうちに
 // 使う。E が 0 でなければ、P 個の列のうち 32 byte ずつを vf (sps_zeta の演算) で、残りを sf で行う。
+// 桁ごとに列の全体を読み書きすると、メモリの速さで決まって AVX2 の差が出なかった (procon-judge の self-sps-kary-zeta の
+// run 44090035723)。そこで bit の形と同じく、いちばん上の桁で k 個の塊に分けて再帰し、64 KB 以下の塊では下の桁を順に回す。
+// 桁ごとの変換は互いに可換なので、段の順は結果に効かない。
+template <bool UP, bool INV, int E, class T, class VF, class SF> [[gnu::always_inline]] inline void kary_digit(T* A, std::size_t N, std::size_t k, std::size_t P, VF vf, SF sf) {
+ const bool vec= E != 0 && P * E >= 32;
+ for(std::size_t base= 0; base < N; base+= P * k) {
+  auto step= [&](std::size_t jd, std::size_t js) __attribute__((always_inline)) {
+   T* d= A + base + jd * P;
+   const T* s= A + base + js * P;
+   std::size_t r= 0;
+   if constexpr(E != 0)
+    if(vec) r= sps_zeta::run_vec<E>(reinterpret_cast<char*>(d), reinterpret_cast<const char*>(s), P, vf);
+   for(; r < P; ++r) d[r]= sf(d[r], s[r]);
+  };
+  if constexpr(UP) {
+   if constexpr(!INV)
+    for(std::size_t j= 1; j < k; ++j) step(j, j - 1);
+   else
+    for(std::size_t j= k - 1; j >= 1; --j) step(j, j - 1);
+  } else {
+   if constexpr(!INV)
+    for(std::size_t j= k - 1; j-- > 0;) step(j, j + 1);
+   else
+    for(std::size_t j= 0; j + 1 < k; ++j) step(j, j + 1);
+  }
+ }
+}
+template <bool UP, bool INV, int E, class T, class VF, class SF> void kary_rec(T* A, std::size_t N, std::size_t k, VF vf, SF sf) {
+ if(N * sizeof(T) <= (std::size_t(1) << 16) || N <= k) {
+  for(std::size_t P= 1; P < N; P*= k) kary_digit<UP, INV, E>(A, N, k, P, vf, sf);
+  return;
+ }
+ const std::size_t Q= N / k;
+ for(std::size_t j= 0; j < k; ++j) kary_rec<UP, INV, E>(A + j * Q, Q, k, vf, sf);
+ kary_digit<UP, INV, E>(A, N, k, Q, vf, sf);
+}
 template <bool UP, bool INV, int E, class T, class VF, class SF> void kary(T* A, std::size_t N, std::size_t k, VF vf, SF sf) {
  assert(k >= 2);
  [[maybe_unused]] std::size_t m= N;
  while(m % k == 0) m/= k;
  assert(m == 1);
- for(std::size_t P= 1; P < N; P*= k) {
-  const bool vec= E != 0 && P * E >= 32;
-  for(std::size_t base= 0; base < N; base+= P * k) {
-   auto step= [&](std::size_t jd, std::size_t js) __attribute__((always_inline)) {
-    T* d= A + base + jd * P;
-    const T* s= A + base + js * P;
-    std::size_t r= 0;
-    if constexpr(E != 0)
-     if(vec) r= sps_zeta::run_vec<E>(reinterpret_cast<char*>(d), reinterpret_cast<const char*>(s), P, vf);
-    for(; r < P; ++r) d[r]= sf(d[r], s[r]);
-   };
-   if constexpr(UP) {
-    if constexpr(!INV)
-     for(std::size_t j= 1; j < k; ++j) step(j, j - 1);
-    else
-     for(std::size_t j= k - 1; j >= 1; --j) step(j, j - 1);
-   } else {
-    if constexpr(!INV)
-     for(std::size_t j= k - 1; j-- > 0;) step(j, j + 1);
-    else
-     for(std::size_t j= 0; j + 1 < k; ++j) step(j, j + 1);
-   }
-  }
- }
+ if(N > 1) kary_rec<UP, INV, E>(A, N, k, vf, sf);
 }
 template <bool UP, bool INV, class T> inline void ring_kary(std::vector<T>& f, std::size_t k) {
  auto sf= [](T a, const T& b) {
