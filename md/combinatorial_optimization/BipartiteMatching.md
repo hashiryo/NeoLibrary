@@ -36,4 +36,6 @@ int vertex_kind(int v);
 
 渡された辺の列は写しません。持つのは左右の隣接の CSR と、左の CSR の並びに置いた辺の番号で、辺 1 本あたり 12 byte です。辺の番号から両端を引く `min_edge_cover()` と `edge_kind(i)` は、初めて呼んだときに辺の列を組み直します (辺 1 本あたり 8 byte 増えます)。2 MB 以上の配列は、Linux では 2 MB の区画 (huge page) で渡すよう OS に頼みます。OS は普段 4 KB の区画でメモリを渡し、プログラムが区画を初めて使うときに、そのつど割り込んで用意します。辺が数百万本あると、その手間が無視できません。
 
-procon-judge の yosupo-bipartitematching ($L, R \le 10^5$、$M \le 2 \times 10^5$) で書き比べました。EPYC 7763 の x64-gcc で、最も遅いケースが 56 ms でした。同じ回に、今の Library の bipartite_matching は 356 ms でした。記録は algo-notes の notes/network-flow.md にあります。
+procon-judge の yosupo-bipartitematching ($L, R \le 10^5$、$M \le 2 \times 10^5$) で書き比べました。EPYC 9V74 の x64-gcc で、最も遅いケースが 44.6 ms でした。同じ回に、今の Library の bipartite_matching は 283 ms でした。
+
+辺の多い易しい入力では、今の Library より少し遅くなります。cf-1630-f (左右 10 万頂点、辺 155 万本、最小パス被覆) では 42 ms で、今の Library は 36 ms でした (同じ CPU)。今の Library は左の CSR だけを組んで、貪欲と増加路の BFS で解きます。こちらは push-relabel のために右の CSR も組み、Karp-Sipser で辺を一通りなめる分が残ります。記録は algo-notes の notes/network-flow.md にあります。
