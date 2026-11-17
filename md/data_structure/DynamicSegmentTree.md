@@ -36,6 +36,8 @@ template <class C> long long min_left(long long r, const C& check);
 
 どちらも節は配列に置いて子を添字で持ち、1 MB 以上の配列は 2 MB 境界に置いて huge page を頼みます (Linux のみ)。
 
+標準の構造体 `monoid::AffineSum<ZMod<P>>` (P は奇数) を渡すと、区間の 1 次関数と区間の和だけを扱う形へ中身を替えます。使うときは neo/algebra/ZMod.hpp と neo/data_structure/segtree/Affine.hpp も読みます。子の無い節は「区間の値がすべて等しい」ことを表してその値を持ち、作用は値をそのまま書き換えます。値は Montgomery で持ち、長さ $2^h$ の節の和は $2^h$ の表から引きます。
+
 方式は procon-judge の次の 2 問で比べて選びました。どちらも N は $10^9$ までで、クエリを 1 つずつ渡します。
 
 | 問題 | 操作 | Q |
@@ -43,4 +45,4 @@ template <class C> long long min_left(long long r, const C& check);
 | yosupo-point-set-range-composite-large-array | 1 点の更新と区間の 1 次関数の合成 | $5 \times 10^5$ まで |
 | yosupo-range-affine-range-sum-large-array | 区間の 1 次関数と区間の和 | $10^5$ まで |
 
-EPYC 7763 の x64-gcc で、この型を使う提出は 275.7 ms と 214.6 ms でした。今の Library の SegmentTree_Patricia と SegmentTree_Dynamic は同じ回で 342.2 ms と 434.3 ms です。写し元の提出は 208.6 ms と 161.9 ms で、x64-gcc では 3 割離れました (x64-clang では 264.5 ms と 271.1 ms、193.2 ms と 170.5 ms)。写し元は値を Montgomery で持ち、1 点の更新の問題では区間の 1 次関数を x に 1 回ずつ当て、区間の和の問題では区間の長さの表を持ちます。この型は ZMod の合成で畳むので、掛け算が多くなります。記録は algo-notes の notes/segment-tree-design.md にあります。
+EPYC 7763 の x64-gcc で、この型を使う提出は 275.7 ms と 214.6 ms でした。今の Library の SegmentTree_Patricia と SegmentTree_Dynamic は同じ回で 342.2 ms と 434.3 ms です。写し元の提出は 208.6 ms と 161.9 ms で、x64-gcc では 3 割離れました (x64-clang では 264.5 ms と 271.1 ms、193.2 ms と 170.5 ms)。写し元は値を Montgomery で持ち、1 点の更新の問題では区間の 1 次関数を x に 1 回ずつ当て、区間の和の問題では区間の長さの表を持ちます。汎用の形は ZMod の合成で畳むので、掛け算が多くなります。区間の和の問題の遅れを埋めるため、上の `monoid::AffineSum<ZMod<P>>` の形を足しました (手元の M2 では写し元と並びました)。記録は algo-notes の notes/segment-tree-design.md にあります。

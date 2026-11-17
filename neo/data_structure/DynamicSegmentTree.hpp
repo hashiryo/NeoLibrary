@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cassert>
 #include <cstdint>
@@ -336,4 +337,176 @@ template <class M> class DynamicSegmentTree: public std::conditional_t<segment_t
  using Base= std::conditional_t<segment_tree_internal::action<M>::value, dynamic_segment_tree_internal::Lazy<M>, dynamic_segment_tree_internal::Patricia<M>>;
 public:
  using Base::Base;
+};
+// 標準の構造体 monoid::AffineSum<ZMod<P>> (区間の 1 次関数と区間の和、P は奇数) を渡したときの中身。ZMod と構造体は前方宣言
+// だけにして、使うときに neo/algebra/ZMod.hpp と neo/data_structure/segtree/Affine.hpp を読んでいれば中身が替わる。
+// 汎用の形と同じく子の無い節を使うが、子の無い節は「区間の値がすべて等しい」ことを表し、その値を持つ (作用は値をそのまま
+// 書き換える)。値は Montgomery (2P 未満) で持ち、長さ 2^h の節の和は 2^h の表から引く。procon-judge の
+// yosupo-range-affine-range-sum-large-array の dyn_uniform に、口の残り (get、set、mul、max_right、min_left) を足したもの。
+template <unsigned MOD> class ZMod;
+namespace monoid {
+template <class Z> struct AffineSum;
+}
+namespace dynamic_segment_tree_internal {
+template <unsigned P> class AffineSumUniform {
+ using Z= ZMod<P>;
+ using E= std::array<Z, 2>;
+ using u32= unsigned;
+ using u64= unsigned long long;
+ static constexpr u32 NINV= [] {
+  u32 x= 1;
+  for(int i= 0; i < 5; ++i) x*= 2 - P * x;
+  return -x;
+ }();
+ static constexpr u32 R1= u32((u64(1) << 32) % P), R2= u32(u64(R1) * R1 % P), P2= 2 * P;
+ static u32 redc(u64 t) { return u32((t + u64(u32(t) * NINV) * P) >> 32); }
+ static u32 mm(u32 a, u32 b) { return redc(u64(a) * b); }
+ static u32 add(u32 a, u32 b) {
+  const u32 s= a + b;
+  return s >= P2 ? s - P2 : s;
+ }
+ // a b + c d を 1 回の還元で (結果は 3P 未満なので 2P を 1 回引く)。
+ static u32 mulsum(u32 a, u32 b, u32 c, u32 d) {
+  const u32 r= redc(u64(a) * b + u64(c) * d);
+  return r >= P2 ? r - P2 : r;
+ }
+ static u32 enc(u64 x) { return mm(u32(x % P), R2); }
+ static u32 enc(Z z) { return mm(z.val(), R2); }
+ static Z dec(u32 x) {
+  const u32 r= redc(x);
+  return Z::raw(r >= P ? r - P : r);
+ }
+ struct Node {
+  u32 sum;   // 区間の和
+  u32 x, y;  // 子があれば配っていない作用 v -> x v + y、無ければ x が区間の値
+  u32 ch0, ch1;
+ };
+ long long n= 0;
+ int H= 1;
+ Vec<Node> t;  // t[0] が根。子の添字 0 は「子が無い」
+ u32 pw[64];   // 2^h
+ void reserve(std::size_t k) {
+  if(t.capacity() < t.size() + k) t.reserve(2 * t.capacity() + k);
+ }
+ void all_apply(u32 v, int h, u32 b, u32 c) {
+  Node& y= t[v];
+  y.sum= mulsum(b, y.sum, c, pw[h]);
+  if(!y.ch0) y.x= mulsum(b, y.x, c, R1);
+  else y.x= mm(b, y.x), y.y= mulsum(b, y.y, c, R1);
+ }
+ // 下りる前に、値の等しい節は子を 2 つ作って分け、子のある節は作用を配る。
+ void open(u32 v, int h) {
+  if(!t[v].ch0) {
+   const u32 val= t[v].x, s= mm(val, pw[h - 1]), k= u32(t.size());
+   t.push_back({s, val, 0, 0, 0}), t.push_back({s, val, 0, 0, 0});
+   Node& y= t[v];
+   y.ch0= k, y.ch1= k + 1, y.x= R1, y.y= 0;
+  } else if(t[v].x != R1 || t[v].y != 0) {
+   const u32 b= t[v].x, c= t[v].y;
+   all_apply(t[v].ch0, h - 1, b, c), all_apply(t[v].ch1, h - 1, b, c);
+   t[v].x= R1, t[v].y= 0;
+  }
+ }
+ void pull(u32 v) { t[v].sum= add(t[t[v].ch0].sum, t[t[v].ch1].sum); }
+ void apply_rec(u32 v, u64 lo, int h, u64 l, u64 r, u32 b, u32 c) {
+  if(l <= lo && lo + (u64(1) << h) <= r) return all_apply(v, h, b, c);
+  open(v, h);
+  const u64 mid= lo + (u64(1) << (h - 1));
+  if(l < mid) apply_rec(t[v].ch0, lo, h - 1, l, r, b, c);
+  if(r > mid) apply_rec(t[v].ch1, mid, h - 1, l, r, b, c);
+  pull(v);
+ }
+ // 書き込みをせず、配っていない作用は戻りに当てる。
+ u32 sum_rec(u32 v, u64 lo, int h, u64 l, u64 r) const {
+  const Node& y= t[v];
+  const u64 hi= lo + (u64(1) << h);
+  if(l <= lo && hi <= r) return y.sum;
+  const u32 len= enc(std::min(r, hi) - std::max(l, lo));
+  if(!y.ch0) return mm(y.x, len);
+  const u64 mid= lo + (u64(1) << (h - 1));
+  u32 s= 0;
+  if(l < mid) s= sum_rec(y.ch0, lo, h - 1, l, r);
+  if(r > mid) s= add(s, sum_rec(y.ch1, mid, h - 1, l, r));
+  return mulsum(y.x, s, y.y, len);
+ }
+public:
+ AffineSumUniform(): AffineSumUniform(0) {}
+ explicit AffineSumUniform(long long n): n(n), H(std::max(1, int(std::bit_width(u64(std::max(n, 1LL) - 1))))) {
+  t.reserve(64), t.push_back({0, 0, 0, 0, 0});
+  for(int h= 0; h <= H; ++h) pw[h]= enc(u64(1) << h);
+ }
+ long long size() const { return n; }
+ Z get(long long i) const {
+  u32 path[64];
+  int d= 0;
+  u32 v= 0;
+  for(int h= H; h > 0 && t[v].ch0; --h) path[d++]= v, v= (u64(i) >> (h - 1) & 1) ? t[v].ch1 : t[v].ch0;
+  u32 x= t[v].x;
+  while(d--) x= mulsum(t[path[d]].x, x, t[path[d]].y, R1);
+  return dec(x);
+ }
+ Z operator[](long long i) const { return get(i); }
+ void set(long long i, Z z) {
+  reserve(2 * H + 2);
+  u32 path[64];
+  int d= 0;
+  u32 v= 0;
+  for(int h= H; h > 0; --h) open(v, h), path[d++]= v, v= (u64(i) >> (h - 1) & 1) ? t[v].ch1 : t[v].ch0;
+  t[v].x= t[v].sum= enc(z);
+  while(d) pull(path[--d]);
+ }
+ void mul(long long i, Z z) { set(i, get(i) + z); }
+ Z prod(long long l, long long r) const { return l < r ? dec(sum_rec(0, 0, H, l, r)) : Z(); }
+ Z all_prod() const { return dec(t[0].sum); }
+ void apply(long long l, long long r, E f) {
+  if(l >= r) return;
+  // 1 回で作る節は、両端の道で段ごとに 2 個ずつまで。先に場所を取っておけば、下りる途中で配列が動かない。
+  reserve(4 * H + 4);
+  apply_rec(0, 0, H, l, r, enc(f[0]), enc(f[1]));
+ }
+ // check(prod(l, r)) が真になる最大の r (ACL と同じ。check(0) は真、r について単調)。
+ template <class C> long long max_right(long long l, const C& check) {
+  assert(0 <= l && l <= n && check(Z()));
+  reserve(4 * H + 4);
+  Z acc= Z();
+  long long res= n;
+  auto rec= [&](auto&& self, u32 v, u64 lo, int h) -> bool {
+   const u64 len= u64(1) << h;
+   if(lo + len <= u64(l)) return true;
+   if(lo >= u64(l)) {
+    if(const Z s= acc + dec(t[v].sum); check(s)) return acc= s, true;
+    if(!h) return res= lo, false;
+   }
+   open(v, h);
+   return self(self, t[v].ch0, lo, h - 1) && self(self, t[v].ch1, lo + (len >> 1), h - 1);
+  };
+  if(l < n) rec(rec, 0, 0, H);
+  return std::min(res, n);
+ }
+ // check(prod(l, r)) が真になる最小の l。
+ template <class C> long long min_left(long long r, const C& check) {
+  assert(0 <= r && r <= n && check(Z()));
+  reserve(4 * H + 4);
+  Z acc= Z();
+  long long res= 0;
+  auto rec= [&](auto&& self, u32 v, u64 lo, int h) -> bool {
+   const u64 len= u64(1) << h;
+   if(lo >= u64(r)) return true;
+   if(lo + len <= u64(r)) {
+    if(const Z s= dec(t[v].sum) + acc; check(s)) return acc= s, true;
+    if(!h) return res= lo + 1, false;
+   }
+   open(v, h);
+   return self(self, t[v].ch1, lo + (len >> 1), h - 1) && self(self, t[v].ch0, lo, h - 1);
+  };
+  if(r > 0) rec(rec, 0, 0, H);
+  return res;
+ }
+};
+}  // namespace dynamic_segment_tree_internal
+template <unsigned P>
+ requires(P % 2 == 1)
+class DynamicSegmentTree<monoid::AffineSum<ZMod<P>>>: public dynamic_segment_tree_internal::AffineSumUniform<P> {
+public:
+ using dynamic_segment_tree_internal::AffineSumUniform<P>::AffineSumUniform;
 };
