@@ -17,7 +17,7 @@
 // 頂点ごとに次数と隣の番号の xor を持って、次数 1 の頂点を葉から剥がす (剥がすときの xor が親)。親の列からは、p_i < i (根が 0)
 // なら番号の大きい順をそのまま使い、そうでなければ子の CSR を組んで根から BFS する。
 // 位置ごとに、鎖の先頭の位置と先頭の親の位置 (根の鎖は -1) を 8 byte の組で持ち、lca と道の分け方は鎖を 1 本上がるたびに組を
-// 1 つ読む。procon-judge の yosupo-lca などで書き比べた形 (記録は algo-notes の notes/tree-queries.md)。
+// 1 つ読む。頂点ごとに位置と部分木の終わりを並べて持つ。procon-judge の yosupo-lca などで書き比べた形 (記録は algo-notes の notes/tree-queries.md)。
 namespace hld_internal {
 using u64= unsigned long long;
 // 1 MB 以上の確保は 2 MB 境界に寄せ、Linux では huge page を頼む。
@@ -40,36 +40,43 @@ template <class T> struct Alloc {
   else ::operator delete(p, std::align_val_t(std::size_t(1) << 21));
  }
  template <class U> bool operator==(const Alloc<U>&) const { return true; }
+ // resize で値を埋めない (すぐ上書きするので、0 で埋める分と初めて触る分を省く)。
+ template <class U> void construct(U* p) noexcept { ::new(static_cast<void*>(p)) U; }
+ template <class U, class... A> void construct(U* p, A&&... a) { ::new(static_cast<void*>(p)) U(std::forward<A>(a)...); }
 };
 template <class T> using Vec= std::vector<T, Alloc<T>>;
 inline u64 chain(int head, int up) { return u64(unsigned(head)) | u64(unsigned(up)) << 32; }
 inline int head_of(u64 c) { return int(unsigned(c)); }
 inline int up_of(u64 c) { return int(c >> 32); }
 }  // namespace hld_internal
+class LCA;
+template <class M> class PathProduct;
 class HeavyLightDecomposition {
+ friend class LCA;
+ template <class M> friend class PathProduct;
  using u64= hld_internal::u64;
  int n= 0;
  // 配列はすべて buf の中に置く。同じ添字で引く配列の先頭が 2 MB 境界でそろわないよう、配列の間を 2 KB と 64 byte 空ける。
  hld_internal::Vec<u64> buf;
- u64* ch_= nullptr;      // 位置 → 鎖の先頭の位置 (下位 32 bit) と先頭の親の位置 (上位 32 bit、根の鎖は -1)
- int* pos_= nullptr;     // 頂点 → 位置
- int* vert_= nullptr;    // 位置 → 頂点
- int* end_= nullptr;     // 位置 → 部分木の終わり (半開区間)
- int* par_= nullptr;     // 頂点 → 親 (根は -1)
- int* dep_= nullptr;     // 頂点 → 深さ
+ u64* ch_= nullptr;   // 位置 → 鎖の先頭の位置 (下位 32 bit) と先頭の親の位置 (上位 32 bit、根の鎖は -1)
+ int* pe_= nullptr;   // 頂点 v → pe_[2v] が位置、pe_[2v + 1] が部分木の終わり (半開区間)。部分木の問い合わせで 1 回だけ読む
+ int* vert_= nullptr;  // 位置 → 頂点
+ int* par_= nullptr;   // 頂点 → 親 (根は -1)
+ int* dep_= nullptr;   // 頂点 → 深さ
  static constexpr std::size_t GAP= (2048 + 64) / 8;  // u64 の個数
- static std::size_t words(int n) { return std::size_t(n) + 5 * ((std::size_t(n) + 1) / 2 + GAP) + GAP; }
+ static std::size_t words(int n) { return 2 * std::size_t(n) + 3 * ((std::size_t(n) + 1) / 2 + GAP) + 2 * GAP; }
  void bind() {
   if(buf.empty()) {
-   ch_= nullptr, pos_= vert_= end_= par_= dep_= nullptr;
+   ch_= nullptr, pe_= vert_= par_= dep_= nullptr;
    return;
   }
   u64* p= buf.data();
   ch_= p, p+= std::size_t(n) + GAP;
-  int** a[5]= {&pos_, &vert_, &end_, &par_, &dep_};
+  pe_= reinterpret_cast<int*>(p), p+= std::size_t(n) + GAP;
+  int** a[3]= {&vert_, &par_, &dep_};
   for(int** q: a) *q= reinterpret_cast<int*>(p), p+= (std::size_t(n) + 1) / 2 + GAP;
  }
- void alloc(int n_) { n= n_, buf.assign(words(n), 0), bind(); }
+ void alloc(int n_) { n= n_, buf.resize(words(n)), bind(); }
  // ord は子が親より前に来る順で、末尾の nr 個が根 (ord[n - 1] の根が位置 0)。par_ は書いてあるとする。
  // work は 3n + 1 個の int の作業領域。
  void layout(const int* ord, int nr, int* work) {
@@ -87,17 +94,17 @@ class HeavyLightDecomposition {
   for(int i= n; i-- > n - nr;) {
    const int v= ord[i], x= top;
    top+= sz[v];
-   ch_[x]= hld_internal::chain(x, -1), pos_[v]= x, vert_[x]= v, end_[x]= top, dep_[v]= 0;
+   ch_[x]= hld_internal::chain(x, -1), pe_[2 * v]= x, pe_[2 * v + 1]= top, vert_[x]= v, dep_[v]= 0;
    sz[v]= x + 1 + hb[2 * v];
   }
   for(int i= n - nr; i--;) {
-   const int v= ord[i], p= par_[v], pp= pos_[p], nx= sz[p], s= sz[v];
+   const int v= ord[i], p= par_[v], pp= pe_[2 * p], nx= sz[p], s= sz[v];
    const int h= -int(hb[2 * p + 1] == v);  // v は p の子なので、hb[2p + 1] は p の本当の重い子
    const int x= ((pp + 1) & h) | (nx & ~h);
    sz[p]= nx + (s & ~h);
    const u64 hm= 0 - u64(h & 1), cp= ch_[pp];
    ch_[x]= (cp & hm) | (hld_internal::chain(x, pp) & ~hm);
-   pos_[v]= x, vert_[x]= v, end_[x]= x + s, dep_[v]= dep_[p] + 1;
+   pe_[2 * v]= x, pe_[2 * v + 1]= x + s, vert_[x]= v, dep_[v]= dep_[p] + 1;
    sz[v]= x + 1 + hb[2 * v];
   }
  }
@@ -177,14 +184,14 @@ public:
   }
   layout(ord, nr, work);
  }
- int to_seq(int v) const { return pos_[v]; }
+ int to_seq(int v) const { return pe_[2 * v]; }
  int to_vertex(int i) const { return vert_[i]; }
  std::size_t size() const { return n; }
  int parent(int v) const { return par_[v]; }
  // v を含む鎖の先頭の頂点。
- int head(int v) const { return vert_[hld_internal::head_of(ch_[pos_[v]])]; }
+ int head(int v) const { return vert_[hld_internal::head_of(ch_[pe_[2 * v]])]; }
  int root(int v) const {
-  for(int x= pos_[v];;) {
+  for(int x= pe_[2 * v];;) {
    const u64 c= ch_[x];
    if(hld_internal::up_of(c) < 0) return vert_[hld_internal::head_of(c)];
    x= hld_internal::up_of(c);
@@ -193,22 +200,16 @@ public:
  bool connected(int u, int v) const { return root(u) == root(v); }
  // u が v の部分木にあるか。
  bool in_subtree(int u, int v) const {
-  const int x= pos_[u], y= pos_[v];
-  return y <= x && x < end_[y];
+  const int x= pe_[2 * u];
+  return pe_[2 * v] <= x && x < pe_[2 * v + 1];
  }
- int subtree_size(int v) const {
-  const int y= pos_[v];
-  return end_[y] - y;
- }
+ int subtree_size(int v) const { return pe_[2 * v + 1] - pe_[2 * v]; }
  // v の部分木の位置の半開区間 [l, r)。
- std::pair<int, int> subtree(int v) const {
-  const int y= pos_[v];
-  return {y, end_[y]};
- }
+ std::pair<int, int> subtree(int v) const { return {pe_[2 * v], pe_[2 * v + 1]}; }
  int depth(int v) const { return dep_[v]; }
  // 同じ木の 2 頂点の lca。鎖の先頭の位置が大きい方を上げる。
  int lca(int u, int v) const {
-  int x= pos_[u], y= pos_[v];
+  int x= pe_[2 * u], y= pe_[2 * v];
   u64 a= ch_[x], b= ch_[y];
   while(hld_internal::head_of(a) != hld_internal::head_of(b)) {
    if(hld_internal::head_of(a) > hld_internal::head_of(b)) x= hld_internal::up_of(a), a= ch_[x];
@@ -219,7 +220,7 @@ public:
  // v の k 個上の祖先 (0 <= k <= depth(v))。
  int la(int v, int k) const {
   assert(0 <= k && k <= dep_[v]);
-  for(int x= pos_[v];;) {
+  for(int x= pe_[2 * v];;) {
    const u64 c= ch_[x];
    const int h= hld_internal::head_of(c);
    if(x - h >= k) return vert_[x - k];
@@ -238,7 +239,7 @@ public:
  // u から v への道を位置の閉区間に分け、道の順に f(l, r) を呼ぶ。u から lca へ上る区間は l > r (位置 l から r へ向かう)、
  // lca から v へ下りる区間は l <= r。edge が真なら lca を除く (辺の値を子の頂点に置く使い方)。
  template <class F> void path(int u, int v, const F& f, bool edge= false) const {
-  int x= pos_[u], y= pos_[v];
+  int x= pe_[2 * u], y= pe_[2 * v];
   u64 a= ch_[x], b= ch_[y];
   int dl[64], dr[64], k= 0;  // v の側の区間は下から見つかるので、積んでおいて最後に逆順で呼ぶ
   while(hld_internal::head_of(a) != hld_internal::head_of(b)) {

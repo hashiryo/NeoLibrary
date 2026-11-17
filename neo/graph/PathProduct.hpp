@@ -75,14 +75,14 @@ template <class M> class PathProduct {
   return M::op(M::op(al, nd[u].v), ar);
  }
  template <class F> void build(const HeavyLightDecomposition& h, const F& init) {
-  n= int(h.size());
+  n= h.n;
   nd.assign(n + 1, Node{M::ti(), M::ti(), M::ti(), M::ti(), M::ti(), 0, 0, 0});
-  pr.assign(n + 1, 0), ch.resize(n), pos.resize(n);
+  pr.assign(n + 1, 0), ch.assign(h.ch_, h.ch_ + n), pos.resize(n);
   std::vector<int> sz(n), vp(n), nxt(n);
+  for(int v= 0; v < n; ++v) pos[v]= h.pe_[2 * v];
   for(int i= 0; i < n; ++i) {
-   const int v= h.to_vertex(i), hv= h.head(v), hp= h.to_seq(hv), up= h.parent(hv);
-   pos[v]= i, sz[i]= h.subtree_size(v);
-   ch[i]= hld_internal::chain(hp, up < 0 ? -1 : h.to_seq(up));
+   const int v= h.vert_[i];
+   sz[i]= h.pe_[2 * v + 1] - i;
   }
   // 軽い子を先に配る位置 vp (1 始まり) を、HLD の位置の小さい順 (親が子より前) に決める。HLD の位置では重い子は親のすぐ後ろ。
   for(int i= 0; i < n; ++i) {
@@ -97,7 +97,7 @@ template <class M> class PathProduct {
    const int x= i + 1, heavy= sz[i] > 1 ? sz[i + 1] : 0;
    const unsigned a= unsigned(vp[i]), b= unsigned(vp[i] + sz[i] - heavy);
    pr[x]= (unsigned char)(31 - __builtin_clz(a ^ b));
-   nd[x].v= init(h.to_vertex(i)), nd[x].l= nd[x].r= nd[x].p= 0;
+   nd[x].v= init(h.vert_[i]), nd[x].l= nd[x].r= nd[x].p= 0;
    if(hld_internal::head_of(ch[i]) != i) {
     int q= x - 1, l= 0;
     while(q && pr[q] < pr[x]) l= q, q= nd[q].p;
