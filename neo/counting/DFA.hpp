@@ -720,6 +720,34 @@ template <class symbol_t> class DFA {
  static std::vector<symbol_t> sorted(std::vector<symbol_t> a) { return std::sort(a.begin(), a.end()), a; }
  // 成分が 1 つのとき。状態の番号をそのまま来た組の置き場所を引く添字にする。
  // gcc は run1 を run に展開すると、積を表にした道 (aoj-0570) の DP が 2 割ほど遅くなるので、展開させない。
+ // 数え上げで記号が多いときは、同じ先へ移る記号をまとめて、移る先と本数の組で進める (run1g)。始めに全部の状態をまとめてみて、
+ // 組の数が遷移の数の 65% 以下のときだけ使う。同じ先へ多くの記号が集まると、その先の値への足し込みが 1 本の待ちの鎖になる
+ // ので、まとめると速い (26 文字で 20 語の Aho–Corasick で 2 倍、3 語で 7 倍)。先が分かれている DFA では、まとめた表を引く
+ // 分で 2〜4 割遅く、数字の 10 個では本数を掛ける手間で遅くなった (gcc で yuki-1417 が 1.6 倍) ので、記号が 16 個以上に限る。
+ // まとめた形で進めたら true。判定を run1 の外に置くのは、run1 の中に置くと gcc の aoj-0570 の DP が 5% ほど遅くなったため。
+ template <bool ALL, class T, class A, class F> bool try_group(const Comp& C, int n, const A& op, const T& e, const F&, const T& init, std::vector<T>& out) const {
+  if constexpr(std::is_same_v<F, dfa_internal::CountF> && requires(const T& a) { a * T(2); }) {
+   const int m= int(alph.size());
+   if(m < 16) return false;
+   const int* tab= C.tab.data();
+   std::vector<int> gpos(C.n, 0), gofs(C.n + 1, 0), gto, gmul;
+   std::size_t valid= 0;
+   for(int u= 0; u < C.n; ++u) {
+    const int* row= tab + std::size_t(u) * m;
+    for(int c= 0; c < m; ++c)
+     if(const int t= row[c]; t >= 0) {
+      ++valid;
+      if(int& p= gpos[t]; p) ++gmul[p - 1];
+      else p= int(gto.size()) + 1, gto.push_back(t), gmul.push_back(1);
+     }
+    for(std::size_t j= gofs[u]; j < gto.size(); ++j) gpos[gto[j]]= 0;
+    gofs[u + 1]= int(gto.size());
+   }
+   if(gto.size() * 100 > valid * 65) return false;
+   out= run1g<ALL>(C, n, op, e, init, gofs, gto, gmul);
+   return true;
+  } else return false;
+ }
  // 数え上げを、状態ごとの (移る先, 記号の本数) の組 (gofs、gto、gmul) で進める。run1 の速い道。
  template <bool ALL, class T, class A> [[gnu::noinline]] std::vector<T> run1g(const Comp& C, int n, const A& op, const T& e, const T& init, const std::vector<int>& gofs, const std::vector<int>& gto, const std::vector<int>& gmul) const {
   std::vector<T> out, val{init}, nval;
@@ -752,33 +780,48 @@ template <class symbol_t> class DFA {
   }
   return out;
  }
- // STEP なら f に遷移の前後の状態 (Step) も渡す (C は tp の表)。fk が null でなければ、長さ n で来た状態と値を fk と fv に入れる。
- template <bool ALL, bool STEP, class T, class A, class F> [[gnu::noinline]] std::vector<T> run1(const Comp& C, int n, const A& op, const T& e, const F& f, const T& init, const dfa_internal::Tab* tp= nullptr, std::vector<int>* fk= nullptr, std::vector<T>* fv= nullptr) const {
+ // 成分が 1 つのとき。状態の番号をそのまま来た組の置き場所を引く添字にする。
+ // gcc は run1 を run に展開すると、積を表にした道 (aoj-0570) の DP が 2 割ほど遅くなるので、展開させない。
+ template <bool ALL, class T, class A, class F> [[gnu::noinline]] std::vector<T> run1(const Comp& C, int n, const A& op, const T& e, const F& f, const T& init) const {
   const int m= int(alph.size());
   std::vector<T> out, val{init}, nval;
   std::vector<int> slot(C.n), key{0}, nkey;
   const int* tab= C.tab.data();
-  // 数え上げで記号が多いときは、同じ先へ移る記号をまとめて、移る先と本数の組で進める (run1g)。始めに全部の状態をまとめてみて、
-  // 組の数が遷移の数の 65% 以下のときだけ使う。同じ先へ多くの記号が集まると、その先の値への足し込みが 1 本の待ちの鎖になる
-  // ので、まとめると速い (26 文字で 20 語の Aho–Corasick で 2 倍、3 語で 7 倍)。先が分かれている DFA では、まとめた表を引く
-  // 分で 2〜4 割遅く、数字の 10 個では本数を掛ける手間で遅くなった (gcc で yuki-1417 が 1.6 倍) ので、記号が 16 個以上に限る。
-  if constexpr(!STEP && std::is_same_v<F, dfa_internal::CountF> && requires(const T& a) { a * T(2); })
-   if(m >= 16 && !fk) {
-    std::vector<int> gpos(C.n, 0), gofs(C.n + 1, 0), gto, gmul;
-    std::size_t valid= 0;
-    for(int u= 0; u < C.n; ++u) {
-     const int* row= tab + std::size_t(u) * m;
-     for(int c= 0; c < m; ++c)
-      if(const int t= row[c]; t >= 0) {
-       ++valid;
-       if(int& p= gpos[t]; p) ++gmul[p - 1];
-       else p= int(gto.size()) + 1, gto.push_back(t), gmul.push_back(1);
-      }
-     for(std::size_t j= gofs[u]; j < gto.size(); ++j) gpos[gto[j]]= 0;
-     gofs[u + 1]= int(gto.size());
-    }
-    if(gto.size() * 100 <= valid * 65) return run1g<ALL>(C, n, op, e, init, gofs, gto, gmul);
+  for(int i= 0;; ++i) {
+   if(ALL || i == n) {
+    T r= e;
+    for(std::size_t s= 0; s < key.size(); ++s)
+     if(C.acc[key[s]]) r= op(r, val[s]);
+    out.push_back(r);
    }
+   if(i == n) break;
+   nkey.clear(), nval.clear();
+   for(std::size_t s= 0; s < key.size(); ++s) {
+    const int* row= tab + std::size_t(key[s]) * m;
+    const T& v= val[s];
+    for(int c= 0; c < m; ++c) {
+     const int t= row[c];
+     if(t < 0) continue;
+     if(int& p= slot[t]; !p) p= int(nkey.size()) + 1, nkey.push_back(t), nval.push_back(f(v, alph[c], i));
+     else nval[p - 1]= op(nval[p - 1], f(v, alph[c], i));
+    }
+   }
+   for(int t: nkey) slot[t]= 0;
+   key.swap(nkey), val.swap(nval);
+   if(key.empty()) {
+    out.resize(ALL ? n + 1 : 1, e);
+    break;
+   }
+  }
+  return out;
+ }
+ // run1 と run1s を分けるのは、run1 に状態を見る口の分を入れると、まとめない数え上げが clang で 2〜6% 遅くなったため。
+ // run1 に、状態を見る口のための 2 つを足したもの。STEP なら f に遷移の前後の状態 (Step) も渡す (C は tp の表)。fk が null でなければ、長さ n で来た状態と値を fk と fv に入れる。
+ template <bool ALL, bool STEP, class T, class A, class F> [[gnu::noinline]] std::vector<T> run1s(const Comp& C, int n, const A& op, const T& e, const F& f, const T& init, const dfa_internal::Tab* tp= nullptr, std::vector<int>* fk= nullptr, std::vector<T>* fv= nullptr) const {
+  const int m= int(alph.size());
+  std::vector<T> out, val{init}, nval;
+  std::vector<int> slot(C.n), key{0}, nkey;
+  const int* tab= C.tab.data();
   for(int i= 0;; ++i) {
    if(ALL || i == n) {
     T r= e;
@@ -1007,14 +1050,17 @@ template <class symbol_t> class DFA {
   if(n < 0) return std::vector<T>(ALL ? 0 : 1, e);
   if constexpr(std::is_invocable_v<const F&, const T&, const symbol_t&, int, const Step&>) {  // f が状態を見る
    const dfa_internal::Tab& T0= *table();
-   return run1<ALL, true>(*T0.C, n, op, e, f, init, &T0);
+   return run1s<ALL, true>(*T0.C, n, op, e, f, init, &T0);
   } else {
    std::vector<CompPtr> cs= comps;
    if(cs.size() >= 2 && n >= 32)
     if(CompPtr P= dfa_internal::product_table(cs, int(alph.size()), n)) cs= {std::move(P)};
    std::vector<T> out;
    for(int a, b;;) {
-    if(cs.size() == 1) return run1<ALL, false>(*cs[0], n, op, e, f, init);
+    if(cs.size() == 1) {
+     if(try_group<ALL>(*cs[0], n, op, e, f, init, out)) return out;
+     return run1<ALL>(*cs[0], n, op, e, f, init);
+    }
     if(runk<ALL>(cs, n, op, e, f, init, out, a, b)) return out;
     cs[a]= dfa_internal::product(*cs[a], *cs[b], int(alph.size())), cs.erase(cs.begin() + b);
    }
@@ -1094,8 +1140,8 @@ public:
   const dfa_internal::TabPtr& T0= table();
   std::vector<int> fk;
   std::vector<T> fv;
-  if constexpr(std::is_invocable_v<const F&, const T&, const symbol_t&, int, const Step&>) run1<false, true>(*T0->C, n, op, e, f, init, T0.get(), &fk, &fv);
-  else run1<false, false>(*T0->C, n, op, e, f, init, T0.get(), &fk, &fv);
+  if constexpr(std::is_invocable_v<const F&, const T&, const symbol_t&, int, const Step&>) run1s<false, true>(*T0->C, n, op, e, f, init, T0.get(), &fk, &fv);
+  else run1s<false, false>(*T0->C, n, op, e, f, init, T0.get(), &fk, &fv);
   for(std::size_t i= 0; i < fk.size(); ++i) {
    State st;
    st.T= T0.get(), st.id= fk[i], st.hold= T0;
