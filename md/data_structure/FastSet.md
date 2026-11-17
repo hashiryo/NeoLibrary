@@ -20,7 +20,7 @@ int xor_max(int x) const;  // y xor x が最大になる要素 y。空なら -1
 
 `contains`、`insert`、`erase` は $0 \le i < n$ で使います。`next` と `prev` には範囲の外の i も渡せます。どの操作も $O(\log_{64} n)$ で、構築は $O(n)$ です。ビットの列から作る形は、`bits` の n 以上の位置の bit を 0 にしておきます。
 
-`xor_min` と `xor_max` は、根から段ごとに、立っている子の番号 j のうち j と x の対応する 6 bit の xor が最小 (最大) の子へ下ります。値は返さず要素 y を返すので、xor の値が要るときは `xor_min(x) ^ x` とします。どちらも $O(\log_{64} n)$ で、ほかの操作とメモリには何も足しません。集合の要素との xor の最小を問う Library Checker の set_xor_min (値は $2^{30}$ 未満) では、葉の段だけで 128 MB になります。procon-judge の yosupo-set-xor-min ($Q = 5 \times 10^5$) では、EPYC 9V74 の x64-gcc で 48.0 ms でした。今の Library の SegmentTree_Patricia は同じ回で 209.1 ms です。64 分岐の下の段を値が入ったときだけ作る形の提出は 14.2 ms で、その差の多くは 128 MB の葉の段を読む分です。
+`xor_min` と `xor_max` は、根から段ごとに、立っている子の番号 j のうち j と x の対応する 6 bit の xor が最小 (最大) の子へ下ります。値は返さず要素 y を返すので、xor の値が要るときは `xor_min(x) ^ x` とします。どちらも $O(\log_{64} n)$ で、ほかの操作とメモリには何も足しません。集合の要素との xor の最小を問う Library Checker の set_xor_min (値は $2^{30}$ 未満) では、葉の段だけで 128 MB になります。procon-judge の yosupo-set-xor-min ($Q = 5 \times 10^5$) では、EPYC 9V74 の x64-gcc で 48.0 ms でした。今の Library の SegmentTree_Patricia は同じ回で 209.1 ms です。64 分岐の下の段を値が入ったときだけ作る形の提出は 14.2 ms で、その差の多くは 128 MB の葉の段を読む分です。この値は huge page を頼む前のもので、頼む写しは同じ回で 38.8 ms でした。
 
 ## 使い分け
 
@@ -41,4 +41,4 @@ int xor_max(int x) const;  // y xor x が最大になる要素 y。空なら -1
 
 64 分木の bitset です。段 h の i 番目の bit は、段 h - 1 の i 番目の語が 0 でないことを表し、段は 1 本の配列に根から順に並べます。前後の要素を探すときは、葉の語を読む前に 1 つ上の段の bit を見て、葉の語が 0 なら葉を読まずに上の段から探します。$n = 10^7$ で葉の段は 1.25 MB あって L2 に収まらないことが多い一方、1 つ上の段は 19.5 KB で L1 に載るので、疎な集合で葉を読みに行く分が省けます。入れるときと除くときは、上の段が変わらなくなったところで止めます。
 
-方式は procon-judge の yosupo-predecessor-problem で比べて選びました ($n = 10^7$、$Q = 10^6$)。同じ方式の fs_td は、EPYC 9V45 の x64-gcc で最大 11 ms ほどで、今の Library の SegmentTree の 19 分の 1、std::set の 180 分の 1 でした。最大は要素がほとんど無い集合で前後を問うケースです。段の並べ方 (段ごとに別の配列、葉とその上の段を組にする形、512 分木) と huge page は、どれも 0 % から 3 % ほどの差か、遅くなるかでした。記録は algo-notes の notes/associative-containers.md にあります。
+方式は procon-judge の yosupo-predecessor-problem で比べて選びました ($n = 10^7$、$Q = 10^6$)。同じ方式の fs_td は、EPYC 9V45 の x64-gcc で最大 11 ms ほどで、今の Library の SegmentTree の 19 分の 1、std::set の 180 分の 1 でした。最大は要素がほとんど無い集合で前後を問うケースです。段の並べ方 (段ごとに別の配列、葉とその上の段を組にする形、512 分木) は、どれも 0 % から 3 % ほどの差か、遅くなるかでした。huge page もこの大きさでは 0 % から 3 % でした。ただ、値の範囲が $2^{30}$ の set_xor_min (配列 128 MB) では 2 割速くなったので、1 MB 以上の配列は 2 MB 境界に置いて huge page を頼みます (Linux のみ)。記録は algo-notes の notes/associative-containers.md にあります。

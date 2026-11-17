@@ -1,17 +1,44 @@
 #pragma once
 #include <algorithm>
 #include <cstddef>
+#include <new>
 #include <vector>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 // 0 以上 n 未満の整数の集合。64 分木の bitset で、段 h の i 番目の bit は、段 h - 1 の i 番目の語が 0 でないことを表す。
 // 段は 1 本の配列に根から順に並べる。前後の要素を探すときは、葉の語を読む前に 1 つ上の段の bit を見て、葉の語が 0 なら
 // 葉を読まずに上の段から探す (n = 10^7 で葉の段は 1.25 MB あり、L2 に収まらないことが多いが、1 つ上の段は 19.5 KB で
 // L1 に載る)。入れるときと除くときは、上の段が変わらなくなったところで止める。procon-judge の yosupo-predecessor-problem
-// で書き比べた fs_td を写したもの。
+// で書き比べた fs_td を写したもの。1 MB 以上の配列は 2 MB 境界に置いて huge page を頼む (Linux のみ)。値の範囲が 2^30 の
+// yosupo-set-xor-min (配列 128 MB) で 2 割速くなり、n = 10^7 (1.25 MB) では 0〜3% の差だった。
+namespace fast_set_internal {
+template <class T> struct Alloc {
+ using value_type= T;
+ Alloc()= default;
+ template <class U> Alloc(const Alloc<U>&) {}
+ T* allocate(std::size_t n) {
+  const std::size_t want= n * sizeof(T);
+  if(want < (std::size_t(1) << 20)) return static_cast<T*>(::operator new(want, std::align_val_t(64)));
+  const std::size_t H= std::size_t(1) << 21, bytes= (want + H - 1) & ~(H - 1);
+  T* p= static_cast<T*>(::operator new(bytes, std::align_val_t(H)));
+#ifdef __linux__
+  madvise(p, bytes, MADV_HUGEPAGE);
+#endif
+  return p;
+ }
+ void deallocate(T* p, std::size_t n) {
+  if(n * sizeof(T) < (std::size_t(1) << 20)) ::operator delete(p, std::align_val_t(64));
+  else ::operator delete(p, std::align_val_t(std::size_t(1) << 21));
+ }
+ template <class U> bool operator==(const Alloc<U>&) const { return true; }
+};
+}  // namespace fast_set_internal
 class FastSet {
  using u64= unsigned long long;
  int n, lg, nw[8];
  int off[8];  // 段 h (0 が葉) の先頭
- std::vector<u64> a;
+ std::vector<u64, fast_set_internal::Alloc<u64>> a;
  void layout(int m) {
   n= m, lg= 0;
   for(;; m= (m + 63) / 64) {
