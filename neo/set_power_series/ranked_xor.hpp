@@ -47,6 +47,8 @@ inline u32 pw(u64 a, u64 e, u32 p) {
  return u32(r);
 }
 // 法の定数。p は奇数で 3 <= p < 2^30。
+// 展開しない関数は、受けた MK を入口で手元の変数に写してから使う。__m256i の書き込みは何とでも別名になりうるので、参照のまま
+// 使うと、gcc は書き込みのたびに定数をメモリから読み直す (変換の 1 段のループで 1 回に 2 回読んでいた)。
 struct MK {
  u32 P, R1, R2;
  V p, p2, p64, np64;
@@ -148,22 +150,27 @@ SPS_AI void extract(const u32* X, int c, int sb, int ns, V q[2], const MK& k) {
  q[0]= _mm256_permute2x128_si256(ul, uh, 0x20), q[1]= _mm256_permute2x128_si256(ul, uh, 0x31);
 }
 // 和 sum_{i} A_i B_{d-i} の u64 の和を、12 項までずつ還元して [0, 2p] で返す。Ae/Ao と Be/Bo は [0, p] の値の偶数と奇数のレーン。
-// 項は a = a0..a1 (含む) で、B の添字は bo - a。
-SPS_AI V dot(const u32* Ae, const u32* Ao, const u32* Be, const u32* Bo, int a0, int a1, int bo, V e0, V o0, const MK& k) {
- const V z= _mm256_setzero_si256();
- V r= z;
- bool first= true;
- for(int s= a0; s <= a1; s+= 12) {
-  const int t= std::min(a1, s + 11);
-  V e= first ? e0 : z, o= first ? o0 : z;
-  for(int a= s; a <= t; ++a) {
-   e= _mm256_add_epi64(e, mul64(ld(Ae + 8 * a), ld(Be + 8 * (bo - a))));
-   o= _mm256_add_epi64(o, mul64(ld(Ao + 8 * a), ld(Bo + 8 * (bo - a))));
-  }
-  r= first ? red2(redc2(e, o, k), k) : add2(r, red2(redc2(e, o, k), k), k);
-  first= false;
+// 項は a = a0..a1 (含む) で、B の添字は bo - a。e0 と o0 (p 未満) は初めの 12 項に足す。p < 2^30 なので、12 項 (p^2 以下) と
+// p 未満の和の REDC は 4p 未満に収まる。項は 24 個まで (NMAX + 1 以下)。
+// 内側のループは、読む場所を 2 本のポインタの増減だけで進める形にする (添字から場所を求め直すと、gcc 15 は 1 項に 4 命令多く出した)。
+SPS_AI void dot_acc(V& e, V& o, const u32* xa, const u32* xo, const u32* ya, const u32* yo, int c) {
+ for(int t= 0; t < c; ++t) {
+  e= _mm256_add_epi64(e, mul64(ld(xa + 8 * t), ld(ya - 8 * t)));
+  o= _mm256_add_epi64(o, mul64(ld(xo + 8 * t), ld(yo - 8 * t)));
  }
- if(first) r= red2(redc2(e0, o0, k), k);
+}
+SPS_AI V dot(const u32* Ae, const u32* Ao, const u32* Be, const u32* Bo, int a0, int a1, int bo, V e0, V o0, const MK& k) {
+ static_assert(NMAX + 1 <= 24);
+ const u32 *xa= Ae + 8 * a0, *xo= Ao + 8 * a0, *ya= Be + 8 * (bo - a0), *yo= Bo + 8 * (bo - a0);
+ const int len= a1 - a0 + 1;
+ V e= e0, o= o0;
+ dot_acc(e, o, xa, xo, ya, yo, len < 12 ? len : 12);
+ V r= red2(redc2(e, o, k), k);
+ if(len > 12) {
+  V e2= _mm256_setzero_si256(), o2= e2;
+  dot_acc(e2, o2, xa + 96, xo + 96, ya - 96, yo - 96, len - 12);
+  r= add2(r, red2(redc2(e2, o2, k), k), k);
+ }
  return r;
 }
 SPS_AI void split_lanes(const u32* X, int cnt, u32* E, u32* O, const MK& k, bool zext) {
@@ -175,7 +182,8 @@ SPS_AI void split_lanes(const u32* X, int cnt, u32* E, u32* O, const MK& k, bool
 }
 
 // 塊の列を変換する。in は 2^m 個 (m >= 4、rank は popcount + roff)、X は 2^{m-4} 個の塊 (幅 bs)。区画の中の段だけ行う。
-inline void fwd_chunks(u32* X, const u32* in, int m, int roff, int sb, int ns, std::size_t bs, const MK& k) {
+inline void fwd_chunks(u32* X, const u32* in, int m, int roff, int sb, int ns, std::size_t bs, const MK& k0) {
+ const MK k= k0;
  const int nb= m - 4, K= std::min(nb, KC);
  const std::size_t cnt= std::size_t(1) << nb, csz= std::size_t(1) << K;
  for(std::size_t q0= 0; q0 < cnt; q0+= csz) {
@@ -186,7 +194,8 @@ inline void fwd_chunks(u32* X, const u32* in, int m, int roff, int sb, int ns, s
  }
 }
 // 列 j の塊 (h << K) + j を c に写して、上の段 (区画をまたぐ段) を変換する。
-inline void fwd_column(u32* c, const u32* X, std::size_t j, int m, int roff, int sb, int ns, std::size_t bs, const MK& k) {
+inline void fwd_column(u32* c, const u32* X, std::size_t j, int m, int roff, int sb, int ns, std::size_t bs, const MK& k0) {
+ const MK k= k0;
  const int nb= m - 4, K= std::min(nb, KC), H= nb - K;
  const std::size_t hs= std::size_t(1) << H;
  for(std::size_t h= 0; h < hs; ++h) std::memcpy(c + h * bs, X + ((h << K) + j) * bs, std::size_t(ns) * 32);
@@ -194,7 +203,8 @@ inline void fwd_column(u32* c, const u32* X, std::size_t j, int m, int roff, int
   for(std::size_t h= 0; h < hs; ++h)
    if(!(h >> kk & 1)) fwd_pair(c + h * bs, c + (h | std::size_t(1) << kk) * bs, __builtin_popcountll(h >> (kk + 1)) + roff, kk + K, sb, ns, k);
 }
-inline void inv_column(u32* c, u32* X, std::size_t j, int m, int roff, int sb, int ns, std::size_t bs, const MK& k) {
+inline void inv_column(u32* c, u32* X, std::size_t j, int m, int roff, int sb, int ns, std::size_t bs, const MK& k0) {
+ const MK k= k0;
  const int nb= m - 4, K= std::min(nb, KC), H= nb - K;
  const std::size_t hs= std::size_t(1) << H;
  for(int kk= H; kk--;)
@@ -203,7 +213,8 @@ inline void inv_column(u32* c, u32* X, std::size_t j, int m, int roff, int sb, i
  for(std::size_t h= 0; h < hs; ++h) std::memcpy(X + ((h << K) + j) * bs, c + h * bs, std::size_t(ns) * 32);
 }
 // 逆変換の区画の中の段と、塊ごとの取り出し。f(q, 取り出した 2 本) を呼ぶ。
-template <class Out> inline void inv_chunks(u32* X, int m, int roff, int sb, int ns, std::size_t bs, const MK& k, const Out& out) {
+template <class Out> inline void inv_chunks(u32* X, int m, int roff, int sb, int ns, std::size_t bs, const MK& k0, const Out& out) {
+ const MK k= k0;
  const int nb= m - 4, K= std::min(nb, KC);
  const std::size_t cnt= std::size_t(1) << nb, csz= std::size_t(1) << K;
  for(std::size_t q0= 0; q0 < cnt; q0+= csz) {
@@ -222,7 +233,8 @@ inline std::size_t col_blocks(int m) {
  return std::size_t(1) << (nb - K);
 }
 // 値 x (2p 未満) を R 倍して [0, p) に (n 個、8 の倍数)。
-inline void scale_r(const u32* x, u32* y, std::size_t n, const MK& k) {
+inline void scale_r(const u32* x, u32* y, std::size_t n, const MK& k0) {
+ const MK k= k0;
  const V r2= cst(k.R2);
  for(std::size_t s= 0; s < n; s+= 8) _mm256_store_si256((V*)(y + s), norm1(mont(_mm256_loadu_si256((const V*)(x + s)), r2, k), k));
 }
@@ -235,7 +247,8 @@ template <int NM1> SPS_AI void conv_block(u32* a, const u32* b, const MK& k) {
  const V z= _mm256_setzero_si256();
  for(int s= 0; s < NM1; ++s) st(a + 8 * s, dot(Ae, Ao, Be, Bo, 0, s, s, z, z, k));
 }
-template <int N> void convolve_n(const u32* f, const u32* g, u32* out, const MK& k) {
+template <int N> void convolve_n(const u32* f, const u32* g, u32* out, const MK& k0) {
+ const MK k= k0;
  constexpr int NM1= N - 1, NB= N - 4, BS= NM1 * 8;
  const std::size_t nblk= std::size_t(1) << NB;
  u32 *A= huge_alloc(nblk * BS * 4), *B= huge_alloc(nblk * BS * 4);
@@ -294,7 +307,8 @@ inline void naive_exp(int m, const u32* b, u32* h, u32 P) {
    h[(1 << i) | s]= u32(t);
   }
 }
-template <int N> void exp_n(const u32* b, u32* out, const MK& k) {
+template <int N> void exp_n(const u32* b, u32* out, const MK& k0) {
+ const MK k= k0;
  constexpr int NS= N, BS= NS * 8, NB= N - 4;
  const std::size_t nblk= std::size_t(1) << NB;
  u32 *G= huge_alloc(nblk * BS * 4), *F= huge_alloc((nblk >> 1) * BS * 4), *bs= huge_alloc(std::size_t(4) << N);
@@ -372,7 +386,8 @@ inline void naive_log(int m, const u32* h, u32* f, u32 P) {
   }
 }
 // log (h[0] は 1)。
-template <int N> void log_n(const u32* h, u32* out, const MK& k) {
+template <int N> void log_n(const u32* h, u32* out, const MK& k0) {
+ const MK k= k0;
  constexpr int NSB= N - 1, BSB= NSB * 8, NSF= N, BSF= NSF * 8;
  u32 *B= huge_alloc((std::size_t(1) << (N - 5)) * BSB * 4), *F= huge_alloc((std::size_t(1) << (N - 5)) * BSF * 4), *hs= huge_alloc(std::size_t(4) << N);
  scale_r(h, hs, std::size_t(1) << N, k);
@@ -410,14 +425,15 @@ template <int N> void log_n(const u32* h, u32* out, const MK& k) {
  std::free(B), std::free(F), std::free(hs), std::free(cF);
 }
 // 割り算 f / g (g[0] は 1)。変換の領域の各点で割って 1 回だけ逆変換する。
-template <int N> void div_n(const u32* f, const u32* g, u32* out, const MK& k) {
+template <int N> void div_n(const u32* f, const u32* g, u32* out, const MK& k0) {
+ const MK k= k0;
  constexpr int NS= N + 1, BS= NS * 8, NB= N - 4;
  const std::size_t nblk= std::size_t(1) << NB;
  u32 *A= huge_alloc(nblk * BS * 4), *B= huge_alloc(nblk * BS * 4), *gs= huge_alloc(std::size_t(4) << N), *fs= huge_alloc(std::size_t(4) << N);
  scale_r(g, gs, std::size_t(1) << N, k), scale_r(f, fs, std::size_t(1) << N, k);
  // A は f の R 倍 (rank 0..N)、B は g の R 倍 (rank 1..N を場所 0..N-1)
  fwd_chunks(A, fs, N, 0, 0, NS, BS, k), fwd_chunks(B, gs, N, 0, 1, N, BS, k);
- auto body= [&](u32* a, u32* b) {
+ auto body= [&](u32* a, u32* b) __attribute__((always_inline)) {
   // Q' = A' / B' (B の rank 0 は R、R 倍のままの割り算は Q'_d = A'_d - REDC(sum B'_j Q'_{d-j}))
   alignas(32) u32 Be[(NMAX + 2) * 8], Bo[(NMAX + 2) * 8], Qe[(NMAX + 2) * 8], Qo[(NMAX + 2) * 8];
   split_lanes(b, N, Be + 8, Bo + 8, k, false);
@@ -467,7 +483,8 @@ SPS_AI void comp_step(u32* const* G, u32* const* Gh, const u32* F, int i, int J,
  }
 }
 // sum_k e_k g^k / k! (g[0] は 0、e は n + 1 個)。
-template <int N> void egf_comp_n(const u32* g, const u32* e, u32* out, const MK& k) {
+template <int N> void egf_comp_n(const u32* g, const u32* e, u32* out, const MK& k0) {
+ const MK k= k0;
  constexpr int NB= N - 4;
  u32* gs= huge_alloc(std::size_t(4) << N);
  scale_r(g, gs, std::size_t(1) << N, k);
@@ -496,7 +513,7 @@ template <int N> void egf_comp_n(const u32* g, const u32* e, u32* out, const MK&
   const std::size_t cnt= std::size_t(1) << (i - 4);
   fwd_chunks(F, gs + (std::size_t(1) << i), i, 0, 0, i + 1, BSF, k);
   u32 *gp[N - 3], *gh[N - 3];
-  auto step= [&](std::size_t q, const u32* Fb) {
+  auto step= [&](std::size_t q, const u32* Fb) __attribute__((always_inline)) {
    for(int j= 0; j <= J; ++j) gp[j]= G[j] + q * bsj[j];
    for(int j= 0; j < J; ++j) gh[j]= G[j] + (q + cnt) * bsj[j];
    comp_step(gp, gh, Fb, i, J, k);
@@ -574,7 +591,8 @@ inline std::vector<std::vector<u32>> egf_powers(int n, const u32* g, u32 P) {
  return c;
 }
 // V_k = sum_S w[S] (g^k / k!)[S] (k = 0..N、g[0] は 0)。
-template <int N> std::vector<u32> egf_proj_n(const u32* g, const u32* w, const MK& k) {
+template <int N> std::vector<u32> egf_proj_n(const u32* g, const u32* w, const MK& k0) {
+ const MK k= k0;
  constexpr int NB= N - 4, NS= N + 1;
  u32* gs= huge_alloc(std::size_t(4) << N);
  scale_r(g, gs, std::size_t(1) << N, k);
@@ -602,7 +620,7 @@ template <int N> std::vector<u32> egf_proj_n(const u32* g, const u32* w, const M
   const std::size_t cnt= std::size_t(1) << (i - 4);
   fwd_chunks(F, gs + (std::size_t(1) << i), i, 0, 0, i + 1, BSF, k);
   u32 *zl[N - 3], *zh[N - 3], *yy[N - 3];
-  auto step= [&](std::size_t q, const u32* Fb) {
+  auto step= [&](std::size_t q, const u32* Fb) __attribute__((always_inline)) {
    for(int j= 0; j <= J; ++j) zl[j]= D[j] + q * bsj[j], zh[j]= D[j] + (q + cnt) * bsj[j];
    for(int j= 0; j <= J + 1; ++j) yy[j]= D[j] + q * bsj[j];
    proj_step(zl, zh, yy, Fb, i, J + 1, k);
@@ -646,7 +664,8 @@ template <int LO, class Fn> inline bool dispatch(int n, Fn&& fn) {
 
 // ---- 合成と power projection の前後の処理 ----
 // e_k = P^{(k)}(c0) (k = 0..n)。P は M 個の係数 (2p 未満)。微分を n 回、それぞれを c0 で評価し、どちらも 8 個ずつ Montgomery で。
-inline std::vector<u32> taylor(const u32* f, int M, u32 c0, int n, const MK& k) {
+inline std::vector<u32> taylor(const u32* f, int M, u32 c0, int n, const MK& k0) {
+ const MK k= k0;
  std::vector<u32> e(n + 1, 0);
  if(M == 0) return e;
  const std::size_t L= (std::size_t(M) + 15) & ~std::size_t(15);
@@ -674,7 +693,8 @@ inline std::vector<u32> taylor(const u32* f, int M, u32 c0, int n, const MK& k) 
 }
 // ans_m = sum_{k=0}^{n} V_k u_k(m) (m = 0..M-1)、u_k(m) = (m)_k c0^{m-k} ((m)_k は下降階乗)。
 // u_k(m+1) = c0 u_k(m) + k u_{k-1}(m) で m を 1 つずつ進め、k を 8 個ずつレーンに並べる (割り算を使わないので c0 は何でもよい)。
-inline void proj_post(const std::vector<u32>& vk, u32 c0, int M, u32* ans, const MK& k) {
+inline void proj_post(const std::vector<u32>& vk, u32 c0, int M, u32* ans, const MK& k0) {
+ const MK k= k0;
  const int n= int(vk.size()) - 1;
  assert(n < 24);
  alignas(32) u32 vr[24], kr[24], u0[24];
