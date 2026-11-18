@@ -9,7 +9,8 @@
 // 二部グラフと分かっているなら、bipartite_coloring で塗り分けて BipartiteMatching に渡すほうが 2 倍ほど速い。
 //
 // 中身は次の順に解く。
-// 1. Karp-Sipser で初期のマッチングを作る (空いている隣が 1 つだけになった頂点を先に組ませる)。
+// 1. 初期のマッチングを作る。疎なグラフは Karp-Sipser (空いている隣が 1 つだけになった頂点を先に組ませる) で、隣の数の
+//    平均が 16 以上の密なグラフは、頂点の番号の順に最初の空いている隣と組ませる貪欲で作る (Karp-Sipser の隣を全部なめる分を省く)。
 // 2. 空いている頂点すべてを根にした交互森を、1 本の待ち行列で同時に育てる (花は Edmonds の方法で縮める)。違う木が
 //    つながれば増加路なので流し、その 2 本の木はその回の残りで使わない。これを 2 回まで回し、1 本も流せない回が来れば
 //    最大なので終わる。増加路の短いグラフはここで終わる。
@@ -42,6 +43,19 @@ inline std::vector<int> karp_sipser(int n, const std::vector<int>& off, const st
   if(cur == n) break;
   pick(cur);
  }
+ return mate;
+}
+// 頂点の番号の順に、空いている頂点を最初の空いている隣と組ませる貪欲。密なグラフは、これでほぼ最大になり、Karp-Sipser の
+// ように隣を全部なめずに済む。
+inline std::vector<int> greedy(int n, const std::vector<int>& off, const std::vector<int>& adj) {
+ std::vector<int> mate(n, -1);
+ for(int v= 0; v < n; ++v)
+  if(mate[v] < 0)
+   for(int k= off[v]; k < off[v + 1]; ++k)
+    if(const int u= adj[k]; mate[u] < 0) {
+     mate[v]= u, mate[u]= v;
+     break;
+    }
  return mate;
 }
 // mate から始めて、交互森を max_pass 回まで回す。最大になれば true、max_pass 回で終わらなければ false (mate はそこまで
@@ -224,7 +238,8 @@ private:
   adj.resize(off[n]);
   for(int i= es.size(); i--;)
    if(auto [u, v]= es[i]; u != v) adj[--off[u]]= v, adj[--off[v]]= u;
-  mt= gi::karp_sipser(n, off, adj);
+  // 初期のマッチングは、隣の数の平均が 16 以上の密なグラフなら貪欲、それより疎なら Karp-Sipser で作る。
+  mt= off[n] >= 16LL * n ? gi::greedy(n, off, adj) : gi::karp_sipser(n, off, adj);
   if(!gi::forest(n, off, adj, mt, 2)) {
    mt= gi::round_dcover(n, gi::dcover(n, off, adj, mt));
    gi::forest(n, off, adj, mt, 1 << 30);
