@@ -274,6 +274,12 @@ SPS_AI V dot(const u32* Ae, const u32* Ao, const u32* Be, const u32* Bo, int a0,
 // 隣り合う 2 つの出力の積和で、出力 0 には X_u Y'_{u+1}、出力 1 には X_u Y'_u を足す (u = 0..c-1)。
 // Y' は ya (出力 1 の u = 0 の値) から下へ進む列で、出力 0 の u 項の値は出力 1 の u+1 項の値と同じなので、レジスタで渡す。
 // 1 項の読み込みは X の 2 本と Y の 2 本の 4 回で、出力 2 つに足す。
+// Y' は ya から 8 c 個下まで読む。呼ぶ側はどれも ya - 8 c が配列の先頭以上になるように渡すが、gcc 15 は 12 項ずつに分けた枝
+// (dot2 の c > 11) で c と ya の関係を追えず、exp_step の F の配列に負の添字で触ると誤って -Warray-bounds を出すので、ここだけ止める。
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#endif
 SPS_AI void dot2_acc(V& e0, V& o0, V& e1, V& o1, const u32* xa, const u32* xo, const u32* ya, const u32* yo, int c) {
  V pe= ld(ya), po= ld(yo);
  for(int u= 0; u < c; ++u) {
@@ -285,6 +291,9 @@ SPS_AI void dot2_acc(V& e0, V& o0, V& e1, V& o1, const u32* xa, const u32* xo, c
   pe= ye, po= yq;
  }
 }
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 // 出力 0 = i0 + sum_u X_u Y'_{u+1}、出力 1 = i1 + sum_u X_u Y'_u (u = 0..c-1) に、掛けた 1 項 ex を片方 (EX1 なら出力 1) に足して
 // [0, 2p] で返す。i0 と i1 (p 未満) は初めの組に、ex は最後の組に入れる。どの組も 12 項と p 未満の値までなので、c は 23 まで。
 template <bool EX1> SPS_AI void dot2(const u32* xa, const u32* xo, const u32* ya, const u32* yo, int c, V i0e, V i0o, V i1e, V i1o, V exe, V exo, V& r0, V& r1, const MK& k) {
