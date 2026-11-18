@@ -14,7 +14,7 @@ template <class K> K sum_exp_poly_limit(const std::vector<K>& y, K r);
 
 - `interpolate_iota(y, x)` は、$y_i = f(i)$ ($0 \le i < n$) を満たす $n - 1$ 次以下の $f$ の $f(x)$ を $O(n)$ で返します。今の Library の `sample_points_shift` にあたります。
 - `interpolate(x, y)` は、点 $(x_i, y_i)$ を通る $n - 1$ 次以下の多項式の係数を $O(n^2)$ で返します。$x_i$ は相異なることが要ります。
-- `sum_exp_poly(y, r, n)` は、$y_i = f(i)$ ($0 \le i \le d$) を満たす $d$ 次以下の $f$ について $\sum_{i=0}^{n-1} r^i f(i)$ を $O(d)$ で返します。$0^0 = 1$ とします。
+- `sum_exp_poly(y, r, n)` は $\sum_{i=0}^{n-1} r^i f(i)$ を $O(d)$ で返します。$f$ は $y_i = f(i)$ ($0 \le i \le d$) を満たす $d$ 次以下の多項式で、$0^0 = 1$ とします。
 - `sum_exp_poly_limit(y, r)` は $\sum_{i=0}^{\infty} r^i f(i)$ ($r \ne 1$) です。和は分母が $(1 - r)^{d+1}$ の有理式として定めます。
 
 `K` は体で、`ZMod` なら法は素数であることが要ります。べき乗和 $\sum_{i<n} i^d$ は、`pow_table<K>(d, d)` (`neo/number_theory/pow_table.hpp`) を $r = 1$ で `sum_exp_poly` に渡せば求まります。
@@ -26,6 +26,8 @@ template <class K> K sum_exp_poly_limit(const std::vector<K>& y, K r);
 $$f(x) = \frac{P}{(n-1)!} \sum_k (-1)^{n-1-k} \binom{n-1}{k} \frac{y_k}{x - k}$$
 
 `ZMod` では、$1/k$ と $1/(x - k)$ を 8 本の鎖でまとめて求めます。$i \equiv b \pmod 8$ の数の累積積をレーン $b$ が受け持ち、AVX2 の Montgomery の積で前向きに置いてから、レーンごとの総積の逆元から後ろ向きに戻します。$1/(x - k)$ は後ろ向きの段でそのまま和にためて、配列に置きません。$\binom{n-1}{k}$ は比 $(n - k)/k$ の累積積で、8 個の区間の鎖に分けてから前の区間の積を掛けます。2 MB 以上の作業の配列は、Linux では 2 MB 境界の mmap に置いて huge page を頼みます。
+
+`interpolate` は $f = \sum_i w_i P(X)/(X - x_i)$ ($P = \prod_j (X - x_j)$、$w_i = y_i / P'(x_i)$) です。`ZMod` (法は 2 より大きい素数) では、$P/(X - x_i)$ の $k$ 次の係数が $\sum_{t>k} P_t x_i^{t-k-1}$ であることを使います。$s_m = \sum_i w_i x_i^m$ とすると、$f_k = \sum_m P_{k+1+m} s_m$ です。$P$ は Shoup の方法で 8 個ずつ作り、$P'(x_i)$ と $s_m$ は点を 8 個ずつレーンに載せた Montgomery の積 (4 組を並べて待ちを隠す) で求めます。$f$ は、逆に並べた $P$ と $s$ の畳み込みの下半分を `convolve_naive` の核で求めます。ほかの型は、点ごとに組立除法で $P/(X - x_i)$ を作って足します。
 
 `sum_exp_poly` は、$S(x) = \sum_{i<x} r^i f(i)$ が $c + r^x g(x)$ ($g$ は $d$ 次以下) と書けることを使います (min_25 の方法)。$g$ の $d + 1$ 階差分が 0 なので、$c$ は次の式で求まります。
 

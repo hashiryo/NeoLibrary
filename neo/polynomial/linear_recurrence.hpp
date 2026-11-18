@@ -12,7 +12,9 @@ namespace linrec_internal {
 using u32= unsigned;
 using u64= unsigned long long;
 // P と Q を半分の大きさの積で 1 段ずつ進め、k = 0 になったときの P(0) を返す (Q(0) で割る前)。
+template <class Z> u32 zmod_small(const u32* P0, int lp, const u32* Q0, int lq, u64 k);
 template <class Z> u32 zmod(std::vector<u32> P, std::vector<u32> Q, u64 k) {
+ if(Q.size() <= 16 && P.size() <= 15) return zmod_small<Z>(P.data(), int(P.size()), Q.data(), int(Q.size()), k);
  const u32 M= Z::mod();
  auto sub= [&](u32 x, u32 y) { return x >= y ? x - y : x + M - y; };
  static thread_local std::vector<u32> E, O, Pe, Po, T1, T2;
@@ -49,6 +51,36 @@ template <class Z> u32 zmod(std::vector<u32> P, std::vector<u32> Q, u64 k) {
  }
  return P.empty() ? 0 : P[0];
 }
+// Q の長さが 16 以下で P の長さが 15 以下のとき。スタックの配列で、P(x) Q(-x) と Q(x) Q(-x) の要る偶奇の項だけを
+// 出力ごとに u64 にためる (16 項以下なので M^2 < 2^60 の積が溢れない)。次数の小さい問いをたくさん聞くとき、作業の配列と
+// 核を呼ぶ手間を省く。
+template <class Z> u32 zmod_small(const u32* P0, int lp, const u32* Q0, int lq, u64 k) {
+ const u32 M= Z::mod();
+ u32 P[32]= {}, Q[32]= {}, Qm[32]= {};
+ std::copy(P0, P0 + lp, P), std::copy(Q0, Q0 + lq, Q);
+ for(; k; k>>= 1) {
+  while(lp && P[lp - 1] == 0) --lp;
+  if(!lp) return 0;
+  for(int i= 0; i < lq; ++i) Qm[i]= (i & 1) && Q[i] ? M - Q[i] : Q[i];
+  u32 nP[32], nQ[32];
+  const int par= int(k & 1), np= (lp + lq - 1 - par + 1) / 2;
+  for(int j= 0; j < np; ++j) {
+   const int t= 2 * j + par;
+   u64 s= 0;
+   for(int i= std::max(0, t - lq + 1); i <= std::min(lp - 1, t); ++i) s+= u64(P[i]) * Qm[t - i];
+   nP[j]= Z(s).val();
+  }
+  for(int j= 0; j < lq; ++j) {
+   const int t= 2 * j;
+   u64 s= 0;
+   for(int i= std::max(0, t - lq + 1); i <= std::min(lq - 1, t); ++i) s+= u64(Q[i]) * Qm[t - i];
+   nQ[j]= Z(s).val();
+  }
+  lp= std::min(np, 31);
+  std::copy(nP, nP + lp, P), std::copy(nQ, nQ + lq, Q);
+ }
+ return lp ? P[0] : 0;
+}
 template <class T> std::vector<T> mul(const std::vector<T>& a, const std::vector<T>& b) {
  if(a.empty() || b.empty()) return {};
  std::vector<T> c(a.size() + b.size() - 1, T());
@@ -60,7 +92,7 @@ template <class T> T generic(std::vector<T> P, std::vector<T> Q, u64 k) {
  for(; k; k>>= 1) {
   if(P.empty()) return T();
   std::vector<T> Qm= Q;
-  for(std::size_t i= 1; i < Qm.size(); i+= 2) Qm[i]= -Qm[i];
+  for(std::size_t i= 1; i < Qm.size(); i+= 2) Qm[i]= T() - Qm[i];  // 単項の - を持たない型 (GF2p64 など) のため
   const std::vector<T> U= mul(P, Qm), V= mul(Q, Qm);
   P.clear(), Q.clear();
   for(std::size_t i= k & 1; i < U.size(); i+= 2) P.push_back(U[i]);
@@ -92,9 +124,24 @@ template <class T> T linear_recurrence(const std::vector<T>& c, const std::vecto
    if(k & 1) r*= b;
   return r;
  }
+ if constexpr(poly_internal::is_zmod_v<T>) {
+  if(d <= 15) {  // 配列をヒープに取らない: Q = 1 - Σ c_j x^j、P = (A Q) mod x^d
+   using linrec_internal::u32, linrec_internal::u64;
+   const u32 M= T::mod();
+   u32 Q[16], P[16];
+   Q[0]= T(1).val();
+   for(int j= 1; j <= d; ++j) Q[j]= c[j - 1].val() ? M - c[j - 1].val() : 0;
+   for(int i= 0; i < d; ++i) {
+    u64 s= 0;
+    for(int j= 0; j <= i; ++j) s+= u64(a[i - j].val()) * Q[j];
+    P[i]= T(s).val();
+   }
+   return T::raw(linrec_internal::zmod_small<T>(P, d, Q, d + 1, k));
+  }
+ }
  std::vector<T> Q(d + 1);
  Q[0]= T(1);
- for(int j= 1; j <= d; ++j) Q[j]= -c[j - 1];
+ for(int j= 1; j <= d; ++j) Q[j]= T() - c[j - 1];
  std::vector<T> A(a.begin(), a.begin() + d), P= convolve_naive(A, Q);
  P.resize(d);
  if constexpr(poly_internal::is_zmod_v<T>) return T::raw(linrec_internal::zmod<T>(poly_internal::to_u32(P), poly_internal::to_u32(Q), k));
