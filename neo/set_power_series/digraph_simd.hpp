@@ -15,7 +15,8 @@
 // 汎用の道は、S ごとに S の部分集合 T の F(T → S \ T) を、S の bit を 1 つずつ決めて両側の表の値を掛ける形で 2^{|S|} 個作る。
 // 法が奇数の ZMod (p < 2^30) で n >= 4 なら、添字の下の 3 bit を AVX2 のレーンに置く (procon-judge の luogu-P11714 の scc_simd)。
 // 組 (T の上の部分 T_h、U の上の部分 U_h) ごとに、T_h の側と U_h の側でレーンの向きに作った 8 本の列の内積を取り、組ごとの値
-// X(U_h) F(T_h → U_h) を掛ける。同じ塊の中の項 (U_h = ∅) は塊ごとにレーンの小さい順に引く。
+// F(T_h → U_h) を掛ける (X(U_h) は U_h の側の列に掛けておく)。同じ塊の中の項 (U_h = ∅) は塊ごとにレーンの小さい順に引く。
+// 重みが無いときは辺の因子がどれも 2 なので、組ごとの値を 2 の冪の肩 (辺の数) の足し算で求めて表から引く。
 namespace sps_digraph_internal {
 using u32= std::uint32_t;
 using u64= std::uint64_t;
@@ -97,8 +98,9 @@ struct MM {
  u32 to(u32 x) const { return mul(x % P, R2); }
  u32 from(u32 x) const { return mul(x, 1); }
 };
-// Q は Montgomery の表現 (p 未満)。返す h も Montgomery の表現。
-inline std::vector<u32> twisted_simd(int n, const std::vector<u32>& Q, bool WX, u32 h0, const sps_xor::MK& k0) {
+// Q は Montgomery の表現 (p 未満)。返す h も Montgomery の表現。cnt は、辺の因子がどれも 2 の冪 (重みが無い) のときの、頂点の組ごとの
+// 辺の数 (Q[a * n + b] = 2^{cnt[a * n + b]})。あれば、組ごとの値 F(T_h → U_h) を 2 の冪の肩の足し算で求める。
+inline std::vector<u32> twisted_simd(int n, const std::vector<u32>& Q, bool WX, u32 h0, const sps_xor::MK& k0, const std::vector<int>* cnt= nullptr) {
  const sps_xor::MK k= k0;
  const MM mm(k.P);
  const int H= n - 3;
@@ -167,17 +169,36 @@ inline std::vector<u32> twisted_simd(int n, const std::vector<u32>& Q, bool WX, 
    XS[S]= mm.mul(mm.mul(XH[sh], Xl[sl]), mm.mul(Bt[sh * 8 + sl], Ct[sl * NH + sh]));
   }
  }
- // Cd[U_h][d] (8 レーン): [d ⊆ S_l] F(S_l^d → U_h) X(U_h ↔ d)
+ // Cd[U_h][d] (8 レーン): [d ⊆ S_l] F(S_l^d → U_h) X(U_h ↔ d) X(U_h)。X(U_h) は組ごとの値から外してここで掛ける
  V* Cd= static_cast<V*>(std::aligned_alloc(32, NH * 8 * sizeof(V)));
  V* Gd= static_cast<V*>(std::aligned_alloc(32, NH * 8 * sizeof(V)));
  for(std::size_t uh= 0; uh < NH; ++uh)
   for(int d= 0; d < 8; ++d) {
    alignas(32) u32 lane[8];
-   const u32 x= WX ? mm.mul(Bt[uh * 8 + d], Ct[d * NH + uh]) : one;
+   const u32 x= WX ? mm.mul(mm.mul(Bt[uh * 8 + d], Ct[d * NH + uh]), XH[uh]) : one;
    for(int sl= 0; sl < 8; ++sl) lane[sl]= (d & ~sl) ? 0 : mm.mul(Ct[(sl ^ d) * NH + uh], x);
    Cd[uh * 8 + d]= _mm256_load_si256((const V*)lane);
   }
  std::vector<u32> h(N, 0), arr(NH), tmh(NH);
+ // 重みが無いとき: co[j][X] = sum_{b ∈ X} cnt(j+3 → b+3)、ci[j][X] = sum_{a ∈ X} cnt(a+3 → j+3)、ex[t] は arr[t] の 2 の冪の肩
+ const bool P2W= cnt != nullptr;
+ std::vector<int> co, ci, ex;
+ std::vector<u32> pw;
+ if(P2W) {
+  co.assign(std::size_t(H) * NH, 0), ci.assign(std::size_t(H) * NH, 0), ex.assign(NH, 0);
+  int m= 0;
+  for(int x: *cnt) m+= x;
+  pw.resize(m + 1);
+  pw[0]= one;
+  const u32 two= mm.to(2);
+  for(int i= 1; i <= m; ++i) pw[i]= mm.mul(pw[i - 1], two);
+  for(int j= 0; j < H; ++j)
+   for(std::size_t X= 1; X < NH; ++X) {
+    const int u= __builtin_ctzll(X);
+    co[j * NH + X]= co[j * NH + (X & (X - 1))] + (*cnt)[std::size_t(j + 3) * n + u + 3];
+    ci[j * NH + X]= ci[j * NH + (X & (X - 1))] + (*cnt)[std::size_t(u + 3) * n + j + 3];
+   }
+ }
  int bits[32];
  const V P2= k.p2, P1= k.p;
  for(std::size_t sh= 0; sh < NH; ++sh) {
@@ -189,20 +210,22 @@ inline std::vector<u32> twisted_simd(int n, const std::vector<u32>& Q, bool WX, 
    int kb= 0;
    for(std::size_t t= sh; t; t&= t - 1) bits[kb++]= __builtin_ctzll(t);
    arr[0]= one, tmh[0]= 0;
+   if(P2W) ex[0]= 0;
    u32 pre= 0;
    for(int i= 0; i < kb; ++i) {
     const int j= bits[i];
     const std::size_t half= std::size_t(1) << i;
     for(std::size_t t= 0; t < half; ++t) {
      const u32 Tt= tmh[t], Ut= pre ^ Tt;
-     arr[t | half]= mm.mul(arr[t], oh[j * NH + Ut]), tmh[t | half]= Tt | (1u << j);
-     arr[t]= mm.mul(arr[t], ih[j * NH + Tt]);
+     tmh[t | half]= Tt | (1u << j);
+     if(P2W) ex[t | half]= ex[t] + co[j * NH + Ut], ex[t]+= ci[j * NH + Tt];
+     else arr[t | half]= mm.mul(arr[t], oh[j * NH + Ut]), arr[t]= mm.mul(arr[t], ih[j * NH + Tt]);
     }
     pre|= 1u << j;
    }
    for(std::size_t t= 0; t + 1 < (std::size_t(1) << kb); ++t) {
     const std::size_t th= tmh[t], uh= sh ^ th;
-    const u32 A= WX ? mm.mul(XH[uh], arr[t]) : arr[t];
+    const u32 A= P2W ? pw[ex[t]] : arr[t];
     const V* gp= Gd + th * 8;
     const V* cp= Cd + uh * 8;
     V se= _mm256_setzero_si256(), so= se;
@@ -252,7 +275,15 @@ template <class T> std::vector<T> twisted(int n, const std::vector<std::pair<int
    const MM mm(T::mod());
    std::vector<u32> Qm(Q.size());
    for(std::size_t i= 0; i < Q.size(); ++i) Qm[i]= mm.to(Q[i].val());
-   const std::vector<u32> hm= twisted_simd(n, Qm, WX, mm.to(h0.val()), k);
+   std::vector<int> cnt;  // 重みが無いときの頂点の組ごとの辺の数
+   if(w.empty()) {
+    cnt.assign(std::size_t(n) * n, 0);
+    for(auto [a, b]: es) {
+     if(rev) std::swap(a, b);
+     ++cnt[std::size_t(a) * n + b];
+    }
+   }
+   const std::vector<u32> hm= twisted_simd(n, Qm, WX, mm.to(h0.val()), k, w.empty() ? &cnt : nullptr);
    std::vector<T> h(hm.size());
    for(std::size_t i= 0; i < hm.size(); ++i) h[i]= T::raw(mm.from(hm[i]));
    return h;
