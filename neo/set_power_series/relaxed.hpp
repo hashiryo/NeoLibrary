@@ -12,6 +12,10 @@
 //   持つ。下の半分を済ませると下の半分は下の半分のゼータ変換になるので、それを上の半分に足してから上の半分を済ませ、もう一度足すと全体の
 //   ゼータ変換になる。足し算はどれも連続した配列どうし。大きさ 8 以下の区画は素朴に求める。
 namespace sps_relaxed_internal {
+// hi[t] += lo[t] (t < w)。lo と hi は重ならないので、__restrict で知らせて幅の広いベクトル化をさせる
+template <class T> [[gnu::noinline]] void add_to(T* __restrict hi, const T* __restrict lo, std::size_t w) {
+ for(std::size_t t= 0; t < w; ++t) hi[t]+= lo[t];
+}
 template <class T, class P> void online_zeta_rec(T* Y, T* h, int lo, int b, const P& phi) {
  if(b <= 3) {
   const int w= 1 << b;
@@ -32,9 +36,9 @@ template <class T, class P> void online_zeta_rec(T* Y, T* h, int lo, int b, cons
  }
  const std::size_t hw= std::size_t(1) << (b - 1);
  online_zeta_rec(Y, h, lo, b - 1, phi);
- for(std::size_t t= 0; t < hw; ++t) Y[hw + t]+= Y[t];
+ add_to(Y + hw, Y, hw);
  online_zeta_rec(Y + hw, h, lo + int(hw), b - 1, phi);
- for(std::size_t t= 0; t < hw; ++t) Y[hw + t]+= Y[t];
+ add_to(Y + hw, Y, hw);
 }
 }  // namespace sps_relaxed_internal
 namespace sps {
