@@ -11,6 +11,8 @@
 // 1 点の加算は、段ごとに塊の後ろ側へマスクを取った値を AVX2 で足す。塊の 8 個は u64 でキャッシュの 1 行に収まる。
 // 値は u64 の桁あふれのまま足し、差を T に戻すので、T の範囲に収まる和は正しく出る。get は区間 [i, i + 1) の和で求める
 // (元の値の配列を別に持つと、1 点の加算のたびにその配列も読み書きして x64 で 1 割遅かった)。
+// 作るときは段 0 を init から直接書き、段 1 から上だけを塊の合計の短い列 (n / 8 個) から作る。表はどの項目も書くので 0 で埋めない
+// (値の列を写してから作っていたときは、procon-judge の yosupo-vertex-add-subtree-sum で作る分が 2 割ほど重かった)。
 // max_right と min_left は、段ごとに塊の 8 個の境目の接頭辞和を見て、条件が切り替わる子へ下りる。
 // それ以外の T (浮動小数点数など) は二分木の汎用の形になる。
 namespace monoid {
@@ -31,24 +33,47 @@ struct Mask {
  }
 };
 inline constexpr Mask mask{};
+// resize で値を埋めない確保 (表は作る段でどの項目も書く)。
+template <class T> struct AllocNoInit: segment_tree_internal::Alloc<T> {
+ template <class U> struct rebind {
+  using other= AllocNoInit<U>;
+ };
+ AllocNoInit()= default;
+ template <class U> AllocNoInit(const AllocNoInit<U>&) {}
+ template <class U> void construct(U* p) noexcept { ::new(static_cast<void*>(p)) U; }
+ template <class U, class... A> void construct(U* p, A&&... a) { ::new(static_cast<void*>(p)) U(std::forward<A>(a)...); }
+ template <class U> bool operator==(const AllocNoInit<U>&) const { return true; }
+};
 template <class V> class Wide {
  int n= 0, H= 0;
  std::size_t loff[24]= {};  // 段 h の表は mem の loff[h] から (写しても壊れないよう、ポインタでなくずれで持つ)
- segment_tree_internal::Vec<u64> mem;
+ std::vector<u64, AllocNoInit<u64>> mem;
  template <class F> void build(const F& init) {
   const std::size_t N= n;
   H= 1;
   while((N >> (H * LB)) != 0) ++H;
   std::size_t total= 0;
   for(int h= 0; h < H; ++h) loff[h]= total, total+= ((N >> ((h + 1) * LB)) + 1) << LB;
-  mem.assign(total, 0);
-  std::vector<V> a(n);
+  mem.resize(total);
   u64* lv[24];
   for(int h= 0; h < H; ++h) lv[h]= mem.data() + loff[h];
-  for(int i= 0; i < n; ++i) a[i]= init(i);
-  // 段 0 は塊の中の左からの和、段 h + 1 の子の値は段 h の塊の合計。下から順に作る。
-  std::vector<u64> cur(a.begin(), a.end()), nxt;
-  for(int h= 0; h < H; ++h) {
+  // 段 0 は塊の中の左からの和で、init から直接書く。段 h + 1 の子の値は段 h の塊の合計で、cur に残して下から順に作る。
+  const std::size_t m0= ((N >> LB) + 1) << LB, full= N & ~std::size_t(B - 1);
+  std::vector<u64> cur(m0 >> LB), nxt;
+  for(std::size_t f= 0; f < full; f+= B) {
+   u64 s= 0;
+   for(int j= 0; j < B; ++j) lv[0][f + j]= s, s+= u64(init(int(f + j)));
+   cur[f >> LB]= s;
+  }
+  for(std::size_t f= full; f < m0; f+= B) {
+   u64 s= 0;
+   for(int j= 0; j < B; ++j) {
+    lv[0][f + j]= s;
+    if(f + j < N) s+= u64(init(int(f + j)));
+   }
+   cur[f >> LB]= s;
+  }
+  for(int h= 1; h < H; ++h) {
    const std::size_t m= ((N >> ((h + 1) * LB)) + 1) << LB;
    nxt.assign(m >> LB, 0);
    for(std::size_t f= 0; f < m; ++f) {

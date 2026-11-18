@@ -31,9 +31,10 @@ template <class F> void path(int u, int v, const F& f, bool edge = false) const;
 `path(u, v, f, edge)` は、u から v への道を位置の閉区間に分け、道の順に `f(l, r)` を呼びます。u から lca へ上る区間は `l > r` で、位置 l から r へ向かいます。lca から v へ下りる区間は `l <= r` です。`edge` が真なら lca を除きます (辺の値を子の頂点に置く使い方)。今の Library の `path` は区間の vector を返していましたが、呼ぶたびの確保をなくすため、区間ごとに関数を呼ぶ形にしました。
 
 ```cpp
-// 道の和。SegmentTree<monoid::Sum<long long>> seg は位置の順に値を持つ
+// 道の和。区間和の木は位置の順に値を持つ (位置 i の頂点は to_vertex(i))
+SegmentTree<monoid::Sum<long long>> seg(n, [&](int i) { return a[hld.to_vertex(i)]; });
 long long s = 0;
-hld.path(u, v, [&](int l, int r) { s += l <= r ? seg.prod(l, r + 1) : seg.prod(r, l + 1); });
+hld.path(u, v, [&](int l, int r) { s += seg.prod(std::min(l, r), std::max(l, r) + 1); });
 ```
 
 可換でない積は、位置の順の木と逆順の木の 2 本を持ち、`l > r` の区間を逆順の木で取ります。1 点の代入と道の積だけなら [PathProduct](PathProduct.md) が使えます。lca を何度も引くなら、O(1) で答える [LCA](LCA.md) があります。
@@ -44,4 +45,12 @@ hld.path(u, v, [&](int l, int r) { s += l <= r ? seg.prod(l, r + 1) : seg.prod(r
 
 位置ごとに、鎖の先頭の位置と先頭の親の位置を 8 byte の組で持ちます。`lca` と `path` は、鎖を 1 本上がるたびにこの組を 1 つ読むだけです。配列は 1 つの領域にまとめ、1 MB 以上なら 2 MB 境界に置いて huge page を頼みます (Linux のみ)。
 
-procon-judge で、作り方と問い合わせの持ち方を書き比べました ($N, Q \le 5 \times 10^5$)。この形の提出は、Xeon 6975P-C の x64-gcc で yosupo-lca が 75.9 ms でした (今の Library の HeavyLightDecomposition は 186.2 ms)。yosupo-vertex-add-path-sum では、HLD の区間と 8 分木の接頭辞和の形が 91.4 ms でした (今の Library の HLD と BIT は 230.5 ms)。記録は algo-notes の notes/tree-queries.md にあります。
+procon-judge で、作り方と問い合わせの持ち方を書き比べました ($N, Q \le 5 \times 10^5$)。どの問題も木を作るところから測ります。Xeon 6975P-C の x64-gcc の最大は次のとおりです。
+
+| 問題 | この型 | 今の Library |
+| --- | --- | --- |
+| yosupo-lca (`lca`) | 84.3 ms | HeavyLightDecomposition 184.5 ms |
+| yosupo-vertex-add-path-sum (`path` と区間和の木) | 89.8 ms | HLD と BIT 220.5 ms |
+| yosupo-vertex-add-subtree-sum (`subtree` と区間和の木) | 31.7 ms | HLD と BIT 80.7 ms |
+
+記録は algo-notes の notes/tree-queries.md にあります。

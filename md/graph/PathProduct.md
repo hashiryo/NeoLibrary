@@ -37,4 +37,4 @@ HLD の鎖ごとに二分木を組みます。中国の競プロで全局平衡�
 
 節は、自分の値と、部分木の前向きの積と後ろ向きの積、左の部分木と自分の前向きの積と後ろ向きの積を持ちます。鎖の頂点から鎖の先頭までの積は、二分木の根へ上がりながら、位置がその頂点以下の祖先の積を集めて求めます。1 点の代入は、二分木の根まで上がりながら、節ごとに op を 4 回します。
 
-procon-judge の yosupo-vertex-set-path-composite ($N, Q \le 2 \times 10^5$) で比べました。比べたのは、1 次関数に合わせて書いた同じ作りの提出と、HLD とセグメント木 2 本の提出です。EPYC 7763 の x64-gcc で、軽い辺を多く通るケースでは 85.4 ms と 168.3 ms でした。一方、一直線の木で代入が半分を占めるケースでは 91.4 ms と 51.4 ms で、セグメント木の方が速くなります。記録は algo-notes の notes/tree-queries.md にあります。
+procon-judge の yosupo-vertex-set-path-composite ($N, Q \le 2 \times 10^5$) で比べました。相手は、HLD と `SegmentTree<monoid::Composite>` 2 本で書いた形です。Xeon 6975P-C の x64-gcc で、軽い辺を多く通るケースでは 106.4 ms と 153.7 ms でした (今の Library の HLD とセグメント木 2 本は 238.2 ms)。一方、一直線の木で代入が半分を占めるケースでは 104.2 ms と 54.6 ms で、セグメント木の方が速くなります。記録は algo-notes の notes/tree-queries.md にあります。
