@@ -1,10 +1,16 @@
 #pragma once
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <new>
 #include <type_traits>
 #include <utility>
 #include <vector>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 // 逐次最短路の最小費用流 (primal-dual)。ACL の mcf_graph と同じく、add_edge で辺を足し、flow(s, t, limit) か
 // slope(s, t, limit) で s から t へ流す。slope は、流す量 x ごとの費用の最小の折れ線 (下に凸) の折れ点を返す。ACL と違い、
 // 呼ぶたびに今の流れから続けて流し (s と t は呼ぶたびに変えてよい)、流したあとにも頂点と辺を足せて、費用が負の辺も張れる。
@@ -22,6 +28,48 @@
 // その頂点の弧を倍の大きさの区画にして配列の末尾へ移す)。辺を足しながら少しずつ流す使い方でも、呼ぶたびに組み直さない。
 // 方式は procon-judge の self-flow-mincostflow-slope で比べて選んだ。記録は algo-notes の notes/network-flow.md。
 // Flow と Cost は整数の型。(頂点の数) × (費用の絶対値の最大) が 2^62 に収まり、流した量と費用の和が Flow と Cost に収まること。
+// 2 MB 以上の配列 (辺、弧、頂点ごとの配列) は、Linux では 2 MB の区画 (huge page) に置き、先頭を配列ごとにずらす。
+namespace primal_dual_internal {
+// 2 MB 以上の確保を、Linux では 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼み、先頭を確保ごとに 2 KB + 64 byte の倍数だけ
+// ずらす allocator (k 回目は k mod 16 倍)。辺が数百万本あると、4 KB のページに初めて触るたびに OS がページを割り当てる手間と、
+// 配列を飛び飛びに読むたびのページの表の引き直しが大きい。同じ添字で引く配列 (頂点ごとの高さと余り、弧ごとの行き先と容量
+// など) がどれも 2 MB 境界から始まると、同じ添字の要素がキャッシュの同じ組を取り合って Xeon 6975P-C で遅くなるので、ずらす。
+// ずらした分は 2 MB 未満なので、返すときは 2 MB 境界へ切り下げて先頭に戻す。
+inline unsigned big_alloc_count= 0;
+template <class T> struct BigAlloc {
+ using value_type= T;
+ static constexpr std::size_t H= std::size_t(1) << 21, STEP= 2048 + 64;
+ BigAlloc()= default;
+ template <class U> BigAlloc(const BigAlloc<U>&) {}
+ T* allocate(std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   const std::size_t off= (big_alloc_count++ % 16) * STEP, len= (n * sizeof(T) + off + H - 1) & ~(H - 1);
+   void* m= mmap(nullptr, len + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if(m == MAP_FAILED) throw std::bad_alloc();
+   char *p= static_cast<char*>(m), *a= reinterpret_cast<char*>((reinterpret_cast<std::uintptr_t>(p) + H - 1) & ~(H - 1));
+   if(a != p) munmap(p, a - p);
+   munmap(a + len, p + H - a);
+   madvise(a, len, MADV_HUGEPAGE);
+   return reinterpret_cast<T*>(a + off);
+  }
+#endif
+  return static_cast<T*>(::operator new(n * sizeof(T)));
+ }
+ void deallocate(T* p, [[maybe_unused]] std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   char* a= reinterpret_cast<char*>(reinterpret_cast<std::uintptr_t>(p) & ~std::uintptr_t(H - 1));
+   munmap(a, (n * sizeof(T) + (reinterpret_cast<char*>(p) - a) + H - 1) & ~(H - 1));
+   return;
+  }
+#endif
+  ::operator delete(p);
+ }
+ template <class U> bool operator==(const BigAlloc<U>&) const { return true; }
+};
+template <class T> using BigVec= std::vector<T, BigAlloc<T>>;
+}  // namespace primal_dual_internal
 template <class Flow, class Cost> class PrimalDual {
  static_assert(std::is_integral_v<Flow> && std::is_integral_v<Cost>, "流量と費用は整数の型");
  using i64= long long;
@@ -85,14 +133,15 @@ private:
   i64 p, d;
  };
  int n_, bm_= 0, bn_= 0;  // 頂点の数と、CSR に入れた辺と頂点の数
- std::vector<E> es_;
- std::vector<Arc> g_;
- std::vector<int> bg_, en_, room_;  // 頂点ごとの弧の区画 [bg_, en_) と区画の大きさ
- std::vector<int> pos_, aid_;       // 辺ごとの順向きの弧の位置と、弧ごとの「辺の番号の 2 倍と向き」(辺を足すときに作る)
- std::vector<V> vs_;
- std::vector<char> vis_;                           // 今の Dijkstra で取り出したか
- std::vector<int> prv_, lv_, lr_, cur_;           // 最短路木の弧、段数、段数を付けた回、DFS の今の弧
- std::vector<int> touched_, visited_, path_, bq_;  // 距離を付けた頂点、取り出した頂点、DFS の道、BFS の待ち行列
+ template <class T> using Vec= primal_dual_internal::BigVec<T>;
+ Vec<E> es_;
+ Vec<Arc> g_;
+ Vec<int> bg_, en_, room_;  // 頂点ごとの弧の区画 [bg_, en_) と区画の大きさ
+ Vec<int> pos_, aid_;       // 辺ごとの順向きの弧の位置と、弧ごとの「辺の番号の 2 倍と向き」(辺を足すときに作る)
+ Vec<V> vs_;
+ Vec<char> vis_;                           // 今の Dijkstra で取り出したか
+ Vec<int> prv_, lv_, lr_, cur_;           // 最短路木の弧、段数、段数を付けた回、DFS の今の弧
+ Vec<int> touched_, visited_, path_, bq_;  // 距離を付けた頂点、取り出した頂点、DFS の道、BFS の待ち行列
  int round_id_= 0;
  std::vector<std::pair<u64, int>> bucket_[65];
  u64 last_= 0;

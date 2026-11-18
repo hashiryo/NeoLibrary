@@ -1,11 +1,17 @@
 #pragma once
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
+#include <new>
 #include <type_traits>
 #include <utility>
 #include <vector>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 // 最大流。ACL の mf_graph と同じく、add_edge で辺を足して番号を受け取り、flow(s, t) か flow(s, t, limit) で流し、
 // min_cut(s)、get_edge(i)、edges() で解を取り出す。ACL に無いものとして、逆向きの容量 (無向辺)、流れを保ったまま
 // 容量を変える change_cap、流れを道に分ける decompose がある。
@@ -27,7 +33,50 @@
 // 使っていない頂点ごとの配列を借りる。
 // 方式は procon-judge の loj-127、self-flow-maxflow、self-flow-maxflow-shapes、aoj-2803、aoj-2313、aoj-2835 で比べて
 // 選んだ。記録は algo-notes の notes/network-flow.md と notes/network-flow-api.md。
+// 2 MB 以上の配列 (弧、辺ごとの弧の位置と容量の形、頂点ごとの配列) は、Linux では 2 MB の区画 (huge page) に置き、先頭を
+// 配列ごとにずらす (max_flow_internal::BigAlloc)。高さごとの表は、書いた高さの分だけ常駐させたいので普通に確保する。
 // Cap は整数の型。辺ごとの cap + rev_cap と、s から t への流量の答えが Cap に収まること。
+namespace max_flow_internal {
+// 2 MB 以上の確保を、Linux では 2 MB 境界の mmap に置いて MADV_HUGEPAGE を頼み、先頭を確保ごとに 2 KB + 64 byte の倍数だけ
+// ずらす allocator (k 回目は k mod 16 倍)。辺が数百万本あると、4 KB のページに初めて触るたびに OS がページを割り当てる手間と、
+// 配列を飛び飛びに読むたびのページの表の引き直しが大きい。同じ添字で引く配列 (頂点ごとの高さと余り、弧ごとの行き先と容量
+// など) がどれも 2 MB 境界から始まると、同じ添字の要素がキャッシュの同じ組を取り合って Xeon 6975P-C で遅くなるので、ずらす。
+// ずらした分は 2 MB 未満なので、返すときは 2 MB 境界へ切り下げて先頭に戻す。
+inline unsigned big_alloc_count= 0;
+template <class T> struct BigAlloc {
+ using value_type= T;
+ static constexpr std::size_t H= std::size_t(1) << 21, STEP= 2048 + 64;
+ BigAlloc()= default;
+ template <class U> BigAlloc(const BigAlloc<U>&) {}
+ T* allocate(std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   const std::size_t off= (big_alloc_count++ % 16) * STEP, len= (n * sizeof(T) + off + H - 1) & ~(H - 1);
+   void* m= mmap(nullptr, len + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if(m == MAP_FAILED) throw std::bad_alloc();
+   char *p= static_cast<char*>(m), *a= reinterpret_cast<char*>((reinterpret_cast<std::uintptr_t>(p) + H - 1) & ~(H - 1));
+   if(a != p) munmap(p, a - p);
+   munmap(a + len, p + H - a);
+   madvise(a, len, MADV_HUGEPAGE);
+   return reinterpret_cast<T*>(a + off);
+  }
+#endif
+  return static_cast<T*>(::operator new(n * sizeof(T)));
+ }
+ void deallocate(T* p, [[maybe_unused]] std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   char* a= reinterpret_cast<char*>(reinterpret_cast<std::uintptr_t>(p) & ~std::uintptr_t(H - 1));
+   munmap(a, (n * sizeof(T) + (reinterpret_cast<char*>(p) - a) + H - 1) & ~(H - 1));
+   return;
+  }
+#endif
+  ::operator delete(p);
+ }
+ template <class U> bool operator==(const BigAlloc<U>&) const { return true; }
+};
+template <class T> using BigVec= std::vector<T, BigAlloc<T>>;
+}  // namespace max_flow_internal
 template <class Cap> class MaxFlow {
  static_assert(std::is_integral_v<Cap>, "容量は整数の型 (浮動小数点数は丸めの誤差での振る舞いをまだ確かめていない)");
 public:
@@ -185,16 +234,17 @@ private:
  // 組んだ辺 i について、pos_[i] は順向きの弧の位置 (自己ループなら -1 - loops_ の番号)。元の容量は、2 本の弧の残余容量の
  // 和 (cap + rev_cap のまま変わらない) から、kind_[i] が 0 (rev_cap = 0) なら和、1 (rev_cap = cap) なら和の半分として
  // 求める。2 (どちらでもない) の辺があるときだけ、全部の辺の元の容量を ecap_ に持つ。端点と流量も弧から求める。
- std::vector<int> st_, pos_;
- std::vector<unsigned char> kind_;
- std::vector<Cap> ecap_;
- std::vector<A> as_;
+ template <class T> using Vec= max_flow_internal::BigVec<T>;
+ Vec<int> st_, pos_;
+ Vec<unsigned char> kind_;
+ Vec<Cap> ecap_;
+ Vec<A> as_;
  // 高さごとの表 (ahead_、atail_、bhead_) は頂点の数だけ確保するが、0 で埋めず、使った高さ (hinit_ 未満) までだけ -1 で
  // 初期化する。書いていないページは常駐しないので、高さが低いままのグラフでは表の分のメモリがほとんど要らない。
- std::vector<int> h_, cur_, anext_, bnext_, bprev_;
+ Vec<int> h_, cur_, anext_, bnext_, bprev_;
  std::unique_ptr<int[]> ahead_, atail_, bhead_;
  int hinit_= 0;
- std::vector<Cap> ex_;
+ Vec<Cap> ex_;
  int amax_= -1, bmax_= -1;  // global relabel が決める、活性な頂点と頂点の高さの最大
  // 組んだ辺 i (自己ループでない) の元の容量。
  Cap cap_of(int i) const {
@@ -260,7 +310,7 @@ private:
    for(const auto& ch: pe_)
     for(const P& e: ch) push(e);
    pe_.swap(all), npe_= cnt;
-   std::vector<A>().swap(as_);
+   Vec<A>().swap(as_);
   }
   const int m= npe_;
   st_.assign(n + 1, 0), pos_.resize(m), kind_.resize(m), loops_.clear();
@@ -316,7 +366,7 @@ private:
   std::fill(h_.begin(), h_.end(), n);
   std::fill(ahead_.get(), ahead_.get() + hinit_, -1), std::fill(bhead_.get(), bhead_.get() + hinit_, -1);
   // 待ち行列は cur_ を借りる (最後に今の弧を先頭に書き直す)。
-  std::vector<int>& q= cur_;
+  Vec<int>& q= cur_;
   int amax= -1, bmax= -1, qh= 0, qt= 0, lay= 0;
   double e= 0, reach= 1e300, c= 0, e0= 0;  // e0: 取り出している層より下の余り
   h_[sink]= 0, q[qt++]= sink;
@@ -458,7 +508,7 @@ private:
   long long spent= 0;
   // 待ち行列 q、余りのある頂点の並び src、辿っている弧の列 stk は、ここでは使わない層の表と活性な頂点の表を借りる
   // (このあと global relabel で作り直す)。
-  std::vector<int>&q= bnext_, &src= anext_, &stk= bprev_;
+  Vec<int>&q= bnext_, &src= anext_, &stk= bprev_;
   for(;;) {
    if((spent+= n + st_[n]) > budget) return false;
    std::fill(h_.begin(), h_.end(), n);
@@ -553,7 +603,7 @@ private:
   long long work= 0;
   over_= false;
   // 段は h_、待ち行列は bnext_、辿っている弧の列は bprev_ を借りる (余りを戻す段は global relabel で作り直す)。
-  std::vector<int>&lv= h_, &q= bnext_, &stk= bprev_;
+  Vec<int>&lv= h_, &q= bnext_, &stk= bprev_;
   while(total < limit) {
    if(work > budget) {
     over_= true;

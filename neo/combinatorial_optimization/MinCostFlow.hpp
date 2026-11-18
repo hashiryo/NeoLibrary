@@ -25,10 +25,12 @@
 // cost scaling は費用を (頂点の数 + 1) 倍して整数で扱う。費用の絶対値の最大に (頂点の数 + 1) を掛けたものが 2^61 を超える
 // ときと、途中でポテンシャルが 2^61 を超えて動いたときは、ネットワーク単体法で解き直す。ネットワーク単体法は、費用の絶対値の
 // 和が 2^60 以下であること (整数の費用のとき)。どちらも、辺ごとの (上限 - 下限) の和と b の絶対値の和が long long に収まること。
+// cost scaling の 2 MB 以上の配列は、MaxFlow と同じく Linux では 2 MB の区画 (huge page) に置き、先頭を配列ごとにずらす。
 // 方式は procon-judge の yosupo-min-cost-b-flow、self-flow-mincostflow、self-flow-mincostflow-chain で比べて選んだ。記録は
 // algo-notes の notes/network-flow.md。
 namespace min_cost_flow_internal {
 using i64= long long;
+using max_flow_internal::BigVec;
 // 辺。C は中で使う費用の型 (整数の費用なら long long、浮動小数点数の費用なら long double)。
 template <class C> struct Arc {
  int s, t;
@@ -46,7 +48,7 @@ inline Result<i64> cost_scaling(int n, const std::vector<i64>& b, const std::vec
  constexpr i64 LIM= i64(1) << 61;
  const int m= es.size();
  Result<i64> res;
- std::vector<i64> ex(b);
+ BigVec<i64> ex(b.begin(), b.end());
  for(const Arc<i64>& e: es) ex[e.s]-= e.l, ex[e.t]+= e.l;
  {
   i64 sum= 0, need= 0;
@@ -70,14 +72,14 @@ inline Result<i64> cost_scaling(int n, const std::vector<i64>& b, const std::vec
   if(mx > LIM / S) return res.fallback= true, res;
  }
  // 弧 k の容量と、逆向きの弧 rev[k] の容量を cp[k] に並べて持つ。逆向きの弧の費用は -cost[k]。
- std::vector<int> st(n + 1), pos(m, -1);
+ BigVec<int> st(n + 1), pos(m, -1);
  for(const Arc<i64>& e: es)
   if(e.s != e.t) ++st[e.s + 1], ++st[e.t + 1];
  for(int v= 0; v < n; ++v) st[v + 1]+= st[v];
  const int A= st[n];
- std::vector<int> to(A), rev(A), from(A);
- std::vector<std::array<i64, 2>> cp(A);
- std::vector<i64> cost(A);
+ BigVec<int> to(A), rev(A), from(A);
+ BigVec<std::array<i64, 2>> cp(A);
+ BigVec<i64> cost(A);
  i64 eps= 1;
  {
   std::vector<int> p(st.begin(), st.end() - 1);
@@ -92,9 +94,10 @@ inline Result<i64> cost_scaling(int n, const std::vector<i64>& b, const std::vec
   }
  }
  // ポテンシャル p は 0 から下がるだけで、-LIM 以上に保つ (縮約費用の計算があふれないように)。
- std::vector<i64> p(n, 0);
- std::vector<int> cur(n), q(n), rank(n), bhead(n + 2), bnext, bnode;
- std::vector<char> inq(n), onpath(A);
+ BigVec<i64> p(n, 0);
+ BigVec<int> cur(n), q(n), rank(n), bhead(n + 2);
+ std::vector<int> bnext, bnode;
+ BigVec<char> inq(n), onpath(A);
  bool over= false;
  auto push_arc= [&](int k, i64 d) {
   cp[k][0]-= d, cp[k][1]+= d;
