@@ -47,14 +47,14 @@ template <class Z> struct Ar {
 }
 // iv[i] = 1/i mod M (1 ≤ i < n、iv[0] = 0、M は n より大きい奇素数)。前向きに累積積を置き、レーンごとの総積の逆元から
 // 後ろ向きに戻す (Montgomery の 2^{-32} は前向きと後ろ向きで打ち消し合う)。
-template <class Z> std::vector<u32> inverses(int n) {
- if(n <= 1) return std::vector<u32>(std::max(n, 0));
+template <class Z> poly_internal::hvec inverses(int n) {
+ if(n <= 1) return poly_internal::hvec(std::max(n, 0));
  const u32 M= Z::mod();
  u32 minv= M;
  for(int i= 0; i < 5; ++i) minv*= 2 - M * minv;
  const __m256i mv= _mm256_set1_epi32(M), mi= _mm256_set1_epi32(-minv), eight= _mm256_set1_epi32(8);
  const int steps= (n - 1 + 7) / 8;
- std::vector<u32> iv(8 * steps + 8);
+ poly_internal::hvec iv(8 * steps + 8);
  __m256i acc= _mm256_set1_epi32(1), idx= _mm256_setr_epi32(1, 2, 3, 4, 5, 6, 7, 8);
  for(int t= 0; t < steps; ++t) {
   acc= mont8(acc, idx, mv, mi);
@@ -189,15 +189,15 @@ template <class K> int min_deg(const std::vector<K>& f) {
  return -1;
 }
 // ZMod: h_i = init_i + Σ_k w_k h_{i - e_k} (0 ≤ i < n、h_0 = init_0)。
-template <class Z> void run_lin(std::vector<u32>& h, const std::vector<std::pair<int, Z>>& ts, const Ar<Z>& ar) {
- const int n= int(h.size()), t= int(ts.size());
+template <class Z> void run_lin(u32* h, int n, const std::vector<std::pair<int, Z>>& ts, const Ar<Z>& ar) {
+ const int t= int(ts.size());
  std::vector<int> e(t);
  std::vector<u32> w(t);
  for(int k= 0; k < t; ++k) e[k]= ts[k].first, w[k]= ts[k].second.val();
  for(int j= 1; j <= t; ++j) {
   const int lo= e[j - 1], hi= j == t ? n : e[j];
-  if(j <= TMAX) dispatch(j, std::make_integer_sequence<int, TMAX + 1>{}, [&](auto T) { seg_lin<T, Z>(h.data(), lo, hi, e.data(), w.data(), j, ar); });
-  else seg_lin<-1, Z>(h.data(), lo, hi, e.data(), w.data(), j, ar);
+  if(j <= TMAX) dispatch(j, std::make_integer_sequence<int, TMAX + 1>{}, [&](auto T) { seg_lin<T, Z>(h, lo, hi, e.data(), w.data(), j, ar); });
+  else seg_lin<-1, Z>(h, lo, hi, e.data(), w.data(), j, ar);
  }
 }
 // 値の型のまま: u^a v^{b-1} の先頭 N+1 項 (今の Library の pw_mul_pw と同じ漸化式)。p と q は u - 1、v - 1 の項。
@@ -245,11 +245,12 @@ template <class K> std::vector<K> div(const std::vector<K>& f, const std::vector
  for(auto& [j, v]: ts) v= -v * ig;
  if constexpr(poly_internal::is_zmod_v<K>) {
   const Ar<K> ar;
-  std::vector<u32> h(n);
-  const u32 x= ig.val();
-  for(int i= 0; i < std::min<int>(n, int(f.size())); ++i) h[i]= (f[i] * K::raw(x)).val();
-  if(!ts.empty()) run_lin<K>(h, ts, ar);
-  return poly_internal::from_u32<K>(h);
+  std::vector<K> res(n);  // 答えの置き場に直接書く (u32 の列として)
+  u32* h= poly_internal::raw(res);
+  const auto x= ig.fixed();
+  for(int i= 0; i < std::min<int>(n, int(f.size())); ++i) h[i]= (f[i] * x).val();
+  if(!ts.empty()) run_lin<K>(h, n, ts, ar);
+  return res;
  } else {
   std::vector<K> h(n, K());
   for(int i= 0; i < std::min<int>(n, int(f.size())); ++i) h[i]= f[i] * ig;
@@ -270,13 +271,14 @@ template <class K> std::vector<K> log(const std::vector<K>& f, int n) {
  auto ts= terms(f, 1, n);
  if constexpr(poly_internal::is_zmod_v<K>) {
   const Ar<K> ar;
-  std::vector<u32> h(n);
+  std::vector<K> res(n);
+  if(ts.empty()) return res;
+  u32* h= poly_internal::raw(res);
   for(auto& [j, v]: ts) h[j]= (v * K(j)).val(), v= -v;
-  if(ts.empty()) return std::vector<K>(n);
-  run_lin<K>(h, ts, ar);
+  run_lin<K>(h, n, ts, ar);
   const auto iv= inverses<K>(n);
   for(int i= 0; i < n; ++i) h[i]= ar.red(u64(h[i]) * iv[i]);
-  return poly_internal::from_u32<K>(h);
+  return res;
  } else {
   std::vector<K> h(n, K());
   for(auto& [j, v]: ts) h[j]= v * K(j);
@@ -299,9 +301,11 @@ template <class K> std::vector<K> exp(const std::vector<K>& f, int n) {
  for(auto& [j, v]: ts) v*= K(j);
  if constexpr(poly_internal::is_zmod_v<K>) {
   const Ar<K> ar;
-  std::vector<u32> g(n);
+  std::vector<K> res(n);
+  res[0]= K(1);
+  if(ts.empty()) return res;
+  u32* g= poly_internal::raw(res);
   g[0]= K(1).val();
-  if(ts.empty()) return poly_internal::from_u32<K>(g);
   const int t= int(ts.size());
   std::vector<int> e(t);
   std::vector<u32> b(t);
@@ -309,10 +313,10 @@ template <class K> std::vector<K> exp(const std::vector<K>& f, int n) {
   const auto iv= inverses<K>(n);
   for(int j= 1; j <= t; ++j) {
    const int lo= e[j - 1], hi= j == t ? n : e[j];
-   if(j <= TMAX) dispatch(j, std::make_integer_sequence<int, TMAX + 1>{}, [&](auto T) { seg_exp<T, K>(g.data(), iv.data(), lo, hi, e.data(), b.data(), j, ar); });
-   else seg_exp<-1, K>(g.data(), iv.data(), lo, hi, e.data(), b.data(), j, ar);
+   if(j <= TMAX) dispatch(j, std::make_integer_sequence<int, TMAX + 1>{}, [&](auto T) { seg_exp<T, K>(g, iv.data(), lo, hi, e.data(), b.data(), j, ar); });
+   else seg_exp<-1, K>(g, iv.data(), lo, hi, e.data(), b.data(), j, ar);
   }
-  return poly_internal::from_u32<K>(g);
+  return res;
  } else {
   std::vector<K> g(n, K());
   g[0]= K(1);
@@ -344,7 +348,7 @@ template <class K> std::vector<K> pow(const std::vector<K>& f, long long k, int 
  for(auto& [j, v]: ts) j-= e0, v*= ia;
  if constexpr(poly_internal::is_zmod_v<K>) {
   const Ar<K> ar;
-  std::vector<u32> v(L);
+  u32* v= poly_internal::raw(F) + o;  // 答えの置き場に直接書く
   v[0]= K(1).val();
   const int t= int(ts.size());
   if(t) {
@@ -355,11 +359,14 @@ template <class K> std::vector<K> pow(const std::vector<K>& f, long long k, int 
    const auto iv= inverses<K>(L);
    for(int j= 1; j <= t; ++j) {
     const int lo= d[j - 1], hi= j == t ? L : d[j];
-    if(j <= TMAX) dispatch(j, std::make_integer_sequence<int, TMAX + 1>{}, [&](auto T) { seg_pow<T, K>(v.data(), iv.data(), lo, hi, d.data(), c.data(), al.data(), j, ar); });
-    else seg_pow<-1, K>(v.data(), iv.data(), lo, hi, d.data(), c.data(), al.data(), j, ar);
+    if(j <= TMAX) dispatch(j, std::make_integer_sequence<int, TMAX + 1>{}, [&](auto T) { seg_pow<T, K>(v, iv.data(), lo, hi, d.data(), c.data(), al.data(), j, ar); });
+    else seg_pow<-1, K>(v, iv.data(), lo, hi, d.data(), c.data(), al.data(), j, ar);
    }
   }
-  for(int i= 0; i < L; ++i) F[o + i]= K::raw(v[i]) * am;
+  if(!(am == K(1))) {
+   const auto fa= am.fixed();
+   for(int i= o; i < n; ++i) F[i]*= fa;
+  }
  } else {
   pw_mul_pw<K>(F.data() + o, ts, {}, from_ll<K>(k), K(), L - 1);
   for(int i= o; i < n; ++i) F[i]*= am;
@@ -406,7 +413,7 @@ template <class K> std::vector<K> sqrt(const std::vector<K>& f, int n) {
  auto ts= terms(f, e0 + 1, e0 + L);
  for(auto& [j, v]: ts) j-= e0, v*= ia;
  const Ar<K> ar;
- std::vector<u32> v(L);
+ u32* v= poly_internal::raw(F) + o;  // 答えの置き場に直接書く
  v[0]= K(1).val();
  const int t= int(ts.size());
  if(t) {
@@ -417,12 +424,12 @@ template <class K> std::vector<K> sqrt(const std::vector<K>& f, int n) {
   const auto iv= inverses<K>(L);
   for(int j= 1; j <= t; ++j) {
    const int lo= d[j - 1], hi= j == t ? L : d[j];
-   if(j <= TMAX) dispatch(j, std::make_integer_sequence<int, TMAX + 1>{}, [&](auto T) { seg_pow<T, K>(v.data(), iv.data(), lo, hi, d.data(), c.data(), al.data(), j, ar); });
-   else seg_pow<-1, K>(v.data(), iv.data(), lo, hi, d.data(), c.data(), al.data(), j, ar);
+   if(j <= TMAX) dispatch(j, std::make_integer_sequence<int, TMAX + 1>{}, [&](auto T) { seg_pow<T, K>(v, iv.data(), lo, hi, d.data(), c.data(), al.data(), j, ar); });
+   else seg_pow<-1, K>(v, iv.data(), lo, hi, d.data(), c.data(), al.data(), j, ar);
   }
  }
- const K sm= K(s);
- for(int i= 0; i < L; ++i) F[o + i]= K::raw(v[i]) * sm;
+ const auto fs= K(s).fixed();
+ for(int i= o; i < n; ++i) F[i]*= fs;
  return F;
 }
 // exp(f / g) の先頭 n 項 (g の最も低い次数を y として、f の最も低い次数は y より大きい)。今の Library の exp_of_div と同じ漸化式。

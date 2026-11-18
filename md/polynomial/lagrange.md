@@ -21,11 +21,11 @@ template <class K> K sum_exp_poly_limit(const std::vector<K>& y, K r);
 
 ## 中身
 
-`interpolate_iota` は、$P = \prod_j (x - j)$ として次の式で求めます。
+`interpolate_iota` は、ラグランジュの基底 $L_k(x) = \prod_{j \ne k} (x - j)/(k - j)$ で $f(x) = \sum_k y_k L_k(x)$ を求めます。隣どうしの比は次の形です。
 
-$$f(x) = \frac{P}{(n-1)!} \sum_k (-1)^{n-1-k} \binom{n-1}{k} \frac{y_k}{x - k}$$
+$$\frac{L_{k+1}(x)}{L_k(x)} = -\frac{(n-1-k)(x-k)}{(k+1)(x-k-1)}$$
 
-`ZMod` では、$1/k$ と $1/(x - k)$ を 8 本の鎖でまとめて求めます。$i \equiv b \pmod 8$ の数の累積積をレーン $b$ が受け持ち、AVX2 の Montgomery の積で前向きに置いてから、レーンごとの総積の逆元から後ろ向きに戻します。$1/(x - k)$ は後ろ向きの段でそのまま和にためて、配列に置きません。$\binom{n-1}{k}$ は比 $(n - k)/k$ の累積積で、8 個の区間の鎖に分けてから前の区間の積を掛けます。2 MB 以上の作業の配列は、Linux では 2 MB 境界の mmap に置いて huge page を頼みます。
+`ZMod` (法は奇数) では、分母 $(k+1)(x-k-1)$ の逆元を 8 本の鎖でまとめて求めます。$i \equiv b \pmod 8$ の値の累積積をレーン $b$ が受け持ち、AVX2 の Montgomery の積で前向きに置いてから、レーンごとの総積の逆元から後ろ向きに戻します。分母の値はレジスタの中で作り、配列に置きません。比の累積積は、列を 4 つの区間に分けて 4 本の鎖で作ります。ベクトルの中の累積積は 3 段の並べ替えと積で作り、前のベクトルからの繰り上げを掛けます。累積積は配列に置かず、その場で $y_k$ と掛けて和にためます。区間の和には最後に前の区間の総積を掛けます。$L_0(x)$ は、分母の総積 $Q = (n-1)! \prod_{j \ge 1} (x - j)$ から求めます。作業の配列は、Linux では 2 MB 境界の mmap に置いて huge page を頼みます。
 
 `interpolate` は $f = \sum_i w_i P(X)/(X - x_i)$ ($P = \prod_j (X - x_j)$、$w_i = y_i / P'(x_i)$) です。`ZMod` (法は 2 より大きい素数) では、$P/(X - x_i)$ の $k$ 次の係数が $\sum_{t>k} P_t x_i^{t-k-1}$ であることを使います。$s_m = \sum_i w_i x_i^m$ とすると、$f_k = \sum_m P_{k+1+m} s_m$ です。$P$ は Shoup の方法で 8 個ずつ作り、$P'(x_i)$ と $s_m$ は点を 8 個ずつレーンに載せた Montgomery の積 (4 組を並べて待ちを隠す) で求めます。$f$ は、逆に並べた $P$ と $s$ の畳み込みの下半分を `convolve_naive` の核で求めます。ほかの型は、点ごとに組立除法で $P/(X - x_i)$ を作って足します。
 
@@ -33,6 +33,6 @@ $$f(x) = \frac{P}{(n-1)!} \sum_k (-1)^{n-1-k} \binom{n-1}{k} \frac{y_k}{x - k}$$
 
 $$c = \frac{r^{d+1}}{(1 - r)^{d+1}} \sum_k \binom{d+1}{k} (-1)^{d+1-k} r^{-k} S(k)$$
 
-そのあと $g(k) = (S(k) - c) r^{-k}$ ($0 \le k \le d$) から $g(n)$ を補間します。
+そのあと $g(k) = (S(k) - c) r^{-k}$ ($0 \le k \le d$) から $g(n)$ を補間します。`ZMod` では、$S$ を 8 レーンの $r^i$ の鎖とベクトルの中の累積和で作ります。$c$ の重みは比 $-(d+2-j)/(jr)$ の累積積で、$g(n)$ の重みは $L_k(x) r^{-k}$ の比の累積積です。どちらも `interpolate_iota` と同じ 2 つの段で求めるので、$g$ は配列に作りません。
 
-procon-judge の yosupo-sum-of-exponential-times-polynomial と -limit ($d \le 10^7$) で書き比べた se1 を写し、作業の配列を減らしました。Xeon 6975P-C の x64-gcc (run 44231884007) で、se1 の最大は 409.99 ms と 262.99 ms でした。今の Library は 712.97 ms と 545.93 ms です。
+procon-judge の yosupo-sum-of-exponential-times-polynomial と -limit ($d \le 10^7$) で書き比べた se2 を、法を定数にしない形で写しました。Xeon 6975P-C と EPYC 7763 の x64-gcc (run 44247171412) で、se2 の最大は 170.90 ms と 117.01 ms でした。1 回目の se1 は 408.46 ms と 340.65 ms、今の Library は 716.12 ms と 663.67 ms です。

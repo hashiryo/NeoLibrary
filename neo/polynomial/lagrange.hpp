@@ -27,39 +27,7 @@
 namespace lagrange_internal {
 using u32= unsigned;
 using u64= unsigned long long;
-template <class T> struct HugeAlloc {
- using value_type= T;
- static constexpr std::size_t H= std::size_t(1) << 21, P= 4096;
- HugeAlloc()= default;
- template <class U> HugeAlloc(const HugeAlloc<U>&) {}
- T* allocate(std::size_t n) {
-#ifdef __linux__
-  if(n * sizeof(T) >= H) {
-   const std::size_t bytes= (n * sizeof(T) + P - 1) & ~(P - 1);
-   void* m= mmap(nullptr, bytes + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-   if(m == MAP_FAILED) throw std::bad_alloc();
-   char *p= static_cast<char*>(m), *a= reinterpret_cast<char*>((reinterpret_cast<std::uintptr_t>(p) + H - 1) & ~(H - 1));
-   if(a != p) munmap(p, a - p);
-   munmap(a + bytes, p + H - a);
-   madvise(a, bytes, MADV_HUGEPAGE);
-   return reinterpret_cast<T*>(a);
-  }
-#endif
-  return std::allocator<T>().allocate(n);
- }
- void deallocate(T* p, std::size_t n) {
-#ifdef __linux__
-  if(n * sizeof(T) >= H) {
-   munmap(p, (n * sizeof(T) + P - 1) & ~(P - 1));
-   return;
-  }
-#endif
-  std::allocator<T>().deallocate(p, n);
- }
- template <class U> bool operator==(const HugeAlloc<U>&) const { return true; }
- template <class U> bool operator!=(const HugeAlloc<U>&) const { return false; }
-};
-using hvec= std::vector<u32, HugeAlloc<u32>>;
+using poly_internal::hvec;
 // x y 2^{-32} mod M を 8 個ずつ (M は奇数、x と y が 2M 未満なら結果も 2M 未満)。
 [[gnu::always_inline]] inline __m256i mont8(__m256i x, __m256i y, __m256i mv, __m256i mi) {
  const __m256i te= _mm256_mul_epu32(x, y), to= _mm256_mul_epu32(_mm256_srli_epi64(x, 32), _mm256_srli_epi64(y, 32));
@@ -67,98 +35,188 @@ using hvec= std::vector<u32, HugeAlloc<u32>>;
  const __m256i uo= _mm256_add_epi64(to, _mm256_mul_epu32(_mm256_mul_epu32(to, mi), mv));
  return _mm256_blend_epi32(_mm256_srli_epi64(ue, 32), uo, 0b10101010);
 }
+// 法 M (奇数) の Montgomery の定数。R1 = 2^32 mod M (Montgomery の 1)、R2 = R1^2、R3 = R1^3。
 template <class Z> struct Mont {
- u32 M;
+ u32 M, R1, R2, R3;
  __m256i mv, mi;
  Mont(): M(Z::mod()) {
   u32 x= M;
   for(int i= 0; i < 5; ++i) x*= 2 - M * x;
   mv= _mm256_set1_epi32(M), mi= _mm256_set1_epi32(-x);
+  R1= Z(u64(1) << 32).val(), R2= (Z::raw(R1) * Z::raw(R1)).val(), R3= (Z::raw(R2) * Z::raw(R1)).val();
  }
+ [[gnu::always_inline]] __m256i mul(__m256i x, __m256i y) const { return mont8(x, y, mv, mi); }
+ [[gnu::always_inline]] __m256i red(__m256i x) const { return _mm256_min_epu32(x, _mm256_sub_epi32(x, mv)); }
+ [[gnu::always_inline]] __m256i add(__m256i x, __m256i y) const { return red(_mm256_add_epi32(x, y)); }  // M 未満どうし
+ [[gnu::always_inline]] __m256i neg(__m256i x) const { return red(_mm256_sub_epi32(mv, x)); }            // M 未満
 };
-// gen(t) が返す 8 個 (添字 8t..8t+7 の値、1 以上 M 未満) の逆元を、後ろ向きに back(t, 逆元の 8 個) で渡す。全部の値の積を返す。
-// W は 8 steps 個以上の作業の置き場。レーンの総積は (Π 値) 2^{-32 steps} なので、全体の積は 8 本の積に 2^{256 steps} を掛ける。
-template <class Z, class Gen, class Back> Z batch_inv(int steps, u32* W, const Mont<Z>& mt, Gen gen, Back back) {
+// gen(j) が返す 8 個 (1 以上 M 未満) の逆元に sigma を掛けたものを、後ろ向きに back(j, sigma/値) で渡す。全部の値の積を返す。
+// レーン b は添字 ≡ b (mod 8) の値の累積積を受け持つ (8 本の鎖)。レーンの総積は (Π 値) 2^{-32 steps} なので、全体の積は
+// 8 本の積に 2^{256 steps} を掛けたもの。Montgomery の 2^{-32} は前向きと後ろ向きで打ち消し合う。
+template <class Z, class Gen, class Back> Z batch_inv(int steps, u32* W, u32 sigma, const Mont<Z>& mt, Gen gen, Back back) {
  if(steps == 0) return Z(1);
  __m256i acc= _mm256_set1_epi32(1);
- for(int t= 0; t < steps; ++t) acc= mont8(acc, gen(t), mt.mv, mt.mi), _mm256_storeu_si256((__m256i*)(W + 8 * t), acc);
+ for(int j= 0; j < steps; ++j) acc= mt.mul(acc, gen(j)), _mm256_storeu_si256((__m256i*)(W + 8 * j), acc);
  alignas(32) u32 c[8];
  _mm256_store_si256((__m256i*)c, acc);
  Z prod(1);
  for(int b= 0; b < 8; ++b) {
   const Z v(c[b]);
-  prod*= v, c[b]= v.inv().val();
+  prod*= v, c[b]= (v.inv() * Z::raw(sigma)).val();
  }
- prod*= Z(u64(1) << 32).pow(u64(8) * steps);
+ prod*= Z::raw(mt.R1).pow(u64(8) * steps);
  __m256i cur= _mm256_load_si256((const __m256i*)c);
- for(int t= steps - 1; t >= 0; --t) {
-  const __m256i pre= t ? _mm256_loadu_si256((const __m256i*)(W + 8 * (t - 1))) : _mm256_set1_epi32(1);
-  const __m256i r= mont8(cur, pre, mt.mv, mt.mi);
-  back(t, _mm256_min_epu32(r, _mm256_sub_epi32(r, mt.mv)));
-  cur= mont8(cur, gen(t), mt.mv, mt.mi);
+ for(int j= steps - 1; j >= 0; --j) {
+  const __m256i pre= j ? _mm256_loadu_si256((const __m256i*)(W + 8 * (j - 1))) : _mm256_set1_epi32(1);
+  back(j, mt.red(mt.mul(cur, pre)));
+  cur= mt.mul(cur, gen(j));
  }
  return prod;
 }
-// C(N, k) (0 ≤ k ≤ N) を c[0..N] に置き (c は 8 の倍数ぶん 0 で延ばす)、N! を返す。比 (N - k + 1)/k の累積積を 8 個の区間に
-// 分けて区間ごとに求め、あとで前の区間の積を掛ける。
-template <class Z> Z binom_row(int N, hvec& c, hvec& W, const Mont<Z>& mt) {
- const int steps= (N + 7) / 8;
- c.assign(8 * steps + 8, 0), W.resize(8 * steps + 8);
- c[0]= Z(1).val();
- if(N == 0) return Z(1);
- const __m256i one= _mm256_set1_epi32(1), lane= _mm256_setr_epi32(1, 2, 3, 4, 5, 6, 7, 8);
- // k = 8t + b + 1 (k > N の分は 1 にして積に効かせない)
- auto gen= [&](int t) {
-  const __m256i k= _mm256_add_epi32(lane, _mm256_set1_epi32(8 * t));
-  return _mm256_blendv_epi8(k, one, _mm256_cmpgt_epi32(k, _mm256_set1_epi32(N)));
+// 比 rho[i] (Montgomery の形、i < N の先は R1 で埋める) の累積積 P_i = Π_{j≤i} rho_j を区間 4 つの鎖で作り、
+// A = Σ_{i<N} val[i] P_i と B = Σ_{i<N} P_i を返す (どちらも本当の値)。val は M 未満 (N 以降は読むが足さない)。
+// ベクトルの中の累積積は 3 段の並べ替えと積で作り、前のベクトルからの繰り上げを掛ける。区間ごとの和は区間の始まりからの
+// 累積積で作り、最後に前の区間の総積を掛けて足す。累積積は配列に置かない。
+template <class Z> void scan_acc(const u32* rho, const u32* val, int N, const Mont<Z>& mt, Z& A, Z& B) {
+ constexpr int SG= 4;
+ const int nv= (N + 7) / 8, per= (nv + SG - 1) / SG;
+ const __m256i one= _mm256_set1_epi32(mt.R1), lo32= _mm256_set1_epi64x(0xffffffffll), lane= _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+ const __m256i nn= _mm256_set1_epi32(N), i1= _mm256_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6), i2= _mm256_setr_epi32(0, 0, 0, 1, 2, 3, 4, 5);
+ const __m256i i4= _mm256_setr_epi32(0, 0, 0, 0, 0, 1, 2, 3), i7= _mm256_set1_epi32(7), u1= _mm256_set1_epi32(1);
+ __m256i carry[SG], ae[SG], ao[SG], be[SG], bo[SG];
+ for(int g= 0; g < SG; ++g) carry[g]= one, ae[g]= ao[g]= be[g]= bo[g]= _mm256_setzero_si256();
+ auto step= [&](int g, int j) {
+  __m256i x= _mm256_loadu_si256((const __m256i*)(rho + 8 * j));
+  x= mt.mul(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, i1), one, 0b00000001));
+  x= mt.mul(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, i2), one, 0b00000011));
+  x= mt.mul(x, _mm256_blend_epi32(_mm256_permutevar8x32_epi32(x, i4), one, 0b00001111));
+  const __m256i p= mt.mul(x, carry[g]);
+  carry[g]= _mm256_permutevar8x32_epi32(p, i7);
+  const __m256i ok= _mm256_cmpgt_epi32(nn, _mm256_add_epi32(lane, _mm256_set1_epi32(8 * j)));
+  const __m256i v= _mm256_and_si256(mt.mul(_mm256_loadu_si256((const __m256i*)(val + 8 * j)), p), ok);
+  const __m256i q= _mm256_and_si256(mt.mul(p, u1), ok);
+  ae[g]= _mm256_add_epi64(ae[g], _mm256_and_si256(v, lo32)), ao[g]= _mm256_add_epi64(ao[g], _mm256_srli_epi64(v, 32));
+  be[g]= _mm256_add_epi64(be[g], _mm256_and_si256(q, lo32)), bo[g]= _mm256_add_epi64(bo[g], _mm256_srli_epi64(q, 32));
  };
- const Z fact= batch_inv<Z>(steps, W.data(), mt, gen, [&](int t, __m256i iv) { _mm256_storeu_si256((__m256i*)(c.data() + 1 + 8 * t), iv); });
- // c[k] = (N - k + 1) / k の累積積
- constexpr int S= 8;
- const int len= (N + S - 1) / S;
- Z acc[S];
- for(int s= 0; s < S; ++s) acc[s]= Z(1);
- for(int t= 0; t < len; ++t)
-  for(int s= 0; s < S; ++s) {
-   const int k= 1 + s * len + t;
-   if(k <= N) acc[s]*= Z::raw(c[k]) * Z(N - k + 1), c[k]= acc[s].val();
-  }
- Z carry= acc[0];
- for(int s= 1; s < S && 1 + s * len <= N; ++s) {
-  const int lo= 1 + s * len, hi= std::min(N, lo + len - 1);
-  const auto cf= carry.fixed();
-  for(int k= lo; k <= hi; ++k) c[k]= (Z::raw(c[k]) * cf).val();
-  carry*= acc[s];
+ for(int t= 0; t < per; ++t)
+  for(int g= 0; g < SG; ++g)
+   if(g * per + t < nv) step(g, g * per + t);
+ Z start(1), sa(0), sb(0);
+ const Z iR= Z::raw(mt.R1).inv();
+ for(int g= 0; g < SG && g * per < nv; ++g) {
+  alignas(32) u64 x[4], y[4];
+  _mm256_store_si256((__m256i*)x, _mm256_add_epi64(ae[g], ao[g]));
+  _mm256_store_si256((__m256i*)y, _mm256_add_epi64(be[g], bo[g]));
+  sa+= start * (Z(x[0]) + Z(x[1]) + Z(x[2]) + Z(x[3])), sb+= start * (Z(y[0]) + Z(y[1]) + Z(y[2]) + Z(y[3]));
+  alignas(32) u32 c[8];
+  _mm256_store_si256((__m256i*)c, carry[g]);
+  start*= Z(c[0]) * iR;  // 区間の総積 (Montgomery の形の R を外す)
  }
- for(int k= N + 1; k < int(c.size()); ++k) c[k]= 0;
- return fact;
+ A= sa, B= sb;
 }
-// y (長さ K) の 0..K-1 での値の多項式の x での値 (x mod M ≥ K)。c は C(K-1, k)、fact は (K-1)!。
-template <class Z> Z iota_core(const std::vector<Z>& y, u32 xm, const hvec& c, Z fact, hvec& W, const Mont<Z>& mt) {
- const int K= int(y.size()), steps= (K + 7) / 8;
- // w[k] = y_k C(K-1, k)
- hvec w(8 * steps + 8, 0);
- for(int k= 0; k < K; ++k) w[k]= (y[k] * Z::raw(c[k])).val();
- W.resize(8 * steps + 8);
- const __m256i one= _mm256_set1_epi32(1), lane= _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
- auto gen= [&](int t) {
-  const __m256i k= _mm256_add_epi32(lane, _mm256_set1_epi32(8 * t));
-  const __m256i v= _mm256_sub_epi32(_mm256_set1_epi32(xm), k);  // x - k (k < K ≤ x mod M なので正)
-  return _mm256_blendv_epi8(v, one, _mm256_cmpgt_epi32(k, _mm256_set1_epi32(K - 1)));
+// t[k] (0 ≤ k ≤ D、M 未満) を S(k) = Σ_{i<k} r^i t_i に置き換え、S(D+1) を返す。r^i は 8 レーンの鎖 (Montgomery の形) で作り、
+// ベクトルの中の累積和と前のベクトルからの繰り上げで足す。
+template <class Z> Z prefix_sums(u32* t, int D, Z r, const Mont<Z>& mt) {
+ const int n= D + 1, nv= n / 8;
+ alignas(32) u32 a[8];
+ {
+  Z x(1);
+  for(int b= 0; b < 8; ++b) a[b]= (x * Z::raw(mt.R1)).val(), x*= r;
+ }
+ __m256i rv= _mm256_load_si256((const __m256i*)a);
+ const __m256i r8= _mm256_set1_epi32((r.pow(8) * Z::raw(mt.R1)).val());
+ const __m256i i1= _mm256_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6), i2= _mm256_setr_epi32(0, 0, 0, 1, 2, 3, 4, 5), i4= _mm256_setr_epi32(0, 0, 0, 0, 0, 1, 2, 3);
+ const __m256i m1= _mm256_setr_epi32(0, -1, -1, -1, -1, -1, -1, -1), m2= _mm256_setr_epi32(0, 0, -1, -1, -1, -1, -1, -1), m4= _mm256_setr_epi32(0, 0, 0, 0, -1, -1, -1, -1);
+ const __m256i i7= _mm256_set1_epi32(7);
+ __m256i carry= _mm256_setzero_si256();
+ for(int j= 0; j < nv; ++j) {
+  const __m256i w= mt.red(mt.mul(_mm256_loadu_si256((const __m256i*)(t + 8 * j)), rv));  // r^k t_k
+  rv= mt.mul(rv, r8);
+  __m256i s= mt.add(w, _mm256_and_si256(_mm256_permutevar8x32_epi32(w, i1), m1));
+  s= mt.add(s, _mm256_and_si256(_mm256_permutevar8x32_epi32(s, i2), m2));
+  s= mt.add(s, _mm256_and_si256(_mm256_permutevar8x32_epi32(s, i4), m4));
+  const __m256i incl= mt.add(s, carry);
+  _mm256_storeu_si256((__m256i*)(t + 8 * j), mt.red(_mm256_add_epi32(_mm256_sub_epi32(incl, w), mt.mv)));  // 排他的な累積和
+  carry= _mm256_permutevar8x32_epi32(incl, i7);
+ }
+ _mm256_store_si256((__m256i*)a, carry);
+ Z S= Z::raw(a[0]);
+ _mm256_store_si256((__m256i*)a, rv);
+ Z rp= Z(a[0]) * Z::raw(mt.R1).inv();  // r^{8 nv}
+ for(int k= 8 * nv; k < n; ++k) {
+  const Z x= Z::raw(t[k]);
+  t[k]= S.val(), S+= rp * x, rp*= r;
+ }
+ return S;
+}
+// 0..DD での値 val (M 未満) の多項式に重み rf^k を掛けた Σ_k val_k L_k(x) rf^k を、x mod M > DD として求める (rq = 1/rf)。
+// W_k = L_k(x) rf^k の比は W_{k+1}/W_k = -(DD-k)(x-k) / ((k+1)(x-k-1) rq) で、q_k = (k+1)(x-k-1) rq の逆元をまとめて求め、
+// 比の累積積を和にためる。W_0 = (-1)^DD P'/DD! (P' = Π_{j=1}^{DD} (x-j)) は、Q = Π q_k = DD! P' rq^DD から
+// (-1)^DD P'^2 rq^DD / Q と求める。返すのは W_0 と、A = Σ_{k≥1} val_k W_k / W_0、B = Σ_{k≥1} W_k / W_0。
+template <class Z> void lagrange_scan(const u32* val, int DD, u32 xm, Z rq, const Mont<Z>& mt, Z& W0, Z& A, Z& B) {
+ if(DD == 0) return W0= Z(1), A= B= Z(0), void();
+ const int steps= (DD + 7) / 8;
+ hvec W(8 * steps + 8), rho(8 * steps + 8, mt.R1);
+ const __m256i lane= _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), one= _mm256_set1_epi32(1), last= _mm256_set1_epi32(DD - 1);
+ const __m256i rqR2= _mm256_set1_epi32((rq * Z::raw(mt.R2)).val()), xv= _mm256_set1_epi32(xm), x1= _mm256_set1_epi32(xm - 1);
+ // P' = Π_{j=1}^{DD} (x - j)
+ __m256i pacc= one;
+ for(int s= 0; s < steps; ++s) {
+  const __m256i k= _mm256_add_epi32(lane, _mm256_set1_epi32(8 * s));
+  pacc= mt.mul(pacc, _mm256_blendv_epi8(_mm256_sub_epi32(x1, k), one, _mm256_cmpgt_epi32(k, last)));
+ }
+ Z Pp(1);
+ {
+  alignas(32) u32 c[8];
+  _mm256_store_si256((__m256i*)c, pacc);
+  for(int b= 0; b < 8; ++b) Pp*= Z(c[b]);
+  Pp*= Z::raw(mt.R1).pow(u64(8) * steps);
+ }
+ auto gen= [&](int s) {  // q_k = (k+1)(x-k-1) rq (k = 8s + b < DD、それ以外は 1)
+  const __m256i k= _mm256_add_epi32(lane, _mm256_set1_epi32(8 * s));
+  const __m256i q= mt.red(mt.mul(mt.mul(_mm256_add_epi32(k, one), _mm256_sub_epi32(x1, k)), rqR2));
+  return _mm256_blendv_epi8(q, one, _mm256_cmpgt_epi32(k, last));
  };
- const __m256i neg= ((K - 1) & 1) ? _mm256_setr_epi32(-1, 0, -1, 0, -1, 0, -1, 0) : _mm256_setr_epi32(0, -1, 0, -1, 0, -1, 0, -1);
- const __m256i m2= _mm256_set1_epi32(2 * mt.M), lo32= _mm256_set1_epi64x(0xffffffffll);
- __m256i ae= _mm256_setzero_si256(), ao= _mm256_setzero_si256();
- const Z P= batch_inv<Z>(steps, W.data(), mt, gen, [&](int t, __m256i iv) {
-  __m256i v= mont8(_mm256_loadu_si256((const __m256i*)(w.data() + 8 * t)), iv, mt.mv, mt.mi);
-  v= _mm256_blendv_epi8(v, _mm256_sub_epi32(m2, v), neg);
-  ae= _mm256_add_epi64(ae, _mm256_and_si256(v, lo32)), ao= _mm256_add_epi64(ao, _mm256_srli_epi64(v, 32));
+ const __m256i dd= _mm256_set1_epi32(DD);
+ const Z Q= batch_inv<Z>(steps, W.data(), mt.R3, mt, gen, [&](int s, __m256i iq) {
+  // rho_k = -(DD-k)(x-k) / q_k を Montgomery の形で: iq = R^3/q、z = (DD-k)(x-k)/R なので mont(iq, z) = (DD-k)(x-k) R / q
+  const __m256i k= _mm256_add_epi32(lane, _mm256_set1_epi32(8 * s));
+  const __m256i z= mt.mul(_mm256_sub_epi32(dd, k), _mm256_sub_epi32(xv, k));
+  const __m256i v= mt.neg(mt.red(mt.mul(iq, z)));
+  _mm256_storeu_si256((__m256i*)(rho.data() + 8 * s), _mm256_blendv_epi8(v, _mm256_set1_epi32(mt.R1), _mm256_cmpgt_epi32(k, last)));
  });
- alignas(32) u64 s[4];
- _mm256_store_si256((__m256i*)s, _mm256_add_epi64(ae, ao));
- // Montgomery の積 1 回の 2^{-32} を戻す
- const Z sum= (Z(s[0]) + Z(s[1]) + Z(s[2]) + Z(s[3])) * Z(u64(1) << 32);
- return P * fact.inv() * sum;
+ W0= Pp * Pp * rq.pow(DD) * Q.inv();
+ if(DD & 1) W0= -W0;
+ scan_acc<Z>(rho.data(), val + 1, DD, mt, A, B);
+}
+// S(x) = c + r^x g(x) の c (t[0..D+1] は S(0..D+1)、r ≠ 0, 1)。c = u_0 Σ_{j≥1} S(j) u_j/u_0 / (1 - r)^{D+1}、
+// u_j = C(D+1, j) (-1)^{D+1-j} r^{D+1-j}、比 u_j/u_{j-1} = -(D+2-j) / (j r)。
+template <class Z> Z const_term(const u32* t, int D, Z r, const Mont<Z>& mt) {
+ const int N= D + 1, steps= (N + 7) / 8;
+ hvec W(8 * steps + 8), rho(8 * steps + 8, mt.R1);
+ const __m256i lane= _mm256_setr_epi32(1, 2, 3, 4, 5, 6, 7, 8), one= _mm256_set1_epi32(1), nn= _mm256_set1_epi32(N);
+ const __m256i rR= _mm256_set1_epi32((r * Z::raw(mt.R1)).val()), d2= _mm256_set1_epi32(D + 2);
+ auto gen= [&](int s) {  // j r (j = 8s + b + 1 ≤ N、それ以外は 1)
+  const __m256i j= _mm256_add_epi32(lane, _mm256_set1_epi32(8 * s));
+  return _mm256_blendv_epi8(mt.red(mt.mul(j, rR)), one, _mm256_cmpgt_epi32(j, nn));
+ };
+ batch_inv<Z>(steps, W.data(), mt.R3, mt, gen, [&](int s, __m256i iv) {
+  const __m256i j= _mm256_add_epi32(lane, _mm256_set1_epi32(8 * s));
+  const __m256i z= mt.mul(_mm256_sub_epi32(d2, j), one);  // (D+2-j)/R
+  const __m256i v= mt.neg(mt.red(mt.mul(iv, z)));
+  _mm256_storeu_si256((__m256i*)(rho.data() + 8 * s), _mm256_blendv_epi8(v, _mm256_set1_epi32(mt.R1), _mm256_cmpgt_epi32(j, nn)));
+ });
+ Z A, B;
+ scan_acc<Z>(rho.data(), t + 1, N, mt, A, B);
+ Z u0= r.pow(D + 1);
+ if((D + 1) & 1) u0= -u0;
+ return u0 * A * (Z(1) - r).pow(D + 1).inv();
+}
+// y を u32 の作業の配列 (huge page、8 の倍数ぶん 0 で延ばす) に写す。
+template <class Z> hvec copy_vals(const std::vector<Z>& y, int extra) {
+ hvec t(8 * ((y.size() + extra + 7) / 8) + 16, 0);
+ for(std::size_t i= 0; i < y.size(); ++i) t[i]= y[i].val();
+ return t;
 }
 template <class Z> Z iota_zmod(const std::vector<Z>& y, u64 x) {
  const int K= int(y.size());
@@ -166,9 +224,10 @@ template <class Z> Z iota_zmod(const std::vector<Z>& y, u64 x) {
  const u32 xm= u32(x % Z::mod());
  if(xm < u32(K)) return y[xm];
  const Mont<Z> mt;
- hvec c, W;
- const Z fact= binom_row<Z>(K - 1, c, W, mt);
- return iota_core<Z>(y, xm, c, fact, W, mt);
+ const hvec t= copy_vals(y, 0);
+ Z W0, A, B;
+ lagrange_scan<Z>(t.data(), K - 1, xm, Z(1), mt, W0, A, B);
+ return W0 * (y[0] + A);
 }
 template <class K> K iota_generic(const std::vector<K>& y, K x) {
  const int n= int(y.size());
@@ -183,39 +242,6 @@ template <class K> K iota_generic(const std::vector<K>& y, K x) {
   pre*= x - K(i);
  }
  return res;
-}
-// S(0..d+1) (S(k) = Σ_{i<k} r^i y_i)。
-template <class Z> std::vector<Z> prefix_sums(const std::vector<Z>& y, Z r) {
- const int D= int(y.size()) - 1;
- std::vector<Z> S(D + 2);
- const Z r4= r.pow(4);
- const auto f4= r4.fixed();
- Z q[4]= {Z(1), r, r * r, r * r * r};
- S[0]= Z(0);
- for(int i= 0; i <= D; ++i) S[i + 1]= S[i] + q[i & 3] * y[i], q[i & 3]*= f4;
- return S;
-}
-// S(x) = c + r^x g(x) の c (bc は C(d, k) の行、d = |S| - 2)。g が要れば g(0..d) を置く。
-template <class Z> Z const_term(const std::vector<Z>& S, Z r, const hvec& bc, std::vector<Z>* g) {
- const int D= int(S.size()) - 2;
- const Z ir= r.inv(), ir4= ir.pow(4);
- const auto f4= ir4.fixed();
- Z q[4]= {Z(1), ir, ir * ir, ir * ir * ir};
- Z sp(0), sn(0);
- for(int k= 0; k <= D + 1; ++k) {
-  const Z cb= Z::raw(k <= D ? bc[k] : 0) + Z::raw(k ? bc[k - 1] : 0);
-  const Z w= cb * q[k & 3] * S[k];
-  if((D + 1 - k) & 1) sn+= w;
-  else sp+= w;
-  q[k & 3]*= f4;
- }
- const Z c= (sp - sn) * r.pow(D + 1) * (Z(1) - r).pow(D + 1).inv();
- if(g) {
-  g->resize(D + 1);
-  Z p[4]= {Z(1), ir, ir * ir, ir * ir * ir};
-  for(int k= 0; k <= D; ++k) (*g)[k]= (S[k] - c) * p[k & 3], p[k & 3]*= f4;
- }
- return c;
 }
 // a x mod M を 8 個ずつ (a < M、x < M、q = floor(x 2^32 / M))。M 未満で返す。
 [[gnu::always_inline]] inline __m256i shoup8(__m256i a, __m256i x, __m256i q, __m256i p) {
@@ -339,24 +365,44 @@ template <class K> K sum_exp_poly(const std::vector<K>& y, K r, unsigned long lo
  if(n == 0 || y.empty()) return K();
  if(r == K()) return y[0];
  const int D= int(y.size()) - 1;
- if(r == K(1)) {
+ if(r == K(1)) {  // F(x) = Σ_{i<x} f(i) は d+1 次の多項式で、F(0..d+1) から補間する
+  if constexpr(poly_internal::is_zmod_v<K>) {
+   if(K::mod() & 1) {  // 作業の配列の上で累積和を取り、そのまま補間する
+    const Mont<K> mt;
+    hvec t= copy_vals(y, 1);
+    t[D + 1]= prefix_sums(t.data(), D, K(1), mt).val();
+    if(n <= u64(D) + 1) return K::raw(t[n]);
+    const u32 xm= u32(n % K::mod());
+    if(xm <= u32(D) + 1) return K::raw(t[xm]);
+    K W0, A, B;
+    lagrange_scan<K>(t.data(), D + 1, xm, K(1), mt, W0, A, B);
+    return W0 * (K::raw(t[0]) + A);
+   }
+  }
   std::vector<K> F(D + 2);
   F[0]= K();
   for(int k= 0; k <= D; ++k) F[k + 1]= F[k] + y[k];
   return interpolate_iota(F, n);
  }
  if constexpr(poly_internal::is_zmod_v<K>) {
-  const auto S= prefix_sums(y, r);
-  if(n <= u64(D) + 1) return S[n];
-  const Mont<K> mt;
-  hvec bc, W;
-  const K fact= binom_row<K>(D, bc, W, mt);
-  std::vector<K> g;
-  const K c= const_term(S, r, bc, &g);
-  const u32 xm= u32(n % K::mod());
-  const K gn= xm <= u32(D) ? g[xm] : iota_core<K>(g, xm, bc, fact, W, mt);
-  return c + r.pow(n) * gn;
- } else {
+  if(K::mod() & 1) {
+   const Mont<K> mt;
+   hvec t= copy_vals(y, 1);
+   t[D + 1]= prefix_sums(t.data(), D, r, mt).val();
+   if(n <= u64(D) + 1) return K::raw(t[n]);
+   const K c= const_term(t.data(), D, r, mt);
+   const u32 xm= u32(n % K::mod());
+   K gn;
+   if(xm <= u32(D)) gn= (K::raw(t[xm]) - c) * r.pow(xm).inv();
+   else {  // g(n) = Σ_k (S_k - c) r^{-k} L_k(x) = W_0 ((S_0 - c) + A - c B)
+    K W0, A, B;
+    lagrange_scan<K>(t.data(), D, xm, r, mt, W0, A, B);
+    gn= W0 * (K::raw(t[0]) - c + A - c * B);
+   }
+   return c + r.pow(n) * gn;
+  }
+ }
+ {  // 汎用の道 (ZMod で法が偶数のときも)
   std::vector<K> S(D + 2);
   S[0]= K();
   K q(1);
@@ -392,12 +438,14 @@ template <class K> K sum_exp_poly_limit(const std::vector<K>& y, K r) {
  if(r == K()) return y[0];
  const int D= int(y.size()) - 1;
  if constexpr(poly_internal::is_zmod_v<K>) {
-  const auto S= prefix_sums(y, r);
-  const Mont<K> mt;
-  hvec bc, W;
-  binom_row<K>(D, bc, W, mt);
-  return const_term<K>(S, r, bc, nullptr);
- } else {
+  if(K::mod() & 1) {
+   const Mont<K> mt;
+   hvec t= copy_vals(y, 1);
+   t[D + 1]= prefix_sums(t.data(), D, r, mt).val();
+   return const_term(t.data(), D, r, mt);
+  }
+ }
+ {  // 汎用の道 (ZMod で法が偶数のときも)
   std::vector<K> S(D + 2);
   S[0]= K();
   K q(1);

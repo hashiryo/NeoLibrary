@@ -5,8 +5,13 @@
 #include <simde/x86/avx2.h>
 #endif
 #include <algorithm>
+#include <cstdint>
+#include <new>
 #include <type_traits>
 #include <vector>
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
 #include "neo/algebra/ZMod.hpp"
 // 素朴な畳み込み c_k = Σ_{i+j=k} a_i b_j (O(nm))。T は掛け算と足し算を持つ型で、ZMod (法は定数でも実行時でもよい) なら
 // AVX2 の核で求める。
@@ -73,6 +78,52 @@ template <class Z> void conv(const u32* a, int n, const u32* b, int m, u32* out,
   std::copy(t, t + (len - k0), out + k0);
  }
 }
+// ZMod の列をそのままの値 (2M 未満) の u32 の列として読み書きする。ZMod は u32 を 1 つだけ持つ標準レイアウトの型なので、
+// 先頭の要素とポインタを相互に変換できる (neo/set_power_series/ranked_xor.hpp と同じ)。核は M 未満の値を書くので、そのまま
+// ZMod の値になる。
+template <class Z> inline const u32* raw(const std::vector<Z>& v) {
+ static_assert(std::is_standard_layout_v<Z> && sizeof(Z) == 4);
+ return reinterpret_cast<const u32*>(v.data());
+}
+template <class Z> inline u32* raw(std::vector<Z>& v) {
+ static_assert(std::is_standard_layout_v<Z> && sizeof(Z) == 4);
+ return reinterpret_cast<u32*>(v.data());
+}
+// 2 MB 以上の作業の配列を、Linux では 2 MB 境界の mmap に置いて huge page を頼む allocator。4 KB のページに初めて触る手間
+// (CI のランナーで 1 MB あたり 0.4 ms ほど) を減らす。
+template <class T> struct HugeAlloc {
+ using value_type= T;
+ static constexpr std::size_t H= std::size_t(1) << 21, P= 4096;
+ HugeAlloc()= default;
+ template <class U> HugeAlloc(const HugeAlloc<U>&) {}
+ T* allocate(std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   const std::size_t bytes= (n * sizeof(T) + P - 1) & ~(P - 1);
+   void* m= mmap(nullptr, bytes + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if(m == MAP_FAILED) throw std::bad_alloc();
+   char *p= static_cast<char*>(m), *a= reinterpret_cast<char*>((reinterpret_cast<std::uintptr_t>(p) + H - 1) & ~(H - 1));
+   if(a != p) munmap(p, a - p);
+   munmap(a + bytes, p + H - a);
+   madvise(a, bytes, MADV_HUGEPAGE);
+   return reinterpret_cast<T*>(a);
+  }
+#endif
+  return std::allocator<T>().allocate(n);
+ }
+ void deallocate(T* p, std::size_t n) {
+#ifdef __linux__
+  if(n * sizeof(T) >= H) {
+   munmap(p, (n * sizeof(T) + P - 1) & ~(P - 1));
+   return;
+  }
+#endif
+  std::allocator<T>().deallocate(p, n);
+ }
+ template <class U> bool operator==(const HugeAlloc<U>&) const { return true; }
+ template <class U> bool operator!=(const HugeAlloc<U>&) const { return false; }
+};
+using hvec= std::vector<u32, HugeAlloc<u32>>;
 template <class Z> std::vector<u32> to_u32(const std::vector<Z>& a) {
  std::vector<u32> r(a.size());
  for(std::size_t i= 0; i < a.size(); ++i) r[i]= a[i].val();
