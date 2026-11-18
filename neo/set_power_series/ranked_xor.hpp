@@ -30,7 +30,8 @@
 // 中で、上の段は列ごとに作業の配列で行い、列の初めと最後の段は大きい配列から窓の中の値だけを読み書きする。積は [0, p] に直してから
 // 12 項までずつ u64 にためて Montgomery で還元し、隣り合う 2 つの出力をまとめて求める (片方の列の値をレジスタで次の項へ渡す)。
 // exp、log、合成、power projection は、位置の更新が列の中で閉じるので、上の段を列ごとに全部続けて済ませる (段ごとに大きい配列を
-// 読み書きしない)。procon-judge の Library Checker の 5 問で書き比べた xw1、xe1、xl1、xc1、xp1 の法を実行時の奇数に広げ、そこから
+// 読み書きしない)。区画をまたぐ段がある大きさでは、区画の段を済ませた大きい配列の塊を、持っている rank (KC + 5 = 14 個) だけに
+// 詰めて持ち (合成を除く)、列ごとの段では今の列を計算している間に次の列で読む塊を L2 へ先に読む。procon-judge の Library Checker の 5 問で書き比べた xw1、xe1、xl1、xc1、xp1 の法を実行時の奇数に広げ、そこから
 // 2 段ずつの変換、2 つずつの積和、列ごとの上の段を書き比べて入れたもの。
 namespace sps_xor {
 using u32= std::uint32_t;
@@ -39,6 +40,13 @@ using V= __m256i;
 #define SPS_AI [[gnu::always_inline]] inline
 constexpr int KC= 9;     // 区画の塊の数は 2^KC
 constexpr int NMAX= 22;  // 速い核で受ける集合の大きさの上限
+constexpr int CW= KC + 5;                  // 区画の段を済ませた塊が持つ rank の数
+constexpr std::size_t CWS= std::size_t(CW) * 8;  // 詰めた塊の幅 (u32 の数)
+// 塊 (n 個の u32) を L2 へ先に読む
+SPS_AI void pf_block(const u32* p, std::size_t n) {
+ const std::uintptr_t e= std::uintptr_t(p + n);
+ for(std::uintptr_t a= std::uintptr_t(p) & ~std::uintptr_t(63); a < e; a+= 64) __builtin_prefetch((const void*)a, 0, 2);
+}
 inline constexpr u32 inv32(u32 n) {
  u32 x= n;
  for(int i= 0; i < 5; ++i) x*= 2u - n * x;
@@ -303,11 +311,13 @@ SPS_AI void split_lanes(const u32* X, int cnt, u32* E, u32* O, const MK& k, bool
 }
 
 // 塊の列を変換する。in は 2^m 個 (m >= 4、rank は popcount + roff)、X は 2^{m-4} 個の塊 (幅 bs)。区画の中の段だけ行う。
-inline void fwd_chunks(u32* X, const u32* in, int m, int roff, int sb, int ns, std::size_t bs, const MK& k0) {
+// cmp なら (nb > KC のとき)、区画 h の塊は rank popcount(h) + roff から CW 個を詰めて持つ (sb と ns は使わない)。
+inline void fwd_chunks(u32* X, const u32* in, int m, int roff, int sb0, int ns0, std::size_t bs, const MK& k0, bool cmp= false) {
  const MK k= k0;
  const int nb= m - 4, K= std::min(nb, KC);
  const std::size_t cnt= std::size_t(1) << nb, csz= std::size_t(1) << K;
  for(std::size_t q0= 0; q0 < cnt; q0+= csz) {
+  const int sb= cmp ? __builtin_popcountll(q0 >> K) + roff : sb0, ns= cmp ? CW : ns0;
   if(K == 0) {
    init_block(X + q0 * bs, in + 16 * q0, __builtin_popcountll(q0) + roff, sb, ns, k);
    continue;
@@ -335,11 +345,14 @@ inline void fwd_chunks(u32* X, const u32* in, int m, int roff, int sb, int ns, s
 }
 // 列 j の塊 (h << K) + j を c に写して、上の段 (区画をまたぐ段) を変換する。
 // 初めの 1 段か 2 段は、X から窓の中の値だけを読んで c に書く (写しの段を重ねる)。
-inline void fwd_column(u32* c, const u32* X, std::size_t j, int m, int roff, int sb, int ns, std::size_t bs, const MK& k0) {
+// bsx は X の塊の幅 (0 なら bs)。cmp なら X の塊は詰めて持つので、場所 s = r - sb で詰めた場所 r - (popcount(h) + roff) を読むよう
+// 塊の先頭をずらす。
+inline void fwd_column(u32* c, const u32* X, std::size_t j, int m, int roff, int sb, int ns, std::size_t bs, const MK& k0, std::size_t bsx= 0, bool cmp= false) {
  const MK k= k0;
  const int nb= m - 4, K= std::min(nb, KC), H= nb - K;
  const std::size_t hs= std::size_t(1) << H;
- auto xb= [&](std::size_t h) __attribute__((always_inline)) { return X + ((h << K) + j) * bs; };
+ if(!bsx) bsx= bs;
+ auto xb= [&](std::size_t h) __attribute__((always_inline)) { return X + ((h << K) + j) * bsx + (cmp ? 8 * (std::ptrdiff_t(sb) - __builtin_popcountll(h) - roff) : 0); };
  if(H == 1) {
   fwd_pair(xb(0), xb(1), c, c + bs, roff, 4 + K, sb, ns, k);
   return;
@@ -364,11 +377,22 @@ inline void fwd_column(u32* c, const u32* X, std::size_t j, int m, int roff, int
    }
 }
 // 列の上の段の逆変換。最後の 1 段か 2 段は、c から読んで残す窓だけを X に書く (写しの段を重ねる)。
-inline void inv_column(u32* c, u32* X, std::size_t j, int m, int roff, int sb, int ns, std::size_t bs, const MK& k0) {
+// bsx と cmp は fwd_column と同じ。cmp なら、詰めた塊のうち切り捨てる rank (sb より下と sb + ns 以上) の場所に 0 を書く。
+inline void inv_column(u32* c, u32* X, std::size_t j, int m, int roff, int sb, int ns, std::size_t bs, const MK& k0, std::size_t bsx= 0, bool cmp= false) {
  const MK k= k0;
  const int nb= m - 4, K= std::min(nb, KC), H= nb - K;
  const std::size_t hs= std::size_t(1) << H;
- auto xb= [&](std::size_t h) __attribute__((always_inline)) { return X + ((h << K) + j) * bs; };
+ if(!bsx) bsx= bs;
+ auto xb= [&](std::size_t h) __attribute__((always_inline)) { return X + ((h << K) + j) * bsx + (cmp ? 8 * (std::ptrdiff_t(sb) - __builtin_popcountll(h) - roff) : 0); };
+ if(cmp) {
+  const V z= _mm256_setzero_si256();
+  for(std::size_t h= 0; h < hs; ++h) {
+   u32* x= X + ((h << K) + j) * bsx;
+   const int base= __builtin_popcountll(h) + roff;
+   for(int s= 0; s < sb - base && s < CW; ++s) st(x + 8 * s, z);
+   for(int s= std::max(sb + ns - base, 0); s < CW; ++s) st(x + 8 * s, z);
+  }
+ }
  if(H == 1) {
   inv_pair(c, c + bs, xb(0), xb(1), roff, 4 + K, sb, ns, k);
   return;
@@ -398,11 +422,13 @@ inline void inv_column(u32* c, u32* X, std::size_t j, int m, int roff, int sb, i
 }
 // 逆変換の区画の中の段と、塊ごとの取り出し。f(q, 取り出した 2 本) を呼ぶ。
 // 段 K-1..1 を 2 段ずつ (数が奇数なら初めの 1 段だけ 1 段で) 行い、bit 0 の段は取り出しに重ねる。
-template <class Out> inline void inv_chunks(u32* X, int m, int roff, int sb, int ns, std::size_t bs, const MK& k0, const Out& out) {
+// cmp なら、区画 h の塊は rank popcount(h) + roff から CW 個を詰めて持つ (切り捨てた rank の場所は 0)。
+template <class Out> inline void inv_chunks(u32* X, int m, int roff, int sb0, int ns0, std::size_t bs, const MK& k0, const Out& out, bool cmp= false) {
  const MK k= k0;
  const int nb= m - 4, K= std::min(nb, KC);
  const std::size_t cnt= std::size_t(1) << nb, csz= std::size_t(1) << K;
  for(std::size_t q0= 0; q0 < cnt; q0+= csz) {
+  const int sb= cmp ? __builtin_popcountll(q0 >> K) + roff : sb0, ns= cmp ? CW : ns0;
   if(K == 0) {
    V v[2];
    extract(X + q0 * bs, __builtin_popcountll(q0) + roff, sb, ns, v, k);
@@ -442,13 +468,22 @@ inline std::size_t col_blocks(int m) {
 }
 // f̂_i (rank 0..i、roff = sb = 0) の列 j の上の段 (i - 4 - KC 段) の前向きと逆向きの変換。0 段なら塊を写すだけ (fwd_column と
 // inv_column は 1 段以上を受ける)。
-inline void col_fwd(u32* c, const u32* X, std::size_t j, int i, std::size_t bs, const MK& k) {
- if(i - 4 == KC) std::memcpy(c, X + j * bs, std::size_t(i + 1) * 32);
- else fwd_column(c, X, j, i, 0, 0, i + 1, bs, k);
+// bsx は X の塊の幅。0 段の塊は rank 0..KC+4 の CW 個なので、詰めても詰めなくても同じ写しで済む。
+inline void col_fwd(u32* c, const u32* X, std::size_t j, int i, std::size_t bs, const MK& k, std::size_t bsx, bool cmp) {
+ if(i - 4 == KC) std::memcpy(c, X + j * bsx, std::size_t(i + 1) * 32);
+ else fwd_column(c, X, j, i, 0, 0, i + 1, bs, k, bsx, cmp);
 }
-inline void col_inv(u32* c, u32* X, std::size_t j, int i, std::size_t bs, const MK& k) {
- if(i - 4 == KC) std::memcpy(X + j * bs, c, std::size_t(i + 1) * 32);
- else inv_column(c, X, j, i, 0, 0, i + 1, bs, k);
+inline void col_inv(u32* c, u32* X, std::size_t j, int i, std::size_t bs, const MK& k, std::size_t bsx, bool cmp) {
+ if(i - 4 == KC) std::memcpy(X + j * bsx, c, std::size_t(i + 1) * 32);
+ else inv_column(c, X, j, i, 0, 0, i + 1, bs, k, bsx, cmp);
+}
+// X の塊 q (rank の起点 base) のうち、列の初めの段で読む窓 (rank [base, base + KC + 4] と [sb, sb + ns) の重なり) を先に読む。
+SPS_AI void pf_win(const u32* X, std::size_t q, int base, int sb, int ns, std::size_t bsx, bool cmp) {
+ if(cmp) pf_block(X + q * bsx, CWS);
+ else {
+  const int a= std::max(base - sb, 0), b= std::min(base - sb + CW, ns);
+  if(a < b) pf_block(X + q * bsx + 8 * a, std::size_t(b - a) * 8);
+ }
 }
 // 値 x (2p 未満) を R 倍して [0, p) に (n 個、8 の倍数)。
 inline void scale_r(const u32* x, u32* y, std::size_t n, const MK& k0) {
@@ -475,9 +510,11 @@ template <int NM1> SPS_AI void conv_block(u32* a, const u32* b, const MK& k) {
 template <int N> void convolve_n(const u32* f, const u32* g, u32* out, const MK& k0) {
  const MK k= k0;
  constexpr int NM1= N - 1, NB= N - 4, BS= NM1 * 8;
+ constexpr bool CM= NB > KC;
+ constexpr std::size_t XS= CM ? CWS : BS;
  const std::size_t nblk= std::size_t(1) << NB;
- u32 *A= huge_alloc(nblk * BS * 4), *B= huge_alloc(nblk * BS * 4);
- fwd_chunks(A, f, N, 0, 1, NM1, BS, k), fwd_chunks(B, g, N, 0, 1, NM1, BS, k);
+ u32 *A= huge_alloc(nblk * XS * 4), *B= huge_alloc(nblk * XS * 4);
+ fwd_chunks(A, f, N, 0, 1, NM1, XS, k, CM), fwd_chunks(B, g, N, 0, 1, NM1, XS, k, CM);
  // 空集合は入力から外す (rank 0 は場所 -1 なので置かれない)
  if constexpr(NB <= KC) {
   for(std::size_t q= 0; q < nblk; ++q) conv_block<NM1>(A + q * BS, B + q * BS, k);
@@ -485,14 +522,22 @@ template <int N> void convolve_n(const u32* f, const u32* g, u32* out, const MK&
   const std::size_t hs= col_blocks(N), K= KC;
   u32 *cA= small_alloc(hs * BS * 4), *cB= small_alloc(hs * BS * 4);
   for(std::size_t j= 0; j < (std::size_t(1) << K); ++j) {
-   fwd_column(cA, A, j, N, 0, 1, NM1, BS, k), fwd_column(cB, B, j, N, 0, 1, NM1, BS, k);
-   for(std::size_t h= 0; h < hs; ++h) conv_block<NM1>(cA + h * BS, cB + h * BS, k);
-   inv_column(cA, A, j, N, 0, 2, NM1, BS, k);
+   fwd_column(cA, A, j, N, 0, 1, NM1, BS, k, XS, CM), fwd_column(cB, B, j, N, 0, 1, NM1, BS, k, XS, CM);
+   const bool nx= j + 1 < (std::size_t(1) << K);
+   for(std::size_t h= 0; h < hs; ++h) {
+    if(nx) {
+     const std::size_t q= (h << K) + j + 1;
+     const int base= __builtin_popcountll(h);
+     pf_win(A, q, base, 1, NM1, XS, CM), pf_win(B, q, base, 1, NM1, XS, CM);
+    }
+    conv_block<NM1>(cA + h * BS, cB + h * BS, k);
+   }
+   inv_column(cA, A, j, N, 0, 2, NM1, BS, k, XS, CM);
   }
   std::free(cA), std::free(cB);
  }
  const V Kc= cst(u32(u64(k.inv2pow(N - 1)) * k.R2 % k.P)), F0= cst(u32(u64(f[0] % k.P) * k.R1 % k.P)), G0= cst(u32(u64(g[0] % k.P) * k.R1 % k.P));
- inv_chunks(A, N, 0, 2, NM1, BS, k, [&](std::size_t q, const V* v) {
+ inv_chunks(A, N, 0, 2, NM1, XS, k, [&](std::size_t q, const V* v) {
   for(int t= 0; t < 2; ++t) {
    const u32 *fp= f + 16 * q + 8 * t, *gp= g + 16 * q + 8 * t;
    V fv= norm1(_mm256_loadu_si256((const V*)fp), k), gv= norm1(_mm256_loadu_si256((const V*)gp), k);
@@ -500,7 +545,7 @@ template <int N> void convolve_n(const u32* f, const u32* g, u32* out, const MK&
    V o= _mm256_add_epi64(_mm256_add_epi64(mul64(_mm256_srli_epi64(v[t], 32), Kc), mul64(_mm256_srli_epi64(gv, 32), F0)), mul64(_mm256_srli_epi64(fv, 32), G0));
    _mm256_storeu_si256((V*)(out + 16 * q + 8 * t), norm1(redc2(e, o, k), k));
   }
- });
+ }, CM);
  out[0]= u32(u64(f[0] % k.P) * (g[0] % k.P) % k.P);
  std::free(A), std::free(B);
 }
@@ -545,10 +590,11 @@ inline void naive_exp(int m, const u32* b, u32* h, u32 P) {
 template <int N> void exp_n(const u32* b, u32* out, const MK& k0) {
  const MK k= k0;
  constexpr int NS= N, BS= NS * 8, NB= N - 4, KL= NB < KC ? NB : KC, H= NB - KL;
- constexpr std::size_t CB= std::size_t(1) << KL;
- u32 *G= huge_alloc((std::size_t(1) << NB) * BS * 4), *bs= huge_alloc(std::size_t(4) << N);
+ constexpr bool CM= H > 0;
+ constexpr std::size_t CB= std::size_t(1) << KL, XS= CM ? CWS : BS;
+ u32 *G= huge_alloc((std::size_t(1) << NB) * XS * 4), *bs= huge_alloc(std::size_t(4) << N);
  scale_r(b, bs, std::size_t(1) << N, k);
- u32* Glo= G + ((std::size_t(1) << H) - 1) * CB * BS;
+ u32* Glo= G + ((std::size_t(1) << H) - 1) * CB * XS;
  {
   alignas(32) u32 h[16], bb[16];
   for(int s= 0; s < 16; ++s) bb[s]= b[s] % k.P;
@@ -560,29 +606,34 @@ template <int N> void exp_n(const u32* b, u32* out, const MK& k0) {
  for(int i= 4; i < KL + 4; ++i) {
   const std::size_t cnt= std::size_t(1) << (i - 4);
   fwd_chunks(Fs, bs + (std::size_t(1) << i), i, 0, 0, i + 1, BS, k);
-  for(std::size_t q= 0; q < cnt; ++q) exp_step(Glo + q * BS, Glo + (q + cnt) * BS, Fs + q * BS, i, k);
+  for(std::size_t q= 0; q < cnt; ++q) exp_step(Glo + q * XS, Glo + (q + cnt) * XS, Fs + q * BS, i, k);
  }
  std::free(Fs);
  // 上の段。f̂_i の区画の変換を G の空いた塊に置き、列ごとに全部の段を済ませて逆変換の上の段の結果を G に書く
  if constexpr(H > 0) {
-  auto Fi= [&](int i) { return G + ((std::size_t(1) << (i - 4 - KC)) - 1) * CB * BS; };
-  for(int i= KC + 4; i < N; ++i) fwd_chunks(Fi(i), bs + (std::size_t(1) << i), i, 0, 0, i + 1, BS, k);
+  auto Fi= [&](int i) { return G + ((std::size_t(1) << (i - 4 - KC)) - 1) * CB * XS; };
+  for(int i= KC + 4; i < N; ++i) fwd_chunks(Fi(i), bs + (std::size_t(1) << i), i, 0, 0, i + 1, XS, k, CM);
   u32 *cG= small_alloc((std::size_t(1) << H) * BS * 4), *cF= small_alloc((std::size_t(1) << (H - 1)) * BS * 4);
   for(std::size_t j= 0; j < CB; ++j) {
-   std::memcpy(cG, Glo + j * BS, std::size_t(BS) * 4);
+   std::memcpy(cG, Glo + j * XS, std::min<std::size_t>(XS, BS) * 4);
+   const bool nx= j + 1 < CB;
+   if(nx) pf_block(Glo + (j + 1) * XS, XS);
    for(int i= KC + 4; i < N; ++i) {
     const std::size_t hs= std::size_t(1) << (i - 4 - KC);
-    col_fwd(cF, Fi(i), j, i, BS, k);
-    for(std::size_t h= 0; h < hs; ++h) exp_step(cG + h * BS, cG + (h + hs) * BS, cF + h * BS, i, k);
+    col_fwd(cF, Fi(i), j, i, BS, k, XS, CM);
+    for(std::size_t h= 0; h < hs; ++h) {
+     if(nx) pf_win(Fi(i), (h << KC) + j + 1, __builtin_popcountll(h), 0, i + 1, XS, CM);
+     exp_step(cG + h * BS, cG + (h + hs) * BS, cF + h * BS, i, k);
+    }
    }
-   inv_column(cG, G, j, N, 0, 1, NS, BS, k);
+   inv_column(cG, G, j, N, 0, 1, NS, BS, k, XS, CM);
   }
   std::free(cG), std::free(cF);
  }
  const V Kc= cst(u32(u64(k.inv2pow(N - 1)) * k.R1 % k.P));
- inv_chunks(G, N, 0, 1, NS, BS, k, [&](std::size_t q, const V* v) {
+ inv_chunks(G, N, 0, 1, NS, XS, k, [&](std::size_t q, const V* v) {
   for(int t= 0; t < 2; ++t) _mm256_storeu_si256((V*)(out + 16 * q + 8 * t), norm1(mont(v[t], Kc, k), k));
- });
+ }, CM);
  out[0]= 1;
  std::free(G), std::free(bs);
 }
@@ -650,48 +701,54 @@ inline void naive_log(int m, const u32* h, u32* f, u32 P) {
 template <int N> void log_n(const u32* h, u32* out, const MK& k0) {
  const MK k= k0;
  constexpr int NSB= N - 1, BSB= NSB * 8, NSF= N, BSF= NSF * 8, NB= N - 4, KL= NB < KC ? NB : KC, H= NB - KL;
- constexpr std::size_t CB= std::size_t(1) << KL;
- u32 *Fb= huge_alloc((std::size_t(1) << NB) * BSF * 4), *hs= huge_alloc(std::size_t(4) << N);
+ constexpr bool CM= H > 0;
+ constexpr std::size_t CB= std::size_t(1) << KL, XS= CM ? CWS : BSF;
+ u32 *Fb= huge_alloc((std::size_t(1) << NB) * XS * 4), *hs= huge_alloc(std::size_t(4) << N);
  scale_r(h, hs, std::size_t(1) << N, k);
  {
   u32 hh[16];
   for(int s= 0; s < 16; ++s) hh[s]= h[s] % k.P;
   naive_log(4, hh, out, k.P);
  }
- u32* Blo= Fb + ((std::size_t(1) << H) - 1) * CB * BSF;
+ u32* Blo= Fb + ((std::size_t(1) << H) - 1) * CB * XS;
  init_block(Blo, hs, 0, 1, NSB, k);
  // 段 i の商の区画の逆変換をして、答えの [2^i, 2^{i+1}) を取り出す
- auto put= [&](int i, u32* F) {
+ auto put= [&](int i, u32* F, std::size_t bs, bool cmp) {
   const V Kc= cst(k.inv2pow(i - 1));
   u32* o= out + (std::size_t(1) << i);
-  inv_chunks(F, i, 0, 0, i + 1, BSF, k, [&](std::size_t q, const V* v) {
+  inv_chunks(F, i, 0, 0, i + 1, bs, k, [&](std::size_t q, const V* v) {
    for(int t= 0; t < 2; ++t) _mm256_storeu_si256((V*)(o + 16 * q + 8 * t), norm1(mont(v[t], Kc, k), k));
-  });
+  }, cmp);
  };
- // 下の段 (区画の中で閉じる)
+ // 下の段 (区画の中で閉じる)。B の塊の幅は XS
  u32* Fs= small_alloc((CB >> 1) * BSF * 4);
  for(int i= 4; i < KL + 4; ++i) {
   const std::size_t cnt= std::size_t(1) << (i - 4);
   fwd_chunks(Fs, hs + (std::size_t(1) << i), i, 0, 0, i + 1, BSF, k);
-  for(std::size_t q= 0; q < cnt; ++q) div_step(Fs + q * BSF, Blo + q * BSF, Blo + (q + cnt) * BSF, i, i + 1 < N, k);
-  put(i, Fs);
+  for(std::size_t q= 0; q < cnt; ++q) div_step(Fs + q * BSF, Blo + q * XS, Blo + (q + cnt) * XS, i, i + 1 < N, k);
+  put(i, Fs, BSF, false);
  }
  std::free(Fs);
  if constexpr(H > 0) {
-  auto Fi= [&](int i) { return Fb + ((std::size_t(1) << (i - 4 - KC)) - 1) * CB * BSF; };
-  for(int i= KC + 4; i < N; ++i) fwd_chunks(Fi(i), hs + (std::size_t(1) << i), i, 0, 0, i + 1, BSF, k);
+  auto Fi= [&](int i) { return Fb + ((std::size_t(1) << (i - 4 - KC)) - 1) * CB * XS; };
+  for(int i= KC + 4; i < N; ++i) fwd_chunks(Fi(i), hs + (std::size_t(1) << i), i, 0, 0, i + 1, XS, k, CM);
   u32 *cB= small_alloc((std::size_t(1) << (H - 1)) * BSB * 4), *cF= small_alloc((std::size_t(1) << (H - 1)) * BSF * 4);
   for(std::size_t j= 0; j < CB; ++j) {
-   std::memcpy(cB, Blo + j * BSF, std::size_t(BSB) * 4);
+   std::memcpy(cB, Blo + j * XS, std::min<std::size_t>(XS, BSB) * 4);
+   const bool nx= j + 1 < CB;
+   if(nx) pf_block(Blo + (j + 1) * XS, std::min<std::size_t>(XS, BSB));
    for(int i= KC + 4; i < N; ++i) {
     const std::size_t hc= std::size_t(1) << (i - 4 - KC);
-    col_fwd(cF, Fi(i), j, i, BSF, k);
-    for(std::size_t t= 0; t < hc; ++t) div_step(cF + t * BSF, cB + t * BSB, cB + (t + hc) * BSB, i, i + 1 < N, k);
-    col_inv(cF, Fi(i), j, i, BSF, k);
+    col_fwd(cF, Fi(i), j, i, BSF, k, XS, CM);
+    for(std::size_t t= 0; t < hc; ++t) {
+     if(nx) pf_win(Fi(i), (t << KC) + j + 1, __builtin_popcountll(t), 0, i + 1, XS, CM);
+     div_step(cF + t * BSF, cB + t * BSB, cB + (t + hc) * BSB, i, i + 1 < N, k);
+    }
+    col_inv(cF, Fi(i), j, i, BSF, k, XS, CM);
    }
   }
   std::free(cB), std::free(cF);
-  for(int i= KC + 4; i < N; ++i) put(i, Fi(i));
+  for(int i= KC + 4; i < N; ++i) put(i, Fi(i), XS, CM);
  }
  std::free(Fb), std::free(hs);
 }
@@ -699,11 +756,13 @@ template <int N> void log_n(const u32* h, u32* out, const MK& k0) {
 template <int N> void div_n(const u32* f, const u32* g, u32* out, const MK& k0) {
  const MK k= k0;
  constexpr int NS= N + 1, BS= NS * 8, NB= N - 4;
+ constexpr bool CM= NB > KC;
+ constexpr std::size_t XS= CM ? CWS : BS;
  const std::size_t nblk= std::size_t(1) << NB;
- u32 *A= huge_alloc(nblk * BS * 4), *B= huge_alloc(nblk * BS * 4), *gs= huge_alloc(std::size_t(4) << N), *fs= huge_alloc(std::size_t(4) << N);
+ u32 *A= huge_alloc(nblk * XS * 4), *B= huge_alloc(nblk * XS * 4), *gs= huge_alloc(std::size_t(4) << N), *fs= huge_alloc(std::size_t(4) << N);
  scale_r(g, gs, std::size_t(1) << N, k), scale_r(f, fs, std::size_t(1) << N, k);
  // A は f の R 倍 (rank 0..N)、B は g の R 倍 (rank 1..N を場所 0..N-1)
- fwd_chunks(A, fs, N, 0, 0, NS, BS, k), fwd_chunks(B, gs, N, 0, 1, N, BS, k);
+ fwd_chunks(A, fs, N, 0, 0, NS, XS, k, CM), fwd_chunks(B, gs, N, 0, 1, N, XS, k, CM);
  auto body= [&](u32* a, u32* b) __attribute__((always_inline)) {
   // Q' = A' / B' (B の rank 0 は R、R 倍のままの割り算は Q'_d = A'_d - REDC(sum B'_j Q'_{d-j}))
   alignas(32) u32 Be[(NMAX + 2) * 8], Bo[(NMAX + 2) * 8], Qe[(NMAX + 2) * 8], Qo[(NMAX + 2) * 8];
@@ -716,16 +775,24 @@ template <int N> void div_n(const u32* f, const u32* g, u32* out, const MK& k0) 
   const std::size_t hs= col_blocks(N);
   u32 *cA= small_alloc(hs * BS * 4), *cB= small_alloc(hs * BS * 4);
   for(std::size_t j= 0; j < (std::size_t(1) << KC); ++j) {
-   fwd_column(cA, A, j, N, 0, 0, NS, BS, k), fwd_column(cB, B, j, N, 0, 1, N, BS, k);
-   for(std::size_t h= 0; h < hs; ++h) body(cA + h * BS, cB + h * BS);
-   inv_column(cA, A, j, N, 0, 0, NS, BS, k);
+   fwd_column(cA, A, j, N, 0, 0, NS, BS, k, XS, CM), fwd_column(cB, B, j, N, 0, 1, N, BS, k, XS, CM);
+   const bool nx= j + 1 < (std::size_t(1) << KC);
+   for(std::size_t h= 0; h < hs; ++h) {
+    if(nx) {
+     const std::size_t q= (h << KC) + j + 1;
+     const int base= __builtin_popcountll(h);
+     pf_win(A, q, base, 0, NS, XS, CM), pf_win(B, q, base, 1, N, XS, CM);
+    }
+    body(cA + h * BS, cB + h * BS);
+   }
+   inv_column(cA, A, j, N, 0, 0, NS, BS, k, XS, CM);
   }
   std::free(cA), std::free(cB);
  }
  const V Kc= cst(k.inv2pow(N - 1));
- inv_chunks(A, N, 0, 0, NS, BS, k, [&](std::size_t q, const V* v) {
+ inv_chunks(A, N, 0, 0, NS, XS, k, [&](std::size_t q, const V* v) {
   for(int t= 0; t < 2; ++t) _mm256_storeu_si256((V*)(out + 16 * q + 8 * t), norm1(mont(v[t], Kc, k), k));
- });
+ }, CM);
  std::free(A), std::free(B), std::free(gs), std::free(fs);
 }
 
@@ -760,14 +827,17 @@ SPS_AI void comp_step(u32* const* G, u32* const* Gh, const u32* F, int i, int J,
 template <int N> void egf_comp_n(const u32* g, const u32* e, u32* out, const MK& k0) {
  const MK k= k0;
  constexpr int NB= N - 4, KL= NB < KC ? NB : KC, H= NB - KL, NS= N + 1;
- constexpr std::size_t CB= std::size_t(1) << KL, BS= NS * 8, BSF= N * 8;
- u32 *gs= huge_alloc(std::size_t(4) << N), *G0= huge_alloc((std::size_t(1) << NB) * BS * 4);
+ // 合成は詰めて持たない (procon-judge の run 44279978233 の Xeon 6975P-C で、詰めると 4 % から 6 % 遅かった。exp、log、power projection は
+ // 縮むか変わらなかった)
+ constexpr bool CM= false;
+ constexpr std::size_t CB= std::size_t(1) << KL, BS= NS * 8, BSF= N * 8, XS= CM ? CWS : BS;
+ u32 *gs= huge_alloc(std::size_t(4) << N), *G0= huge_alloc((std::size_t(1) << NB) * XS * 4);
  scale_r(g, gs, std::size_t(1) << N, k);
  u32* G[N - 3];
- std::size_t bsj[N - 3];
+ std::size_t bsj[N - 3], lsj[N - 3];  // bsj は列の作業の配列の塊の幅、lsj は下の段の配列の塊の幅 (G_0 は XS)
  for(int j= 0; j <= N - 4; ++j) {
-  bsj[j]= std::size_t(N - j + 1) * 8;
-  G[j]= j == 0 ? G0 + ((std::size_t(1) << H) - 1) * CB * BS : huge_alloc(std::min(std::size_t(1) << (N - j - 4), CB) * bsj[j] * 4);
+  bsj[j]= std::size_t(N - j + 1) * 8, lsj[j]= j == 0 ? XS : bsj[j];
+  G[j]= j == 0 ? G0 + ((std::size_t(1) << H) - 1) * CB * XS : huge_alloc(std::min(std::size_t(1) << (N - j - 4), CB) * bsj[j] * 4);
  }
  {
   std::vector<std::vector<u32>> h(N + 1, std::vector<u32>(16, 0));
@@ -792,39 +862,44 @@ template <int N> void egf_comp_n(const u32* g, const u32* e, u32* out, const MK&
   const std::size_t cnt= std::size_t(1) << (i - 4);
   fwd_chunks(Fs, gs + (std::size_t(1) << i), i, 0, 0, i + 1, BSF, k);
   for(std::size_t q= 0; q < cnt; ++q) {
-   for(int j= 0; j <= J; ++j) gp[j]= G[j] + q * bsj[j];
-   for(int j= 0; j < J; ++j) gh[j]= G[j] + (q + cnt) * bsj[j];
+   for(int j= 0; j <= J; ++j) gp[j]= G[j] + q * lsj[j];
+   for(int j= 0; j < J; ++j) gh[j]= G[j] + (q + cnt) * lsj[j];
    comp_step(gp, gh, Fs + q * BSF, i, J, k);
   }
  }
  std::free(Fs);
  if constexpr(H > 0) {
-  auto Fi= [&](int i) { return G0 + ((std::size_t(1) << (i - 4 - KC)) - 1) * CB * BS; };
-  for(int i= KC + 4; i < N; ++i) fwd_chunks(Fi(i), gs + (std::size_t(1) << i), i, 0, 0, i + 1, BS, k);
+  auto Fi= [&](int i) { return G0 + ((std::size_t(1) << (i - 4 - KC)) - 1) * CB * XS; };
+  for(int i= KC + 4; i < N; ++i) fwd_chunks(Fi(i), gs + (std::size_t(1) << i), i, 0, 0, i + 1, XS, k, CM);
   u32* cG[H + 1];  // G_j の列は塊 2^{H-j} 個
   for(int j= 0; j <= H; ++j) cG[j]= small_alloc((std::size_t(1) << (H - j)) * bsj[j] * 4);
   u32* cF= small_alloc((std::size_t(1) << (H - 1)) * BS * 4);
   for(std::size_t c= 0; c < CB; ++c) {
-   for(int j= 0; j <= H; ++j) std::memcpy(cG[j], G[j] + c * bsj[j], bsj[j] * 4);
+   const bool nx= c + 1 < CB;
+   for(int j= 0; j <= H; ++j) {
+    std::memcpy(cG[j], G[j] + c * lsj[j], std::min(lsj[j], bsj[j]) * 4);
+    if(nx) pf_block(G[j] + (c + 1) * lsj[j], std::min(lsj[j], bsj[j]));
+   }
    for(int i= KC + 4; i < N; ++i) {
     const int J= N - i;
     const std::size_t hc= std::size_t(1) << (i - 4 - KC);
-    col_fwd(cF, Fi(i), c, i, BS, k);
+    col_fwd(cF, Fi(i), c, i, BS, k, XS, CM);
     for(std::size_t t= 0; t < hc; ++t) {
+     if(nx) pf_win(Fi(i), (t << KC) + c + 1, __builtin_popcountll(t), 0, i + 1, XS, CM);
      for(int j= 0; j <= J; ++j) gp[j]= cG[j] + t * bsj[j];
      for(int j= 0; j < J; ++j) gh[j]= cG[j] + (t + hc) * bsj[j];
      comp_step(gp, gh, cF + t * BS, i, J, k);
     }
    }
-   inv_column(cG[0], G0, c, N, 0, 0, NS, BS, k);
+   inv_column(cG[0], G0, c, N, 0, 0, NS, BS, k, XS, CM);
   }
   for(int j= 0; j <= H; ++j) std::free(cG[j]);
   std::free(cF);
  }
  const V Kc= cst(u32(u64(k.inv2pow(N - 1)) * k.R1 % k.P));
- inv_chunks(G0, N, 0, 0, NS, BS, k, [&](std::size_t q, const V* v) {
+ inv_chunks(G0, N, 0, 0, NS, XS, k, [&](std::size_t q, const V* v) {
   for(int t= 0; t < 2; ++t) _mm256_storeu_si256((V*)(out + 16 * q + 8 * t), norm1(mont(v[t], Kc, k), k));
- });
+ }, CM);
  out[0]= e[0];
  for(int j= 1; j <= N - 4; ++j) std::free(G[j]);
  std::free(G0), std::free(gs);
@@ -896,20 +971,26 @@ template <int N> std::vector<u32> egf_proj_n(const u32* g, const u32* w, const M
  if constexpr(H == 0) {
   fwd_chunks(D[0], w, N, 0, 0, NS, BS, k);
  } else {
-  u32 *W= huge_alloc((std::size_t(1) << NB) * BS * 4), *Fb= huge_alloc(((std::size_t(1) << H) - 1) * CB * BSF * 4);
-  auto Fi= [&](int i) { return Fb + ((std::size_t(1) << (i - 4 - KC)) - 1) * CB * BSF; };
-  fwd_chunks(W, w, N, 0, 0, NS, BS, k);
-  for(int i= KC + 4; i < N; ++i) fwd_chunks(Fi(i), gs + (std::size_t(1) << i), i, 0, 0, i + 1, BSF, k);
+  constexpr bool CM= true;
+  constexpr std::size_t XS= CM ? CWS : BS, XF= CM ? CWS : BSF;
+  u32 *W= huge_alloc((std::size_t(1) << NB) * XS * 4), *Fb= huge_alloc(((std::size_t(1) << H) - 1) * CB * XF * 4);
+  auto Fi= [&](int i) { return Fb + ((std::size_t(1) << (i - 4 - KC)) - 1) * CB * XF; };
+  fwd_chunks(W, w, N, 0, 0, NS, XS, k, CM);
+  for(int i= KC + 4; i < N; ++i) fwd_chunks(Fi(i), gs + (std::size_t(1) << i), i, 0, 0, i + 1, XF, k, CM);
   u32* cD[H + 1];  // D_j の列は塊 2^{H-j} 個
   for(int j= 0; j <= H; ++j) cD[j]= small_alloc((std::size_t(1) << (H - j)) * bsj[j] * 4);
   u32* cF= small_alloc((std::size_t(1) << (H - 1)) * BSF * 4);
   for(std::size_t c= 0; c < CB; ++c) {
-   fwd_column(cD[0], W, c, N, 0, 0, NS, BS, k);
+   fwd_column(cD[0], W, c, N, 0, 0, NS, BS, k, XS, CM);
+   // 次の列で読む W の塊は、0 をここで、hc + t を段 i の t 番目で先に読む (hc = 2^{i-4-KC} で、全部で 2^H 個)
+   const bool nx= c + 1 < CB;
+   if(nx) pf_win(W, c + 1, 0, 0, NS, XS, CM);
    for(int i= N - 1; i >= KC + 4; --i) {
     const int J= N - i - 1;
     const std::size_t hc= std::size_t(1) << (i - 4 - KC);
-    col_fwd(cF, Fi(i), c, i, BSF, k);
+    col_fwd(cF, Fi(i), c, i, BSF, k, XF, CM);
     for(std::size_t t= 0; t < hc; ++t) {
+     if(nx) pf_win(Fi(i), (t << KC) + c + 1, __builtin_popcountll(t), 0, i + 1, XF, CM), pf_win(W, ((hc + t) << KC) + c + 1, __builtin_popcountll(hc + t), 0, NS, XS, CM);
      for(int j= 0; j <= J; ++j) zl[j]= cD[j] + t * bsj[j], zh[j]= cD[j] + (t + hc) * bsj[j];
      for(int j= 0; j <= J + 1; ++j) yy[j]= cD[j] + t * bsj[j];
      proj_step(zl, zh, yy, cF + t * BSF, i, J + 1, k);

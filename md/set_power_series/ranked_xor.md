@@ -33,6 +33,10 @@ $f[S]$ を $f[S]\, t^{|S|}$ に置いて XOR 畳み込みをすると、$S \oplu
 
 exp、log、合成、power projection では、変換の領域の各点の計算が位置ごとに閉じているので、区画をまたぐ段の更新は列の中で閉じます。そこで、上の段を列ごとに全部続けて作業の配列の中で済ませます。大きい配列の読み書きは、上の段の $\hat{f}_i$ (合成と power projection は $\hat{g}_i$) の区画の変換と、最後の答えの区画の変換を 1 回ずつ書いて読むだけです。exp と合成は、区画の変換と下の段の結果を、答えの大きい配列の同じ列の空いた塊に置きます。
 
+区画をまたぐ段がある大きさ ($n \ge 14$) では、区画の段を済ませた大きい配列の塊を、持っている rank (14 個) だけに詰めて持ちます。塊 $h$ の rank の起点は $h$ の popcount で、列の初めの段は詰めた塊から読み、逆変換の最後の段は詰めた塊に書きます。切り捨てる rank の場所には 0 を書きます。塊の幅は 448 byte で、キャッシュの行 7 本に揃います。合成だけは、詰めると遅かったので詰めません。
+
+列ごとの段では、今の列を計算している間に、次の列で大きい配列から読む塊を L2 へ先に読みます。列の塊は区画 1 つぶん離れていて、ハードウェアの先読みが効かないためです。
+
 ## 速さ
 
 procon-judge の Library Checker の 5 問で書き比べた提出 (xw1、xe1、xl1、xc1、xp1) を、法を実行時の奇数に広げて写しました。CI の x64-gcc の値は次のとおりです (algo の最大)。
@@ -56,5 +60,17 @@ procon-judge の Library Checker の 5 問で書き比べた提出 (xw1、xe1、
 | power_projection_of_set_power_series | 55.27 ms | 77.87 ms | 76.54 ms | 323.85 ms |
 
 列ごとの上の段で、確保も減りました (n = 20 の exp が 80 MB から 60 MB、合成が 147 MB から 95 MB、メモリの最大の値)。
+
+そのあと、大きい配列を詰めて持つ形と次の列の先読みを書き比べて入れました。同じ回 (procon-judge の run 44279978233、Xeon 6975P-C の x64-gcc) の値は次のとおりです。
+
+| 問題 | この核 | 入れる前 (eaf3ecf) |
+| --- | ---: | ---: |
+| subset_convolution | 44.81 ms | 47.44 ms |
+| exp_of_set_power_series | 34.56 ms | 37.07 ms |
+| log_of_set_power_series | 31.13 ms | 35.72 ms |
+| polynomial_composite_set_power_series | 44.29 ms | 46.47 ms |
+| power_projection_of_set_power_series | 46.07 ms | 52.17 ms |
+
+合成の値は先読みだけの形の値です。メモリの最大は、部分集合畳み込みが 107 MB から 88 MB、exp と log が 59 MB から 47 MB、power projection が 122 MB から 96 MB に減りました。
 
 記録は algo-notes の notes/set-power-series.md にあります。
