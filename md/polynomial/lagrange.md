@@ -35,4 +35,4 @@ $$c = \frac{r^{d+1}}{(1 - r)^{d+1}} \sum_k \binom{d+1}{k} (-1)^{d+1-k} r^{-k} S(
 
 そのあと $g(k) = (S(k) - c) r^{-k}$ ($0 \le k \le d$) から $g(n)$ を補間します。`ZMod` では、$S$ を 8 レーンの $r^i$ の鎖とベクトルの中の累積和で作ります。$c$ の重みは比 $-(d+2-j)/(jr)$ の累積積で、$g(n)$ の重みは $L_k(x) r^{-k}$ の比の累積積です。どちらも `interpolate_iota` と同じ 2 つの段で求めるので、$g$ は配列に作りません。
 
-procon-judge の yosupo-sum-of-exponential-times-polynomial と -limit ($d \le 10^7$) で書き比べた se2 を、法を定数にしない形で写しました。Xeon 6975P-C と EPYC 7763 の x64-gcc (run 44247171412) で、se2 の最大は 170.90 ms と 117.01 ms でした。1 回目の se1 は 408.46 ms と 340.65 ms、今の Library は 716.12 ms と 663.67 ms です。
+procon-judge の yosupo-sum-of-exponential-times-polynomial と -limit ($d \le 10^7$) で書き比べた se2 を、法を定数にしない形で写しました。EPYC 7763 の x64-gcc (run 44256846647) で、この形 (`pow_table` と `sum_exp_poly`) の最大は 224.01 ms と 148.50 ms でした。写し元の se2 は 187.48 ms と 116.16 ms、今の Library は 864.07 ms と 669.25 ms です。se2 は $i^d$ の表を作業の配列に直接作るのに対し、この形は `pow_table` の答えを写すので、$10^7$ 要素の配列 1 本ぶん遅くなります。係数の補間は procon-judge の self-poly-interpolation (5000 点以下) で書き比べた interp_ps の写しで、Xeon 6975P-C で 16.75 ms (組立除法の参照実装は 197.95 ms) でした。

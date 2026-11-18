@@ -17,4 +17,4 @@ Cantor–Zassenhaus の方法です。$p$ が奇数なら、$h = x^{(p-1)/2} \bm
 
 冪は $f$ を法とする 2 乗の繰り返しです。積は `convolve_naive` と同じ AVX2 の核で、剰余は $\mathrm{rev}(f)^{-1} \bmod x^{N-1}$ を先に作っておく Barrett の方法 (積の下半分 2 回) で求めます。
 
-procon-judge の yosupo-polynomial-root-finding ($N \le 4000$、mod 998244353) で書き比べた naive を、法を定数にしない形で写しました。Xeon 6975P-C の x64-gcc (run 44231884007) で、naive の最大は 201.37 ms でした。
+procon-judge の yosupo-polynomial-root-finding ($N \le 4000$、mod 998244353) で書き比べた naive を、法を定数にしない形で写しました。Xeon 6975P-C の x64-gcc (run 44256846647) で、この形の最大は 162.24 ms でした (写し元の naive は 201.31 ms)。

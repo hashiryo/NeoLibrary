@@ -20,4 +20,4 @@ template <class T> T linear_recurrence(const std::vector<T>& c, const std::vecto
 
 `ZMod` の積は `convolve_naive` と同じ核で、短い側が 16 以下ならスカラーの道を通ります。作業の配列は呼び出しをまたいで使い回します。次数が 15 以下なら、入口からスタックの配列だけで回し、$P(x) Q(-x)$ と $Q(x) Q(-x)$ の要る偶奇の項だけを、出力を 1 つずつ u64 の和で求めます。次数の小さい問いをたくさん聞くとき (yuki-658 は次数 4 を何万回も聞きます)、配列を取る手間と核を呼ぶ手間がかかりません。
 
-procon-judge の self-poly-kth-term (次数 3000 以下、mod 998244353) で書き比べた bmo を写しました。Xeon 8573C の x64-gcc (run 44231884007) で、bmo の最大は 200.61 ms でした。今の Library は 1331.06 ms です。
+procon-judge の self-poly-kth-term (次数 3000 以下、mod 998244353) で書き比べた bmo を写し、次数の小さい道を足しました。Xeon 6975P-C の x64-gcc (run 44256846647) で、この形の最大は 92.94 ms でした。写し元の bmo は 156.61 ms、今の Library は 1111.20 ms です。

@@ -19,4 +19,4 @@ template <class Z> std::vector<std::pair<std::vector<Z>, int>> poly_factorize(st
 2. 次数ごとの分解は、法 $s$ での Frobenius $h \mapsto h^p$ を、行 $x^{ip} \bmod s$ を並べた行列で $O(n^2)$ で当て、$\gcd(s, x^{p^d} - x)$ を取ります。
 3. 同じ次数 $d$ の因子の積は、乱択の $a$ で分けます。$p$ が奇数なら $\gcd(g, a^{(p^d - 1)/2} - 1)$、$p = 2$ なら $\gcd(g, a + a^2 + \cdots + a^{2^{d-1}})$ を取ります。
 
-procon-judge の yosupo-factorization-of-polynomials ($N \le 100$、$p \le 998244353$) で書き比べた naive を写しました。Xeon 6975P-C の x64-gcc (run 44231884007) で、naive の最大は 23.77 ms でした。
+procon-judge の yosupo-factorization-of-polynomials ($N \le 100$、$p \le 998244353$) で書き比べた naive を写しました。Xeon 6975P-C の x64-gcc (run 44256846647) で、この形の最大は 4.63 ms でした (写し元の naive は 23.69 ms)。

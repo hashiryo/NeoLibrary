@@ -38,12 +38,14 @@ template <class K> std::vector<K> exp_of_div(const std::vector<K>& f, const std:
 
 `ZMod` は値を $M$ 未満の u32 で持ち、項の積を u64 に 15 個までためてから剰余を取ります ($15 M^2 < 2^{64}$)。$i$ が項の次数を越えるたびに使う項が 1 つ増えるので、区間ごとに項の数をテンプレートの引数にします。16 項以上は、実行時の数のループで 15 個ごとに剰余を取ります。いちばん次数の低い項の次数が 1 のときは、そこが前の値を待つ鎖になります。前の値はレジスタに持ち、その掛け算は Shoup の方法か 1 回の Barrett にします。$1/i$ の表は 8 本の鎖でまとめて求めます。$i \equiv b \pmod 8$ の数の累積積をレーン $b$ が受け持ち、AVX2 の Montgomery の積で前向きに置いてから、レーンごとの総積の逆元から後ろ向きに戻します。答えは返す `vector` の置き場に直接書き、$1/i$ の表は Linux では huge page に置きます。`pow_mul_pow`、`pow_of_div`、`exp_of_div` は、今の Library と同じ漸化式を値の型のまま回します。
 
-書き比べの問題は procon-judge の yosupo の inv/exp/log/pow/sqrt-of-formal-power-series-sparse ($n \le 10^6$、$K \le 10$) です。そこで書き比べた sp1 を、法を定数にしない形で写しました。x64-gcc (run 44231884007) の最大は次のとおりです。
+書き比べの問題は procon-judge の yosupo の inv/exp/log/pow/sqrt-of-formal-power-series-sparse ($n \le 10^6$、$K \le 10$) です。そこで書き比べた sp1 を、法を定数にしない形で写しました。x64-gcc (run 44256846647) の最大は次のとおりです。
 
-| 問題 | CPU | sp1 | 今の Library |
-| --- | --- | ---: | ---: |
-| inv | Xeon 6975P-C | 5.54 ms | 29.89 ms |
-| exp | Xeon 8573C | 12.91 ms | 83.22 ms |
-| log | Xeon 8573C | 11.49 ms | 44.06 ms |
-| pow | Xeon 8573C | 23.06 ms | 76.46 ms |
-| sqrt | Xeon 8573C | 27.03 ms | 86.88 ms |
+| 問題 | CPU | この形 | 写し元の sp1 | 今の Library |
+| --- | --- | ---: | ---: | ---: |
+| inv | Xeon 6975P-C | 11.45 ms | 5.59 ms | 28.69 ms |
+| exp | EPYC 7763 | 26.52 ms | 14.12 ms | 91.94 ms |
+| log | Xeon 6975P-C | 15.23 ms | 8.97 ms | 36.35 ms |
+| pow | EPYC 7763 | 24.14 ms | 22.42 ms | 71.76 ms |
+| sqrt | EPYC 7763 | 25.15 ms | 26.59 ms | 87.01 ms |
+
+この形の提出は、入力の項から長さ $n$ の `vector<ZMod>` を作り、答えを u32 の列に直してハーネスへ返します。sp1 は長さ $n$ の u32 の列を 1 本だけ使います。inv、exp、log の差の大半は、この 4 MB の配列 2〜3 本ぶんです (CI のランナーで 4 KB のページに初めて触る手間が 1 本 2 ms ほど)。
