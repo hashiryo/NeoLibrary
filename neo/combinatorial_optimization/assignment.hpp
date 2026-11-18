@@ -13,6 +13,9 @@
 // 割り当てた成分の和を最小 (maximize なら最大) にする。返すのは和、行ごとの列 (割り当てられない行は -1)、行と列の双対
 // u, v。最小化なら u_i + v_j ≤ a_ij で、割り当てた組は等号になる。最大化なら不等号の向きが逆になる。n < m なら割り当てない
 // 列の v は 0、n > m なら割り当てない行の u は 0。
+// perfect が false なら、全部の行 (n > m なら列) を割り当てなくてよく、割り当てた成分の和を最小 (最大) にする。行列を 0 で
+// 切り詰めて (最小化なら min(a, 0)、最大化なら max(a, 0)) 解き、切り詰めた行列で 0 になる組を外す (割り当てない行は、
+// 0 の列に当てれば同じ和の完全な割り当てになる)。双対は切り詰めた行列のもの。
 // 中身は Hungarian 法で、行を 1 つずつ足して最短の増加路を Dijkstra で探す。列の側の走査は 1 回で、整数の費用は AVX2 で
 // 4 列ずつ回す。浮動小数点数の費用は同じ形をスカラーで回す。正方行列のときだけ、列のポテンシャルを列ごとの最小で始める
 // (n < m で使うと、割り当てない列のポテンシャルがそろわず正しくない)。縮約費用が同じ列のうちでは、空いている列を選ぶ。
@@ -143,7 +146,7 @@ template <class T> void solve_float(int n, int m, const T* a, std::vector<int>& 
 }
 }
 // n 行 m 列の行列 a (行優先、大きさ n * m) の割り当て問題を解く。
-template <class Cost> Assignment<Cost> assignment(int n, int m, const std::vector<Cost>& a, bool maximize= false) {
+template <class Cost> Assignment<Cost> assignment(int n, int m, const std::vector<Cost>& a, bool maximize= false, bool perfect= true) {
  static_assert(std::is_arithmetic_v<Cost>);
  using namespace assignment_internal;
  assert((long long)a.size() == (long long)n * m);
@@ -151,7 +154,12 @@ template <class Cost> Assignment<Cost> assignment(int n, int m, const std::vecto
  const int N= tr ? m : n, M= tr ? n : m;
  Assignment<Cost> ret{0, std::vector<int>(n, -1), std::vector<Cost>(n), std::vector<Cost>(m)};
  std::vector<int> p;
- auto at= [&](int i, int j) { return tr ? a[(size_t)j * m + i] : a[(size_t)i * m + j]; };  // 解く向きの (i, j)
+ // 解く向きの (i, j)。perfect でなければ 0 で切り詰める。
+ auto at= [&](int i, int j) {
+  const Cost x= tr ? a[(size_t)j * m + i] : a[(size_t)i * m + j];
+  if(perfect) return x;
+  return maximize ? std::max(x, Cost(0)) : std::min(x, Cost(0));
+ };
  auto finish= [&](const auto& u, const auto& v) {
   // p[j] は解く向きの列 j の行 (1 始まり)。元の向きに戻し、最大化なら双対の符号を戻す。
   const Cost sg= maximize ? -1 : 1;
@@ -164,7 +172,11 @@ template <class Cost> Assignment<Cost> assignment(int n, int m, const std::vecto
   for(int i= 0; i < N; ++i) (tr ? ret.v : ret.u)[i]= sg * Cost(u[i + 1]);
   for(int j= 0; j < M; ++j) (tr ? ret.u : ret.v)[j]= sg * Cost(v[j + 1]);
   for(int i= 0; i < n; ++i)
-   if(ret.col[i] >= 0) ret.cost+= a[(size_t)i * m + ret.col[i]];
+   if(const int j= ret.col[i]; j >= 0) {
+    const Cost x= a[(size_t)i * m + j];
+    if(!perfect && (maximize ? !(x > 0) : !(x < 0))) ret.col[i]= -1;  // 切り詰めて 0 になる組は割り当てない
+    else ret.cost+= x;
+   }
  };
  if constexpr(std::is_integral_v<Cost>) {
   std::vector<i64> u, v, b;
@@ -175,13 +187,13 @@ template <class Cost> Assignment<Cost> assignment(int n, int m, const std::vecto
    solve_i64(N, M, b.data(), p, u, v);
   };
   if constexpr(std::is_same_v<Cost, i64>) {
-   if(!tr && !maximize) solve_i64(N, M, a.data(), p, u, v);
+   if(!tr && !maximize && perfect) solve_i64(N, M, a.data(), p, u, v);
    else copy();
   } else copy();
   finish(u, v);
  } else {
   std::vector<Cost> u, v;
-  if(!tr && !maximize) solve_float(N, M, a.data(), p, u, v);
+  if(!tr && !maximize && perfect) solve_float(N, M, a.data(), p, u, v);
   else {
    std::vector<Cost> b((size_t)N * M);
    for(int i= 0; i < N; ++i)
