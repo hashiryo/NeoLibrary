@@ -22,10 +22,12 @@
 // 手間は O(2^{n/2} n^2)。
 // ZMod で法が奇数なら、v_T を AVX2 で列の向きに 4 個ずつ求める。隣接行列は Montgomery の表現で持ち、u64 の和にためて、8 項ごとに
 // 最上位の bit が立っていれば 2M 2^32 を引き、最後に 1 回還元する。D_e は頂点ごとの配列で、組 p の頂点の配列は T から bit p を
-// 抜いた番号で引く (T を小さい順に見ると、どの配列も前から順に読み書きされる)。層 8 以上では、組を下の w/2 個と上の残りに分け、
-// 上の組の部分集合ごとに、配る先の列 (下の組の頂点、上の組で T に入らない組の頂点、2w+1) と使う行だけを並べた隣接行列を作り直す
-// (全部の列を掛けると積和の半分ほどを捨てる)。ほかの T と法が偶数の ZMod は、同じ動的計画を要素の演算子で配る形にする。
-// procon-judge の yosupo-hafnian-of-matrix で書き比べた zmod_layer_h の法を実行時の奇数に広げたもの。
+// 抜いた番号で引く (T を小さい順に見ると、どの配列も前から順に読み書きされる)。層 8 以上では、組を下の 5 個と上の残りに分け、
+// 上の組の部分集合 TH ごとに、配る先の列 (下の組の頂点、2w+1、上の組で T に入らない組の頂点) と使う行 (下の組の頂点、2w、TH の
+// 組の頂点) だけを並べた隣接行列で回す (全部の列を掛けると積和の半分ほどを捨てる)。TH は小さい順に回し、1 つ前の TH から出入り
+// した組 (2 進の繰り上がりなので平均 2 組) の行と列だけを、末尾との入れ替えで直す (Gray 符号の順にすると D の読み書きが飛ぶ)。
+// ほかの T と法が偶数の ZMod は、同じ動的計画を要素の演算子で配る形にする。procon-judge の yosupo-hafnian-of-matrix で書き比べた
+// zmod_layer_h の法を実行時の奇数に広げ、下の組の数と作り直しを zmod_layer_i5 の形にしたもの。
 namespace hafnian_internal {
 using u32= unsigned;
 using u64= unsigned long long;
@@ -94,13 +96,10 @@ template <int NV> [[gnu::noinline]] void layer(int w, const u64* __restrict A, u
   }
  }
 }
-// 層 w で上の組の部分集合を THbits (bit s..w-1) に決めたときの、下の組の部分集合 TL の処理。A2 の行は 0..2s-1 が下の組の頂点、
-// 2s + 2i と 2s + 2i + 1 が TH の i 番目の組 thp[i] の頂点、最後の行が 2w。列は 0..2s-1 が下の組の頂点、2s + 2i と 2s + 2i + 1
-// が TH に入らない i 番目の組 chp[i] の頂点、2s + 2 nch が 2w+1。
-template <int NV> [[gnu::noinline]] void layer_h(int w, int s, u32 THbits, const int* thp, int nth, const int* chp, int nch, const u64* __restrict A2, u32* __restrict D, std::size_t stride, u32* __restrict c, const Consts& k) {
+// 層 w で上の組の部分集合を THbits (bit s..w-1) に決めたときの、下の組の部分集合 TL の処理。行の幅は WS (u64 の数)。
+template <int NV> [[gnu::noinline]] void layer_i(int w, int s, u32 THbits, const int* thp, int nth, const int* chp, int nch, const u64* __restrict A2, std::size_t WS, u32* __restrict D, std::size_t stride, u32* __restrict c, const Consts& k) {
  const u32 nl= 1u << s;
- const u64* aw= A2 + std::size_t(2 * s + 2 * nth) * NV * 4;
- const int K2= 2 * s + 2 * nch;
+ const u64* aw= A2 + std::size_t(2 * s) * WS;
  alignas(32) u64 v[NV * 4];
  for(u32 TL= 0; TL < nl; ++TL) {
   const u32 T= THbits | TL;
@@ -118,7 +117,7 @@ template <int NV> [[gnu::noinline]] void layer_h(int w, int s, u32 THbits, const
    }
    const u32 ix= drop_bit(T, p);
    const __m256i x0= _mm256_set1_epi32(D[std::size_t(2 * p) * stride + ix]), x1= _mm256_set1_epi32(D[std::size_t(2 * p + 1) * stride + ix]);
-   const u64 *r0= A2 + std::size_t(2 * p) * NV * 4, *r1= r0 + NV * 4;
+   const u64 *r0= A2 + std::size_t(2 * p) * WS, *r1= r0 + WS;
    HAF_REP(HAF_MAC)
    cnt+= 2;
   }
@@ -130,13 +129,13 @@ template <int NV> [[gnu::noinline]] void layer_h(int w, int s, u32 THbits, const
    }
    const u32 ix= drop_bit(T, p);
    const __m256i x0= _mm256_set1_epi32(D[std::size_t(2 * p) * stride + ix]), x1= _mm256_set1_epi32(D[std::size_t(2 * p + 1) * stride + ix]);
-   const u64 *r0= A2 + std::size_t(2 * s + 2 * i) * NV * 4, *r1= r0 + NV * 4;
+   const u64 *r0= A2 + std::size_t(2 * s + 1 + 2 * i) * WS, *r1= r0 + WS;
    HAF_REP(HAF_MAC)
    cnt+= 2;
   }
   HAF_REP(HAF_KEEP)
   HAF_REP(HAF_RED)
-  c[(1u << w) + T]= u32(v[K2]);
+  c[(1u << w) + T]= u32(v[2 * s]);
   for(u32 t= ~TL & (nl - 1); t; t&= t - 1) {
    const int p= __builtin_ctz(t);
    const u32 ix= drop_bit(T, p);
@@ -146,8 +145,8 @@ template <int NV> [[gnu::noinline]] void layer_h(int w, int s, u32 THbits, const
   for(int i= 0; i < nch; ++i) {
    const int p= chp[i];
    const u32 ix= drop_bit(T, p);
-   D[std::size_t(2 * p + 1) * stride + ix]= u32(v[2 * s + 2 * i]);
-   D[std::size_t(2 * p) * stride + ix]= u32(v[2 * s + 2 * i + 1]);
+   D[std::size_t(2 * p + 1) * stride + ix]= u32(v[2 * s + 1 + 2 * i]);
+   D[std::size_t(2 * p) * stride + ix]= u32(v[2 * s + 2 + 2 * i]);
   }
  }
 }
@@ -157,7 +156,7 @@ template <int NV> [[gnu::noinline]] void layer_h(int w, int s, u32 THbits, const
 #undef HAF_RED
 // a は n × n (n = 2h、M 未満)。法は奇数。
 inline u32 zmod_odd(int n, const u32* a, u32 Mod) {
- constexpr int W0= 8;  // この層より下は全部の列を掛ける
+ constexpr int W0= 8, SL= 5;  // W0 より下の層は全部の列を掛ける。上の層の下の組は SL 個
  const int h= n / 2;
  const Consts k(Mod);
  const std::size_t stride= std::max<std::size_t>(1, std::size_t(1) << std::max(0, h - 2));
@@ -167,7 +166,7 @@ inline u32 zmod_odd(int n, const u32* a, u32 Mod) {
  std::vector<u64> Am((std::size_t)n * n);  // Montgomery の表現。対称にして持つ
  for(int i= 0; i < n; ++i)
   for(int j= 0; j < n; ++j) Am[(std::size_t)i * n + j]= i == j ? 0 : (u64(a[(std::size_t)std::min(i, j) * n + std::max(i, j)]) << 32) % Mod;
- std::vector<u64> buf((std::size_t)(n + 1) * 40 + 4);
+ std::vector<u64> buf((std::size_t)(n + 1) * 44 + 4);
  u64* Ap= reinterpret_cast<u64*>((reinterpret_cast<std::uintptr_t>(buf.data()) + 31) & ~std::uintptr_t(31));
  for(int w= 0; w < h; ++w) {
   if(w < W0) {
@@ -182,28 +181,76 @@ inline u32 zmod_odd(int n, const u32* a, u32 Mod) {
    }
    continue;
   }
-  const int s= w / 2, nh= w - s;
-  int thp[20], chp[20], cols[48];
+  const int s= std::min(SL, w), nh= w - s;
+  const int KM= 2 * s + 1 + 2 * nh;
+  const std::size_t WS= std::size_t((KM + 3) / 4) * 4;
+  int thp[32], chp[32], pth[32], pch[32], rowv[64], colv[64];
+  int nth= 0, nch= 0;
+  for(int e= 0; e < 2 * s; ++e) rowv[e]= e, colv[e]= e;
+  rowv[2 * s]= 2 * w, colv[2 * s]= 2 * w + 1;
+  for(int i= 0; i < nh; ++i) {
+   const int p= s + i;
+   chp[i]= p, pch[p]= i, colv[2 * s + 1 + 2 * i]= 2 * p, colv[2 * s + 2 + 2 * i]= 2 * p + 1;
+  }
+  nch= nh;
+  auto A2= [&](int r) { return Ap + std::size_t(r) * WS; };
+  for(int r= 0; r <= 2 * s; ++r)
+   for(std::size_t q= 0; q < WS; ++q) A2(r)[q]= int(q) < KM ? Am[(std::size_t)rowv[r] * n + colv[q]] : 0;
+  // 組 p が TH から出る: 行を末尾の組の行で埋め、列を末尾に足す
+  auto leave= [&](int p) {
+   const int i= pth[p], last= nth - 1;
+   if(i != last) {
+    const int p2= thp[last];
+    for(int d= 0; d < 2; ++d) {
+     std::memcpy(A2(2 * s + 1 + 2 * i + d), A2(2 * s + 1 + 2 * last + d), WS * sizeof(u64));
+     rowv[2 * s + 1 + 2 * i + d]= rowv[2 * s + 1 + 2 * last + d];
+    }
+    thp[i]= p2, pth[p2]= i;
+   }
+   --nth;
+   const int R= 2 * s + 1 + 2 * nth, j= nch++;
+   chp[j]= p, pch[p]= j;
+   for(int d= 0; d < 2; ++d) {
+    const int q= 2 * s + 1 + 2 * j + d;
+    colv[q]= 2 * p + d;
+    for(int r= 0; r < R; ++r) A2(r)[q]= Am[(std::size_t)rowv[r] * n + colv[q]];
+   }
+  };
+  // 組 p が TH に入る: 列を末尾の組の列で埋めて末尾を 0 にし、行を末尾に足す
+  auto enter= [&](int p) {
+   const int R= 2 * s + 1 + 2 * nth, i= pch[p], last= nch - 1;
+   if(i != last) {
+    const int p2= chp[last];
+    for(int d= 0; d < 2; ++d) {
+     const int qi= 2 * s + 1 + 2 * i + d, ql= 2 * s + 1 + 2 * last + d;
+     for(int r= 0; r < R; ++r) A2(r)[qi]= A2(r)[ql];
+     colv[qi]= colv[ql];
+    }
+    chp[i]= p2, pch[p2]= i;
+   }
+   for(int d= 0; d < 2; ++d)
+    for(int r= 0; r < R; ++r) A2(r)[2 * s + 1 + 2 * last + d]= 0;
+   --nch;
+   const int K= 2 * s + 1 + 2 * nch, j= nth++;
+   thp[j]= p, pth[p]= j;
+   for(int d= 0; d < 2; ++d) {
+    const int r= 2 * s + 1 + 2 * j + d;
+    rowv[r]= 2 * p + d;
+    u64* dst= A2(r);
+    for(int q= 0; q < K; ++q) dst[q]= Am[(std::size_t)rowv[r] * n + colv[q]];
+    for(std::size_t q= K; q < WS; ++q) dst[q]= 0;
+   }
+  };
   for(u32 TH= 0; TH < (1u << nh); ++TH) {
-   int nth= 0, nch= 0;
-   for(int i= 0; i < nh; ++i) (TH >> i & 1 ? thp[nth++] : chp[nch++])= s + i;
-   int K= 0;
-   for(int q= 0; q < 2 * s; ++q) cols[K++]= q;
-   for(int i= 0; i < nch; ++i) cols[K++]= 2 * chp[i], cols[K++]= 2 * chp[i] + 1;
-   cols[K++]= 2 * w + 1;
-   const int nv= (K + 3) / 4, W= nv * 4;
-   auto put= [&](int r, int e) {
-    u64* dst= Ap + std::size_t(r) * W;
-    for(int q= 0; q < K; ++q) dst[q]= Am[(std::size_t)e * n + cols[q]];
-    for(int q= K; q < W; ++q) dst[q]= 0;
-   };
-   int r= 0;
-   for(int e= 0; e < 2 * s; ++e) put(r++, e);
-   for(int i= 0; i < nth; ++i) put(r++, 2 * thp[i]), put(r++, 2 * thp[i] + 1);
-   put(r++, 2 * w);
+   if(TH) {
+    const int t= __builtin_ctz(TH);
+    for(int b= 0; b < t; ++b) leave(s + b);
+    enter(s + t);
+   }
+   const int K= 2 * s + 1 + 2 * nch, nv= (K + 3) / 4;
    switch(nv) {
 #define HAF_CASE(q) \
- case q + 1: layer_h<q + 1>(w, s, TH << s, thp, nth, chp, nch, Ap, D.p, stride, c, k); break;
+ case q + 1: layer_i<q + 1>(w, s, TH << s, thp, nth, chp, nch, Ap, WS, D.p, stride, c, k); break;
     HAF_REP(HAF_CASE)
 #undef HAF_CASE
    }

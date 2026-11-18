@@ -115,9 +115,17 @@ template <bool UP, bool INV, int E, class T, class VF, class SF> [[gnu::always_i
    T* d= A + base + jd * P;
    const T* s= A + base + js * P;
    std::size_t r= 0;
-   if constexpr(E != 0)
+   if constexpr(E != 0) {
     if(vec) r= sps_zeta::run_vec<E>(reinterpret_cast<char*>(d), reinterpret_cast<const char*>(s), P, vf);
-   for(; r < P; ++r) d[r]= sf(d[r], s[r]);
+    // 残りは 32 byte に満たない (P < 32 / E の段と、P を 32 byte で割った余り)。clang はここも重なりを調べる検査付きでベクトル化
+    // し、1 個か 3 個を合わせるたびに検査と前後の分岐を通るので止める (gcc は 1 個ずつの素直なループにする)。procon-judge の
+    // self-sps-kary-zeta の x64-clang で、3 進の max (int、3^13) が 4.42 ms から 2.14 ms になった (EPYC 9V45、run 44283421160)。
+#ifdef __clang__
+#pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
+#endif
+    for(; r < P; ++r) d[r]= sf(d[r], s[r]);
+   } else
+    for(; r < P; ++r) d[r]= sf(d[r], s[r]);
   };
   if constexpr(UP) {
    if constexpr(!INV)
