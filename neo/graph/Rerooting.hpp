@@ -19,8 +19,8 @@
 //   dp(root, v): root を根にしたときの v の部分木の値 (root と v は同じ木の頂点)。
 // 作り方は、隣接の CSR を組み、根を全部先に置いて BFS した順に並べ直す (兄弟の位置が隣り合う)。下からの段は位置の逆順に回って子の
 // 寄与をまとめ、上からの段は位置の順に回って、親の側の寄与と兄弟の後ろからの積と前からの積で、子から見た親の側の値を作る。どちらの
-// 段も配列を位置の順に読み書きする。dp(root, v) は、初めて呼んだときに内部の根で見た行きがけ順の番号を作り、root を含む v の子を
-// 兄弟の中から二分探索で探す。procon-judge の yosupo-tree-path-composite-sum で書き比べた形 (記録は algo-notes の notes/tree-queries.md)。
+// 段も配列を位置の順に読み書きする。dp(root, v) は、root が v の隣か内部の根なら親の位置の配列だけで O(1) で答え、それ以外は初めて
+// 呼んだときに内部の根で見た行きがけ順の番号を作って、root を含む v の子を兄弟の中から二分探索で探す。procon-judge の yosupo-tree-path-composite-sum で書き比べた形 (記録は algo-notes の notes/tree-queries.md)。
 namespace rerooting_internal {
 // 1 MB 以上の確保は 2 MB 境界に寄せ、Linux では huge page を頼む。resize で値を埋めない (どの項目も読む前に書く)。
 template <class T> struct Alloc {
@@ -70,6 +70,7 @@ template <class T> class Rerooting {
  int n= 0;
  rerooting_internal::Buf<T> dp_, dp1_, dp2_;  // dp_ は頂点の順、dp1_ (内部の根で見た部分木の値) と dp2_ (親の側の値) は位置の順
  rerooting_internal::Vec<int> pos_, cst_;     // 頂点 → 位置、位置 i の子の位置は [cst_[i], cst_[i + 1])
+ rerooting_internal::Vec<int> ppos_;          // 位置 → 親の位置 (根は -1)。dp(root, v) で root が v の隣か根のときに使う
  mutable rerooting_internal::Vec<int> tin_;   // dp(root, v) で使う。位置ごとに、行きがけ順の番号と部分木の大きさ
  void build_tin() const {
   if(!tin_.empty()) return;
@@ -92,10 +93,10 @@ public:
   const int m= int(edges.size());
   assert(m < N);  // 森の辺は N - (木の数) 本
   dp_= rerooting_internal::Buf<T>(N), dp1_= rerooting_internal::Buf<T>(N), dp2_= rerooting_internal::Buf<T>(N);
-  pos_.resize(N), cst_.resize(N + 1);
+  pos_.resize(N), cst_.resize(N + 1), ppos_.resize(N);
   rerooting_internal::Vec<int> tmp(3 * std::size_t(N) + 1 + 4 * std::size_t(m));
   int *vert= tmp.data(), *pe= vert + N, *st= pe + N, *adj= st + N + 1;  // adj[2j] = 隣、adj[2j + 1] = 辺
-  int* cst= cst_.data();
+  int *cst= cst_.data(), *ppos= ppos_.data();
   std::fill(st, st + N + 1, 0);
   for(const auto& e: edges) ++st[e[0] + 1], ++st[e[1] + 1];
   for(int v= 0; v < N; ++v) st[v + 1]+= st[v];
@@ -108,14 +109,14 @@ public:
   // 森のときだけ先に連結成分ごとの根を探す (pos_ を見た印に使う)。
   int k= 0;
   if(m + 1 == N) {
-   vert[k]= 0, pe[k++]= -1;
+   ppos[k]= -1, vert[k]= 0, pe[k++]= -1;
   } else {
    int* seen= pos_.data();
    std::fill(seen, seen + N, 0);
    std::vector<int> stk;
    for(int s= 0; s < N; ++s) {
     if(seen[s]) continue;
-    vert[k]= s, pe[k++]= -1, seen[s]= 1, stk.assign(1, s);
+    ppos[k]= -1, vert[k]= s, pe[k++]= -1, seen[s]= 1, stk.assign(1, s);
     while(!stk.empty()) {
      const int v= stk.back();
      stk.pop_back();
@@ -130,7 +131,7 @@ public:
    for(int j= v ? st[v - 1] : 0, e= st[v]; j < e; ++j)
     if(adj[2 * j + 1] != ep) {
      assert(k < N);  // 閉路があると同じ頂点を何度も置く
-     vert[k]= adj[2 * j], pe[k++]= adj[2 * j + 1];
+     ppos[k]= i, vert[k]= adj[2 * j], pe[k++]= adj[2 * j + 1];
     }
   }
   cst[N]= N;
@@ -162,9 +163,13 @@ public:
  // root を根にしたときの v の部分木の値。
  const T& operator()(int root, int v) const {
   if(root == v) return dp_[v];
+  const int pr= pos_[root], pv= pos_[v];
+  // root が v の親か内部の根なら、root は v の部分木の外。root が v の子なら、その子から見た親の側の値。どれも O(1)。
+  if(ppos_[pv] == pr || ppos_[pr] < 0) return dp1_[pv];
+  if(ppos_[pr] == pv) return dp2_[pr];
   build_tin();
   const int *tin= tin_.data(), *sz= tin + n;
-  const int pr= pos_[root], pv= pos_[v], t= tin[pr];
+  const int t= tin[pr];
   if(t < tin[pv] || tin[pv] + sz[pv] <= t) return dp1_[pv];  // root は v の部分木の外
   // root を含む v の子: 兄弟は行きがけ順の番号が増える順に並ぶので、番号が t 以下の最後の子。
   const int c= int(std::upper_bound(tin + cst_[pv], tin + cst_[pv + 1], t) - tin) - 1;
