@@ -6,6 +6,7 @@
 #include <vector>
 #include "neo/set_power_series/composite.hpp"
 #include "neo/set_power_series/convolve.hpp"
+#include "neo/set_power_series/digraph_simd.hpp"
 #include "neo/set_power_series/exp.hpp"
 #include "neo/set_power_series/inv.hpp"
 #include "neo/set_power_series/log.hpp"
@@ -26,6 +27,10 @@
 //   only_biconnected(f)、articulation_union(f): 連結なものの重み f と、点双連結な塊の重みを互いに変換する
 //   only_2edge_connected(f, n, es)、bridge_union(f, n, es): 連結なものの重みと、二辺連結な塊の重みを互いに変換する (橋の本数を使う)
 // 完全マッチングの数は hafnian (neo/set_power_series/hafnian.hpp) を使う。
+// 有向グラフ (辺 es[i] = (a, b) は a → b、多重辺と自己ループも可) の数え上げもここに置く。w (辺ごとの重み、長さ m) を渡すと、[S] は
+// 条件を満たす辺の部分集合 E' (G[S] の辺から選ぶ) についての prod_{e ∈ E'} w_e の和。w を省くと数 (重みが全部 1)。どちらも O(3^n)。
+//   strongly_connected_digraph<T>(n, es[, w]): G[S] が強連結になる辺の部分集合 ([∅] は 0)
+//   acyclic_digraph<T>(n, es[, w]): G[S] が DAG になる辺の部分集合 ([∅] は 1、自己ループは選べない)
 namespace sps {
 namespace sps_graph_internal {
 using u64= unsigned long long;
@@ -287,6 +292,24 @@ template <class T> T tutte_polynomial(int n, const Edges& es, T x, T y) {
  T yp= T(1);
  for(int i= 0; i < loops; ++i) yp*= y;
  return sps::exp(gg)[N - 1] * yp;
+}
+// 源になる強連結成分の頂点の集合で包除すると、g = 1 - exp(-f) が g[S] = X(S) - sum_{∅≠T⊊S} g[T] X(S\T) F(T → S\T) を満たす
+// (X は内側の辺の (1 + w) の積、F(T → U) は T から U への辺の (1 + w) の積)。g を 3^n の和で求め (digraph_simd.hpp)、f = -log(1 - g)。
+template <class T> std::vector<T> strongly_connected_digraph(int n, const Edges& es, const std::vector<T>& w= {}) {
+ std::vector<T> g= sps_digraph_internal::twisted(n, es, w, false, true, T());
+ for(auto& x: g) x= T() - x;
+ g[0]= T(1);
+ std::vector<T> f= sps::log(g);
+ for(auto& x: f) x= T() - x;
+ return f;
+}
+// 源の頂点の集合で包除すると a[S] = sum_{∅≠T⊆S} (-1)^{|T|+1} F(T → S\T) a[S\T]。b[S] = (-1)^{|S|} a[S] は
+// b[S] = -sum_{U⊊S} b[U] F(S\U → U) で、辺を逆向きにしたグラフでの強連結と同じ形の 3^n の和になる。
+template <class T> std::vector<T> acyclic_digraph(int n, const Edges& es, const std::vector<T>& w= {}) {
+ std::vector<T> b= sps_digraph_internal::twisted(n, es, w, true, false, T(1));
+ for(std::size_t s= 0; s < b.size(); ++s)
+  if(__builtin_popcountll(s) & 1) b[s]= T() - b[s];
+ return b;
 }
 template <class T> T all_matching(int n, const Edges& es) {
  auto [cyc, pth]= sps_graph_internal::G(n, es).cyc_pth<T>();

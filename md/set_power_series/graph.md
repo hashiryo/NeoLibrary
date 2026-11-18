@@ -1,5 +1,5 @@
 ---
-title: 無向グラフの頂点の部分集合ごとの数え上げ
+title: グラフの頂点の部分集合ごとの数え上げ
 documentation_of: ../../neo/set_power_series/graph.hpp
 ---
 
@@ -35,3 +35,28 @@ auto x = sps::only_biconnected(c);            // 連結なものの重みから�
 | `only_2edge_connected(f, n, es)`、`bridge_union(f, n, es)` | 連結なものの重みと、二辺連結な塊の重みを互いに変換する |
 
 完全マッチングの数 (辺の重みの積の和) は [hafnian](hafnian.md) を使います。集合冪級数の演算 (log、exp、部分集合畳み込み、逆元、$f^k/k!$ の表) は `sps` の関数を呼ぶので、法が奇数の `ZMod` なら速い核を通ります。
+
+## 有向グラフ
+
+辺を `(a, b)` で a → b と読む有向グラフ (多重辺と自己ループも可) の数え上げもあります。辺ごとの重み `w` (長さ m) を渡すと、条件を満たす辺の部分集合 $E'$ についての $\prod_{e \in E'} w_e$ の和を返します。`w` を省くと数 (重みが全部 1) です。
+
+```cpp
+sps::Edges es = {{0, 1}, {1, 2}, {2, 0}};
+auto f = sps::strongly_connected_digraph<Z>(n, es);  // 頂点の集合ごとの、強連結な辺の部分集合の数
+cout << f.back() << '\n';                            // 主旋律 (UOJ 37)
+std::vector<Z> w = {Z(2), Z(3), Z(5)};
+auto d = sps::acyclic_digraph<Z>(n, es, w);          // DAG になる辺の部分集合の重み
+```
+
+| 関数 | 返すもの |
+| --- | --- |
+| `strongly_connected_digraph<T>(n, es[, w])` | 強連結になる辺の部分集合 ($[\emptyset]$ は 0) |
+| `acyclic_digraph<T>(n, es[, w])` | DAG になる辺の部分集合 ($[\emptyset]$ は 1、自己ループは選べない) |
+
+どちらも $O(3^n)$ です。源になる強連結成分 (入ってくる辺の無い成分) の頂点の集合で包除すると、$g = 1 - \exp(-f)$ は
+
+$$g[S] = X(S) - \sum_{\emptyset \ne T \subsetneq S} g[T]\, X(S \setminus T)\, F(T \to S \setminus T)$$
+
+を満たします。$X(U)$ は $U$ の中の辺の $(1 + w_e)$ の積、$F(T \to U)$ は $T$ から $U$ へ向かう辺の $(1 + w_e)$ の積です。この和で $g$ を求め、強連結は $f = -\log(1 - g)$ で出します。DAG は源の頂点の集合で包除し、$b[S] = (-1)^{|S|} a[S]$ と置くと、辺を逆向きにしたグラフで同じ形の和になります。
+
+法が奇数の `ZMod` で $n \ge 4$ なら、添字の下の 3 bit を AVX2 のレーンに置きます。$T$ と $U$ の上の部分の組ごとに、両側でレーンの向きに作った 8 本の列の内積を取り、組ごとの値 $X(U_h) F(T_h \to U_h)$ を掛けます。組ごとの値は、$S$ の上の部分ごとに $2^{|S_h|}$ 個まとめて作ります。$S$ の上の bit を 1 つずつ決め、両側の表の値を掛ける形で、割り算を使いません。同じ形の書き比べの提出 scc_simd は、luogu-P11714 (主旋律、$n = 15$) で 8.98 ms でした (procon-judge の run 44286626441、x64-gcc)。素直な 3^n の DP (68.58 ms) の 7.6 倍の速さです。
