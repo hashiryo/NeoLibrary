@@ -13,6 +13,7 @@ int add_edge(int from, int to, Cap cap, Cap rev_cap = 0);
 Cap flow(int s, int t);
 Cap flow(int s, int t, Cap limit);
 std::vector<bool> min_cut(int s);
+std::vector<int> cut_kinds(int s, int t);
 struct Edge { int from, to; Cap cap, rev_cap, flow; };
 Edge get_edge(int i);
 std::vector<Edge> edges();
@@ -27,6 +28,8 @@ int size() const;
 `flow(s, t)` は、今の流れから続けて s から t へ流せるだけ流し、増えた量を返します。`flow(s, t, limit)` は、増やす量を limit までにします。何度呼んでもよく、呼ぶたびに終点が違ってもかまいません。flow のあとに辺を足すこともできます。
 
 `min_cut(s)` は、残余グラフで s から届く頂点を true にした列を返します。直前に上限なしの `flow(s, t)` を呼んだあとなら、true の側が s を含む最小カットになります。`get_edge(i)` と `edges()` の `flow` は、from から to へ流れていれば正、to から from へ流れていれば負です。
+
+`cut_kinds(s, t)` は、辺ごとに、s-t の最小カットに入るかを返します。0 はどの最小カットにも入らない、1 はどれかの最小カットに入る (すべてには入らない)、2 はすべての最小カットに入る、です。直前に上限なしの `flow(s, t)` を呼んだあとに使います。辺が最小カット (S, T) に入るとは、容量が正の向きで S から T へ渡ることです。from が S で to が T にあるときと、逆向きの容量が正なら to が S で from が T にあるときです。容量 0 の向きは数えません。最大流のあとの残余グラフの強連結成分で決めるので、手間は O(n + m) です。最小カットの S は、残余の弧で閉じていて s を含み t を含まない頂点集合です。そのため、飽和した向きの弧 u → v は、u と v の成分が違えばどれかの最小カットに入り、u が s の成分、v が t の成分にあればすべての最小カットに入ります。洛谷 P4126 ([AHOI2009] 最小割) はこれで答えられます。
 
 `change_cap(i, cap, s, t)` は、辺 i の容量を cap に変えます (`rev_cap` も変える版もあります)。今の流れは s から t への流れとし、流量が新しい容量に収まらない分は、まず辺の両端の間で迂回させ、迂回できない分は流れを戻して直します。返すのは、s から t への流量が減った分です。容量を下げたあとの流れは、変更後のグラフの最大流になっています。容量を上げても流量は増えないので、続けて `flow(s, t)` を呼びます。
 

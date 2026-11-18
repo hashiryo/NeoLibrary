@@ -14,7 +14,8 @@
 #endif
 // 最大流。ACL の mf_graph と同じく、add_edge で辺を足して番号を受け取り、flow(s, t) か flow(s, t, limit) で流し、
 // min_cut(s)、get_edge(i)、edges() で解を取り出す。ACL に無いものとして、逆向きの容量 (無向辺)、流れを保ったまま
-// 容量を変える change_cap、流れを道に分ける decompose がある。
+// 容量を変える change_cap、流れを道に分ける decompose、辺がどれかの最小カットかすべての最小カットに入るかを返す
+// cut_kinds がある。
 // 最初の flow は push-relabel (highest label、同じ高さの中は FIFO、gap、global relabel) で流す。t に届かない余りが
 // 高い頂点を行き来して進まなくなったら (人が椅子より多い累積の鎖など)、余りのある頂点から t への増加路で流す形に移る
 // (discharge_all の説明)。前流の段 (t へ流し、届かなかった余りは途中に残す) だけで値を返し、余りを s へ戻す段は、
@@ -110,6 +111,56 @@ public:
    for(int k= st_[q[i]]; k < st_[q[i] + 1]; ++k)
     if(const A& a= as_[k]; a.cap > 0 && !vis[a.to]) vis[a.to]= true, q.push_back(a.to);
   return vis;
+ }
+ // 辺ごとに、s-t の最小カットに入るかを返す。0 はどの最小カットにも入らない、1 はどれかの最小カットに入る (すべてには
+ // 入らない)、2 はすべての最小カットに入る。直前に上限なしの flow(s, t) を呼んだあとに使う。辺が最小カット (S, T) に入る
+ // とは、容量が正の向きで S から T へ渡ること (from が S で to が T。逆向きの容量が正なら、to が S で from が T も含む)。
+ // 容量 0 の向きは数えない。残余グラフの強連結成分で決める。最小カットの S は、残余の弧で閉じていて s を含み t を
+ // 含まない集合で、カットを渡る向きの弧は飽和している。飽和した弧 u → v には正の流れがあり、逆向きの残余の弧で v から
+ // u へ戻れる。そのため u と v の成分が違えば u から v へは届かず、u から t へも、s から v へも届かない (届けば、流れの道を
+ // 逆にたどって同じ成分になる)。s と u から届く頂点を S にすれば、この弧がカットを渡る。さらに u が s の成分、v が t の
+ // 成分にあれば、u はいつも S に、v はいつも T にあるので、すべての最小カットに入る。
+ std::vector<int> cut_kinds(int s, int t) {
+  build(), finish();
+  const int n= n_;
+  // 残余の弧 (残りの容量が正) で強連結成分を求める (Tarjan の方法を再帰せずに回す)。
+  std::vector<int> ord(n, -1), low(n), comp(n, -1), it(n), stk, call;
+  int cnt= 0, nc= 0;
+  for(int r= 0; r < n; ++r) {
+   if(ord[r] >= 0) continue;
+   ord[r]= low[r]= cnt++, it[r]= st_[r], stk.push_back(r), call.push_back(r);
+   while(!call.empty()) {
+    const int v= call.back();
+    if(it[v] < st_[v + 1]) {
+     const A& a= as_[it[v]++];
+     if(a.cap <= 0) continue;
+     if(const int w= a.to; ord[w] < 0) ord[w]= low[w]= cnt++, it[w]= st_[w], stk.push_back(w), call.push_back(w);
+     else if(comp[w] < 0) low[v]= std::min(low[v], ord[w]);
+     continue;
+    }
+    call.pop_back();
+    if(!call.empty()) low[call.back()]= std::min(low[call.back()], low[v]);
+    if(low[v] == ord[v]) {
+     for(int w= -1; w != v; stk.pop_back()) comp[w= stk.back()]= nc;
+     ++nc;
+    }
+   }
+  }
+  const int cs= comp[s], ct= comp[t];
+  std::vector<int> ret(m_, 0);
+  // 飽和した弧 u → v から、辺の分類を決める。
+  auto kind= [&](int u, int v) { return comp[u] == comp[v] ? 0 : comp[u] == cs && comp[v] == ct ? 2 : 1; };
+  for(int i= 0; i < m_; ++i) {
+   if(pos_[i] < 0) continue;  // 自己ループはどのカットにも入らない
+   const A &a= as_[pos_[i]], &b= as_[a.rev];
+   const int u= b.to, v= a.to;
+   const Cap c= cap_of(i), r= a.cap + b.cap - c;  // 容量と逆向きの容量
+   int k= 0;
+   if(a.cap == 0 && c > 0) k= kind(u, v);
+   if(b.cap == 0 && r > 0) k= std::max(k, kind(v, u));
+   ret[i]= k;
+  }
+  return ret;
  }
  Edge get_edge(int i) { return finish(), edge_at(i); }
  std::vector<Edge> edges() {
