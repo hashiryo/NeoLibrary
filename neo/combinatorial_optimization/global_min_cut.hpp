@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -155,17 +156,23 @@ template <class Cap> Cap global_min_cut(int n, const std::vector<std::tuple<int,
   for(auto& [u, v, c]: es) to[pos[u]]= v, wt[pos[u]++]= c, to[pos[v]]= u, wt[pos[v]++]= c;
  };
  for(int v= 0; v < n; ++v) par[v]= v;
- rebuild(), build_adj();
- Cap lam= *std::min_element(deg.begin(), deg.end());
+ // 密かどうかは、隣接の列を組む前に見る。始めから密なら、多重辺もまとめずに行列で解く。
+ auto is_dense= [&](int k) { return k <= 4096 && (long long)es.size() * 20 >= (long long)k * k; };
+ if(is_dense(n)) return global_min_cut_internal::dense<Cap>(n, es, std::numeric_limits<Cap>::max());
+ rebuild();
+ Cap lam= std::numeric_limits<Cap>::max();
  std::vector<std::pair<Cap, int>> heap;
- while(k > 1 && lam > 0) {
-  if(k <= 4096 && (long long)es.size() * 20 >= (long long)k * k) return global_min_cut_internal::dense<Cap>(k, es, lam);
+ for(;;) {
+  if(k <= 1) return lam;
+  if(is_dense(k)) return global_min_cut_internal::dense<Cap>(k, es, lam);
+  build_adj();
+  lam= std::min(lam, *std::min_element(deg.begin(), deg.end()));
+  if(lam == 0) return 0;
   bool any= false;
   for(auto& [u, v, c]: es)
    if(c >= lam || 2 * c > std::min(deg[u], deg[v])) any|= unite(u, v);
   if(any) {
-   rebuild(), build_adj();
-   if(k > 1) lam= std::min(lam, *std::min_element(deg.begin(), deg.end()));
+   rebuild();
    continue;
   }
   r.assign(k, 0), vis.assign(k, 0);
@@ -189,10 +196,8 @@ template <class Cap> Cap global_min_cut(int n, const std::vector<std::tuple<int,
     r[x]+= wt[i], heap.push_back({r[x], x}), std::push_heap(heap.begin(), heap.end());
    }
   }
-  if(lam == 0) break;
+  if(lam == 0) return 0;
   if(!any) unite(last, prev);
-  rebuild(), build_adj();
-  if(k > 1) lam= std::min(lam, *std::min_element(deg.begin(), deg.end()));
+  rebuild();
  }
- return lam;
 }
