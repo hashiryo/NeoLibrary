@@ -54,6 +54,16 @@ template <class M> class FoldableQueue {
  }
 public:
  FoldableQueue()= default;
+ // 列が n 個までなら配列を伸ばさないよう、先に 2n 個ぶん取る。末尾に空きが無くなったとき、生きている要素が半分以下なら先頭へ
+ // 詰めるので、2n 個あれば伸ばさずに済む。
+ void reserve(int n) {
+  const int c= 2 * std::max(n, tl - hd);
+  if(int(a.size()) >= c) return;
+  std::vector<T, foldable_queue_internal::Alloc<T>> b(c);
+  std::move(a.begin() + hd, a.begin() + tl, b.begin());
+  a.swap(b);
+  md-= hd, tl-= hd, hd= 0;
+ }
  int size() const { return tl - hd; }
  bool empty() const { return hd == tl; }
  void clear() { hd= md= tl= 0, ba= M::ti(); }

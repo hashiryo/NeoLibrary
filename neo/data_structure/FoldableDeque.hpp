@@ -70,6 +70,17 @@ template <class M> class FoldableDeque {
  }
 public:
  FoldableDeque()= default;
+ // 列が n 個までなら、どちらの端に足しても配列を伸ばさないよう、先に 2n 個ぶん取って列を真ん中に置く。伸ばすたびに倍の配列を
+ // 初めて触って要素を写す分を、先に済ませる (Intel では、列が大きく伸びると swag の 1.2 倍かかっていたのが、これで下回った)。
+ void reserve(int n) {
+  const int k= tl - hd, c= 2 * std::max(n, k) + 16;
+  if(int(a.size()) >= c) return;
+  std::vector<Node, foldable_deque_internal::Alloc<Node>> b(c);
+  const int nh= (c - k) / 2;
+  std::move(a.begin() + hd, a.begin() + tl, b.begin() + nh);
+  a.swap(b);
+  md+= nh - hd, tl+= nh - hd, hd= nh;
+ }
  int size() const { return tl - hd; }
  bool empty() const { return hd == tl; }
  void clear() { hd= md= tl= int(a.size()) / 2; }

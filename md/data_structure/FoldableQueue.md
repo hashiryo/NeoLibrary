@@ -8,6 +8,7 @@ documentation_of: ../../neo/data_structure/FoldableQueue.hpp
 ```cpp
 template <class M> class FoldableQueue;
 FoldableQueue();
+void reserve(int n);    // 列が n 個までなら配列を伸ばさないよう、先に取る (中は 2n 個ぶん)
 int size() const;
 bool empty() const;
 void push(const T& x);  // 末尾に足す
@@ -16,7 +17,7 @@ T all_prod() const;     // op(先頭, ..., 末尾)。空なら ti()
 void clear();
 ```
 
-1 回の `push` と `all_prod` は $O(1)$ で、`pop` もならして $O(1)$ です。両端に足したり消したりするなら [FoldableDeque](FoldableDeque.md) を使います。
+1 回の `push` と `all_prod` は $O(1)$ で、`pop` もならして $O(1)$ です。列の長さの上限が分かっているなら、先に `reserve` を呼ぶと、列が伸びるたびに配列を取り直す分を省けます。両端に足したり消したりするなら [FoldableDeque](FoldableDeque.md) を使います。
 
 ## 中身
 
