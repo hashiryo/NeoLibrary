@@ -24,14 +24,19 @@
 // 積も持つ (M に using commute = void を書くと省く)。永続にはできない (永続は WeightBalancedTree)。
 // - 同じ型の木は節と塊の置き場を共有するので、別の木どうしで切り貼りできる。木の値を写すと同じ木を指すだけなので、切ったり
 //   つなげたりしたあとは元の値を使わない。
-// - 併合で境目の塊のどちらかが CAP / 4 より短ければ、2 つを 1 つにまとめる (各節に部分木の左端と右端の塊の長さを持つ)。満杯の塊
-//   への挿入は塊を半分ずつに割り、空になった節は外す。
+// - 塊の長さは、列の両端を除いて MIN 以上に保つ。併合では、境目の短い塊を MIN 以上になるまで続けてまとめ、1 つに収まらなければ
+//   2 つの塊で半分ずつに分け直す (各節に部分木の左端と右端の塊の長さを持つ)。満杯の塊への挿入は塊を半分ずつに割り、空になった
+//   節は外す。
 // - 区間の和と作用は形を変えずに根から下り、端の塊だけを触る。塊の遅延 (自分の塊へ当てる作用と反転の印) は子へ配る遅延と別に
-//   持ち、塊の反転の印は添字の読み替えで済ませる。区間の反転は、両端の塊のうち区間の外にある部分を逆順にして互いの塊へ移して
-//   から、塊の境目で割って印を付ける (塊を割らない、Library Checker の nandhagk の 402977 の方法)。
-// - monoid::AffineSum<ZMod<P>> (法が定数) では、塊の大きさを 256 にし、塊の中の和、作用、遅延の当て直しを AVX2 で 8 個ずつ行う
-//   (値は 2P 未満のそのままの値、掛け算は Shoup の方法)。塊の一部への作用は残っている塊の遅延と合わせて 1 回の走査で書き、
-//   部分の和は短い側を足して求める。
+//   持ち、塊の反転の印は添字の読み替えで済ませる。
+// - 区間の反転は、両端の塊のうち区間の外にある部分を逆順にして互いの塊へ移してから、塊の境目で割って印を付ける。移したあとの塊が
+//   CAP を超えるときだけ区間の端で塊を割り、MIN より短くなった塊はつなぎ直すときに隣の塊とまとめる。移す 2 つの塊は、反転の印を
+//   残したまま外の部分だけを書き換える (Library Checker の nandhagk の 402977 の方法)。
+// - monoid::AffineSum<ZMod<P>> (法が定数) では、塊の大きさを 512 (MIN は 64、作るときは 128 ずつ) にし、塊の中の和、作用、遅延の
+//   当て直しを AVX2 で 8 個ずつ行う (値は 2P 未満のそのままの値、掛け算は Shoup の方法)。塊の一部への作用は残っている塊の遅延と
+//   合わせて 1 回の走査で書き、部分の和は短い側を足して求める。作用は恒等写像で初めて、印で分けずに合成する。ほかの型では、MIN
+//   は CAP / 4、作るときは CAP * 3 / 4 ずつ。
+// - 節は、塊の長さを 16 bit、印を 1 byte にし、使わない欄を消して小さくする (AffineSum<ZMod<P>> で 48 byte)。
 // procon-judge の dynamic-sequence-range-affine-range-sum などで書き比べた (記録は algo-notes の notes/sequence-tree.md)。
 namespace sequence_internal {
 template <class M, class= void> struct monoid: std::false_type {};
@@ -52,6 +57,8 @@ template <class M, class= void> struct action_of {
 template <class M> struct action_of<M, std::void_t<typename M::E>> {
  using type= typename M::E;
 };
+// 節の使わない欄の型 ([[no_unique_address]] で場所を取らない)。欄ごとに別の型にする (同じ型の空の欄は同じ番地に置けない)。
+template <int> struct Nil {};
 // 1 MB 以上の確保は 2 MB 境界に寄せ、Linux では huge page を頼む。小さい確保も 64 byte 境界にする (塊を AVX2 で読むため)。
 template <class T> struct Alloc {
  using value_type= T;
@@ -184,25 +191,39 @@ template <class M, bool REV= false, int B= 0> class Sequence {
  static constexpr bool MO= sequence_internal::monoid<M>::value, AC= sequence_internal::action<M>::value;
  static constexpr bool FA= sequence_internal::fast_affine<M>::value;  // 塊の中を AVX2 の核で回す
  using K= typename sequence_internal::kern_of<M>::type;
- static constexpr bool RS= MO && REV && !(sequence_internal::commute<M>::value || FA);  // 逆順の積も持つ
- static constexpr int CAP= B ? B : FA ? 256 : std::clamp<int>(int(512 / sizeof(T)) / 16 * 16, 16, 128), MIN= CAP / 4;
+ static constexpr bool CM= FA || sequence_internal::commute<M>::value;  // 塊の積に値を順を問わずに足せる
+ static constexpr bool RS= MO && REV && !CM;  // 逆順の積も持つ
+ // MIN は塊の長さの下限 (列の両端を除く)、FILL は作るときの塊の長さ。
+ static constexpr int CAP= B ? B : FA ? 512 : std::clamp<int>(int(512 / sizeof(T)) / 16 * 16, 16, 128), MIN= FA ? CAP / 8 : CAP / 4,
+                      FILL= FA ? CAP / 4 : std::max(1, CAP * 3 / 4);
  static_assert(!FA || CAP % 8 == 0, "AVX2 の核は塊の大きさが 8 の倍数であること");
- using S= std::conditional_t<MO, T, char>;
- using SR= std::conditional_t<RS, T, char>;
- using EA= std::conditional_t<AC, E, char>;
+ static_assert(0 < CAP && CAP < 65536, "塊の長さは 16 bit に収める");
+ template <int I> using Nil= sequence_internal::Nil<I>;
+ using S= std::conditional_t<MO, T, Nil<0>>;
+ using CF= std::conditional_t<MO, T, Nil<1>>;
+ using SR= std::conditional_t<RS, T, Nil<2>>;
+ using CB= std::conditional_t<RS, T, Nil<3>>;
+ using EA= std::conditional_t<AC, E, Nil<4>>;
+ using CE= std::conditional_t<AC, E, Nil<5>>;
+ enum : unsigned char { RV= 1, LZ= 2, CRV= 4, CLZ= 8 };  // RV と LZ は子へ配る分、CRV と CLZ は自分の塊の分
  struct Node {
-  int l, r, cnt, len, fr, bk;  // fr と bk は部分木の左端と右端の塊の長さ
+  int l, r, cnt;
   unsigned pri;
-  bool rev, lz, crev, clz;  // rev と lz は子へ配る分、crev と clz は自分の塊の分
-  S sum, cf;  // sum は部分木の積、cf は塊を配列の順に畳んだ積 (どちらも作用を当てたあとの値)
-  SR rsum, cb;  // rsum は部分木の逆順の積、cb は塊を配列の逆順に畳んだ積
-  EA e, ce;  // e は子へ配る作用、ce は自分の塊へ当てる作用
+  unsigned short len, fr, bk;  // fr と bk は部分木の左端と右端の塊の長さ
+  unsigned char fl;
+  [[no_unique_address]] S sum;  // 部分木の積 (作用を当てたあとの値)
+  [[no_unique_address]] CF cf;  // 塊を配列の順に畳んだ積 (作用を当てたあとの値)
+  [[no_unique_address]] SR rsum;  // 部分木の逆順の積
+  [[no_unique_address]] CB cb;  // 塊を配列の逆順に畳んだ積
+  [[no_unique_address]] EA e;  // 子へ配る作用
+  [[no_unique_address]] CE ce;  // 自分の塊へ当てる作用
  };
  static Node blank(unsigned pri) {
   Node n{};
   n.pri= pri;
   if constexpr(MO) n.sum= n.cf= M::ti();
   if constexpr(RS) n.rsum= n.cb= M::ti();
+  if constexpr(FA) n.e= n.ce= E{T(1), T(0)};  // FA の道は作用を恒等写像で初めて、印で分けずに合成する
   return n;
  }
  template <class U> using Vec= std::vector<U, sequence_internal::Alloc<U>>;
@@ -249,13 +270,32 @@ template <class M, bool REV= false, int B= 0> class Sequence {
    for(int i= lo; i < hi; ++i) s= M::op(s, a[i]);
   return s;
  }
+ // FA の道で、塊の作用を当て終えた節 x の配列の [0, k)、[k, len)、[lo, hi) の和。短い側を足し、長い側は塊の和から引く。
+ static T fa_prefix(int x, int k) {
+  const auto* a= raw(arr(x));
+  const int len= nd[x].len;
+  if(2 * k <= len) return T::raw(K::sum_range(a, 0, k));
+  return nd[x].cf - T::raw(K::sum_range(a, k, len));
+ }
+ static T fa_suffix(int x, int k) {
+  const auto* a= raw(arr(x));
+  const int len= nd[x].len;
+  if(2 * k >= len) return T::raw(K::sum_range(a, k, len));
+  return nd[x].cf - T::raw(K::sum_range(a, 0, k));
+ }
+ static T fa_range(int x, int lo, int hi) {
+  const auto* a= raw(arr(x));
+  const int len= nd[x].len;
+  if(2 * (hi - lo) <= len) return T::raw(K::sum_range(a, lo, hi));
+  return nd[x].cf - (T::raw(K::sum_range(a, 0, lo)) + T::raw(K::sum_range(a, hi, len)));
+ }
  // 塊の列の順の積と、その逆順の積。
- static const S& lsum(const Node& n) {
-  if constexpr(RS) return n.crev ? n.cb : n.cf;
+ static const T& lsum(const Node& n) {
+  if constexpr(RS) return n.fl & CRV ? n.cb : n.cf;
   else return n.cf;
  }
- static const SR& lrsum(const Node& n) {
-  if constexpr(RS) return n.crev ? n.cf : n.cb;
+ static const T& lrsum(const Node& n) {
+  if constexpr(RS) return n.fl & CRV ? n.cf : n.cb;
   else return n.cb;
  }
  // 塊の積を求め直す。塊の遅延が残っていれば、畳んだ積に当てる。
@@ -266,7 +306,7 @@ template <class M, bool REV= false, int B= 0> class Sequence {
    n.cf= fold(a, 0, n.len, false);
    if constexpr(RS) n.cb= fold(a, 0, n.len, true);
    if constexpr(AC)
-    if(n.clz) {
+    if(n.fl & CLZ) {
      map1(n.cf, n.ce, n.len);
      if constexpr(RS) map1(n.cb, n.ce, n.len);
     }
@@ -286,43 +326,48 @@ template <class M, bool REV= false, int B= 0> class Sequence {
    map1(n.sum, e, n.cnt), map1(n.cf, e, n.len);
    if constexpr(RS) map1(n.rsum, e, n.cnt), map1(n.cb, e, n.len);
   }
-  if(n.lz) M::cp(n.e, e);
-  else n.e= e, n.lz= true;
-  if(n.clz) M::cp(n.ce, e);
-  else n.ce= e, n.clz= true;
+  if constexpr(FA) M::cp(n.e, e), M::cp(n.ce, e);
+  else {
+   if(n.fl & LZ) M::cp(n.e, e);
+   else n.e= e;
+   if(n.fl & CLZ) M::cp(n.ce, e);
+   else n.ce= e;
+  }
+  n.fl|= LZ | CLZ;
  }
  static void tog(int x) {
   Node& n= nd[x];
   std::swap(n.l, n.r), std::swap(n.fr, n.bk);
   if constexpr(RS) std::swap(n.sum, n.rsum);
-  n.rev^= 1, n.crev^= 1;
+  n.fl^= RV | CRV;
  }
  static void push(int x) {
   Node& n= nd[x];
   if constexpr(REV)
-   if(n.rev) {
+   if(n.fl & RV) {
     if(n.l) tog(n.l);
     if(n.r) tog(n.r);
-    n.rev= false;
+    n.fl&= ~RV;
    }
   if constexpr(AC)
-   if(n.lz) {
+   if(n.fl & LZ) {
     const E e= n.e;
     if(n.l) aff(n.l, e);
-    if(nd[x].r) aff(nd[x].r, e);
-    nd[x].lz= false;
+    if(n.r) aff(n.r, e);
+    n.fl&= ~LZ;
+    if constexpr(FA) n.e= E{T(1), T(0)};
    }
  }
  // 塊の遅延の作用を配列に当てる (反転の印は残す)。
  static void materialize(int x) {
   if constexpr(AC) {
    Node& n= nd[x];
-   if(!n.clz) return;
+   if(!(n.fl & CLZ)) return;
    T* a= arr(x);
-   if constexpr(FA) K::transform_all(raw(a), n.len, K::act(n.ce));
+   if constexpr(FA) K::transform_all(raw(a), n.len, K::act(n.ce)), n.ce= E{T(1), T(0)};
    else
     for(int i= 0; i < n.len; ++i) map1(a[i], n.ce, 1);
-   n.clz= false;
+   n.fl&= ~CLZ;
   }
  }
  // 作用を当てて、配列を列の順に並べる。
@@ -330,45 +375,46 @@ template <class M, bool REV= false, int B= 0> class Sequence {
   materialize(x);
   if constexpr(REV) {
    Node& n= nd[x];
-   if(n.crev) {
-    std::reverse(arr(x), arr(x) + n.len), n.crev= false;
+   if(n.fl & CRV) {
+    std::reverse(arr(x), arr(x) + n.len), n.fl&= ~CRV;
     if constexpr(RS) std::swap(n.cf, n.cb);
    }
   }
  }
- static int phys(const Node& n, int o) { return REV && n.crev ? n.len - 1 - o : o; }
+ static int phys(const Node& n, int o) { return REV && (n.fl & CRV) ? n.len - 1 - o : o; }
  // 塊の中の列の順の [cl, cr) の積。
  static T part_sum(int x, int cl, int cr) {
   const Node& n= nd[x];
-  const bool rv= REV && n.crev;
+  const bool rv= REV && (n.fl & CRV);
   const int pl= rv ? n.len - cr : cl, pr= rv ? n.len - cl : cr;
   if constexpr(FA) {
    // 部分が塊の半分より長ければ、残りの部分の和を塊の和から引く (和は引ける)。
    const int w= pr - pl;
    const auto* a= raw(arr(x));
+   const bool lz= n.fl & CLZ;
    if(2 * w <= n.len) {
     const T s= T::raw(K::sum_range(a, pl, pr));
-    return n.clz ? n.ce[0] * s + n.ce[1] * T(w) : s;
+    return lz ? n.ce[0] * s + n.ce[1] * T(w) : s;
    }
    const T s= T::raw(K::sum_range(a, 0, pl)) + T::raw(K::sum_range(a, pr, n.len));
-   return n.cf - (n.clz ? n.ce[0] * s + n.ce[1] * T(n.len - w) : s);
+   return n.cf - (lz ? n.ce[0] * s + n.ce[1] * T(n.len - w) : s);
   }
   T s= fold(arr(x), pl, pr, rv);
   if constexpr(AC)
-   if(n.clz) map1(s, n.ce, cr - cl);
+   if(n.fl & CLZ) map1(s, n.ce, cr - cl);
   return s;
  }
  // 塊の中の列の順の [cl, cr) (塊の全体ではない) に e を当てる。
  static void part_apply(int x, int cl, int cr, const E& e) {
   if constexpr(FA) {
    Node& n= nd[x];
-   const bool rv= REV && n.crev;
+   const bool rv= REV && (n.fl & CRV);
    const int len= n.len, pl= rv ? len - cr : cl, pr= rv ? len - cl : cr;
    auto* a= raw(arr(x));
-   if(n.clz) {  // 残っている塊の遅延と合わせて 1 回で書く (区間の内は遅延のあとに e、外は遅延だけ)
+   if(n.fl & CLZ) {  // 残っている塊の遅延と合わせて 1 回で書く (区間の内は遅延のあとに e、外は遅延だけ)
     const E in{e[0] * n.ce[0], e[0] * n.ce[1] + e[1]};
     n.cf= T::raw(K::transform2(a, len, pl, pr, K::act(in), K::act(n.ce)));
-    n.clz= false;
+    n.fl&= ~CLZ, n.ce= E{T(1), T(0)};
    } else {
     const T old= T::raw(K::transform_range(a, pl, pr, K::act(e)));
     n.cf+= (e[0] - T(1)) * old + e[1] * T(pr - pl);
@@ -377,7 +423,7 @@ template <class M, bool REV= false, int B= 0> class Sequence {
   }
   materialize(x);
   const Node& n= nd[x];
-  const bool rv= REV && n.crev;
+  const bool rv= REV && (n.fl & CRV);
   const int pl= rv ? n.len - cr : cl, pr= rv ? n.len - cl : cr;
   T* a= arr(x);
   for(int i= pl; i < pr; ++i) map1(a[i], e, 1);
@@ -401,8 +447,13 @@ template <class M, bool REV= false, int B= 0> class Sequence {
    forward(x);
    const int y= make(rnd());
    std::copy(arr(x) + o, arr(x) + len, arr(y));
+   if constexpr(FA) {
+    const T s= fa_prefix(x, o);
+    nd[y].cf= nd[x].cf - s, nd[x].cf= s;
+   }
    nd[y].len= len - o, nd[x].len= o;
-   recalc(x), recalc(y), pull(y);
+   if constexpr(!FA) recalc(x), recalc(y);
+   pull(y);
    const int r= nd[x].r;
    nd[x].r= 0, pull(x);
    a= x, b= merge_(y, r);
@@ -437,7 +488,7 @@ template <class M, bool REV= false, int B= 0> class Sequence {
   forward(x);
   return x;
  }
- // a の末尾の塊に、節 f の塊 (列の順に並べてある) を足して、f を返す。
+ // a の末尾の塊に、節 f の塊 (列の順に並べてある) を足して、f を外す。塊の積は 2 つの塊の積から求める。
  static void absorb_last(int a, int f) {
   path.clear();
   int x= a;
@@ -449,17 +500,57 @@ template <class M, bool REV= false, int B= 0> class Sequence {
   forward(x);
   std::copy(arr(f), arr(f) + nd[f].len, arr(x) + nd[x].len);
   nd[x].len+= nd[f].len;
-  recalc(x);
+  if constexpr(MO) nd[x].cf= M::op(nd[x].cf, nd[f].cf);
+  if constexpr(RS) nd[x].cb= M::op(nd[f].cb, nd[x].cb);
   for(int k= (int)path.size(); k--;) pull(path[k]);
   release(f);
  }
- // 併合。境目の塊のどちらかが短く、2 つが 1 つの塊に収まれば、まとめてからつなぐ。
+ // a の末尾の塊と b の先頭の塊を、長さが半分ずつになるように移し合う (どちらかが MIN より短く、1 つに収まらないとき)。
+ static void rebalance(int a, int b) {
+  path.clear(), path2.clear();
+  int x= a, y= b;
+  for(;;) {
+   push(x), path.push_back(x);
+   if(!nd[x].r) break;
+   x= nd[x].r;
+  }
+  for(;;) {
+   push(y), path2.push_back(y);
+   if(!nd[y].l) break;
+   y= nd[y].l;
+  }
+  forward(x), forward(y);
+  const int nx= nd[x].len, ny= nd[y].len, tg= (nx + ny) / 2;
+  T *X= arr(x), *Y= arr(y);
+  if(nx < tg) {  // y の先頭の m 個を x の末尾へ
+   const int m= tg - nx;
+   if constexpr(FA) {
+    const T s= fa_prefix(y, m);
+    nd[x].cf+= s, nd[y].cf-= s;
+   }
+   std::copy(Y, Y + m, X + nx), std::move(Y + m, Y + ny, Y);
+  } else {  // x の末尾の m 個を y の先頭へ
+   const int m= nx - tg;
+   if constexpr(FA) {
+    const T s= fa_suffix(x, tg);
+    nd[x].cf-= s, nd[y].cf+= s;
+   }
+   std::move_backward(Y, Y + ny, Y + ny + m), std::copy(X + tg, X + nx, Y);
+  }
+  nd[x].len= tg, nd[y].len= nx + ny - tg;
+  if constexpr(!FA) recalc(x), recalc(y);
+  pull_path(path), pull_path(path2);
+ }
+ // 併合。境目の塊のどちらかが MIN より短いあいだ、1 つの塊に収まればまとめ、収まらなければ半分ずつに分け直してからつなぐ。
  static int merge(int a, int b) {
-  if(!a || !b) return a | b;
-  if((nd[a].bk < MIN || nd[b].fr < MIN) && nd[a].bk + nd[b].fr <= CAP) {
-   const int f= take_first(b);
-   absorb_last(a, f);
-   if(!b) return a;
+  while(a && b && (nd[a].bk < MIN || nd[b].fr < MIN)) {
+   if(nd[a].bk + nd[b].fr <= CAP) {
+    const int f= take_first(b);
+    absorb_last(a, f);
+   } else {
+    rebalance(a, b);
+    break;
+   }
   }
   return merge_(a, b);
  }
@@ -489,8 +580,10 @@ template <class M, bool REV= false, int B= 0> class Sequence {
      map1(n.cf, e, len);
      if constexpr(RS) map1(n.cb, e, len);
     }
-    if(n.clz) M::cp(n.ce, e);
-    else n.ce= e, n.clz= true;
+    if constexpr(FA) M::cp(n.ce, e);
+    else if(n.fl & CLZ) M::cp(n.ce, e);
+    else n.ce= e;
+    n.fl|= CLZ;
    } else part_apply(x, cl, cr, e);
   }
   if(r > ls + len) apply(nd[x].r, std::max(l - ls - len, 0), r - ls - len, e);
@@ -519,12 +612,12 @@ template <class M, bool REV= false, int B= 0> class Sequence {
   materialize(x);
   Node& n= nd[x];
   T* a= arr(x);
-  const int p= REV && n.crev ? n.len - o : o;
+  const int p= REV && (n.fl & CRV) ? n.len - o : o;
   std::move_backward(a + p, a + n.len, a + n.len + 1);
   a[p]= v, ++n.len;
   if constexpr(MO) {
-   if constexpr(RS) recalc(x);
-   else n.cf= M::op(n.cf, v);  // 可換なので順は問わない
+   if constexpr(CM) n.cf= M::op(n.cf, v);  // 可換なので順は問わない
+   else recalc(x);
   }
  }
  static void collect(int x, std::vector<T>& out) {
@@ -536,7 +629,7 @@ template <class M, bool REV= false, int B= 0> class Sequence {
  }
  template <class F> static int build(const F& at, int n, int lo, int hi, int depth) {  // 塊の番号の [lo, hi)
   if(lo >= hi) return 0;
-  constexpr int H= CAP * 3 / 4;
+  constexpr int H= FILL;
   const int m= (lo + hi) / 2;
   const int x= make(~0u - (unsigned(depth) << 24) - (rnd() & 0xffffffu));  // 浅いほど優先度が高い
   const int s= m * H, e= std::min(s + H, n);
@@ -548,7 +641,7 @@ template <class M, bool REV= false, int B= 0> class Sequence {
   return x;
  }
  template <class F> static int build(const F& at, int n) {
-  constexpr int H= CAP * 3 / 4;
+  constexpr int H= FILL;
   return build(at, n, 0, (n + H - 1) / H, 0);
  }
  int root= 0;
@@ -599,8 +692,12 @@ public:
   constexpr int H= CAP / 2;
   const int y= make(rnd());
   std::copy(arr(x) + H, arr(x) + CAP, arr(y));
+  if constexpr(FA) {
+   const T s= fa_suffix(x, H);
+   nd[y].cf= s, nd[x].cf-= s;
+  }
   nd[y].len= CAP - H, nd[x].len= H;
-  recalc(x), recalc(y);
+  if constexpr(!FA) recalc(x), recalc(y);
   if(o <= H) put(x, o, v);
   else put(y, o - H, v);
   pull(y), pull_path(path2);
@@ -618,7 +715,7 @@ public:
   const int p= phys(n, o);
   T v= a[p];
   if constexpr(AC)
-   if(n.clz) map1(v, n.ce, 1);
+   if(n.fl & CLZ) map1(v, n.ce, 1);
   std::move(a + p + 1, a + n.len, a + p);
   --n.len;
   if(!n.len) {  // 空になった節を外す (x の遅延は descend で配ってある)
@@ -630,7 +727,8 @@ public:
     (nd[par].l == x ? nd[par].l : nd[par].r)= m;
    }
    release(x);
-  } else recalc(x);
+  } else if constexpr(FA) n.cf-= v;
+  else recalc(x);
   pull_path(path2);
   return v;
  }
@@ -641,7 +739,7 @@ public:
   const int x= descend(root, k, false, path2, o);
   T v= arr(x)[phys(nd[x], o)];
   if constexpr(AC)
-   if(nd[x].clz) map1(v, nd[x].ce, 1);
+   if(nd[x].fl & CLZ) map1(v, nd[x].ce, 1);
   return v;
  }
  T operator[](int k) { return get(k); }
@@ -649,13 +747,21 @@ public:
   int o;
   const int x= descend(root, k, false, path2, o);
   materialize(x);
-  arr(x)[phys(nd[x], o)]= v;
-  recalc(x);
+  T& w= arr(x)[phys(nd[x], o)];
+  if constexpr(FA) nd[x].cf+= v - w, w= v;
+  else w= v, recalc(x);
   pull_path(path2);
  }
  void mul(int k, const T& v) {
   static_assert(MO, "mul はモノイドがあるときだけ");
-  set(k, M::op(get(k), v));
+  int o;
+  const int x= descend(root, k, false, path2, o);
+  materialize(x);
+  T& w= arr(x)[phys(nd[x], o)];
+  w= M::op(w, v);
+  if constexpr(CM) nd[x].cf= M::op(nd[x].cf, v);
+  else recalc(x);
+  pull_path(path2);
  }
  T prod(int l, int r) {
   static_assert(MO, "prod はモノイドがあるときだけ");
@@ -682,13 +788,14 @@ public:
   const int j= jj + 1;
   if(u == v) {  // 塊の中だけの反転
    const Node& n= nd[u];
-   const int pl= n.crev ? n.len - j : i, pr= n.crev ? n.len - i : j;
+   const bool rv= n.fl & CRV;
+   const int pl= rv ? n.len - j : i, pr= rv ? n.len - i : j;
    std::reverse(arr(u) + pl, arr(u) + pr);
    if constexpr(RS) recalc(u), pull_path(path);
    return;
   }
-  const int nu= nd[u].len, nv= nd[v].len, tail= nv - j;
-  if(tail + nu - i > CAP || j + i > CAP) {
+  const int nu= nd[u].len, nv= nd[v].len, tail= nv - j, newu= tail + nu - i, newv= j + i;
+  if(newu > CAP || newv > CAP) {  // 入れ替えると塊に収まらないので、区間の端で塊を割る
    int a, b, c;
    split(root, l, a, b);
    split(b, r - l, b, c);
@@ -698,23 +805,44 @@ public:
   }
   if(i || tail) {
    // u の [0, i) と v の [j, nv) を逆順にして入れ替える: u = rev(v[j, nv)) + u[i, nu)、v = v[0, j) + rev(u[0, i))。
-   forward(u), forward(v);
+   // 塊の反転の印は残したまま、外の部分だけを書き換える (印の付いた塊の配列は列の逆順)。
+   materialize(u), materialize(v);
+   const bool ru= nd[u].fl & CRV, rv= nd[v].fl & CRV;
    T *U= arr(u), *V= arr(v);
-   tu.assign(U, U + i), tv.assign(V + j, V + nv);
-   if(tail > i) std::move_backward(U + i, U + nu, U + tail + nu - i);
-   else std::move(U + i, U + nu, U + tail);
-   for(int k= 0; k < tail; ++k) U[k]= tv[tail - 1 - k];
-   for(int k= 0; k < i; ++k) V[j + k]= tu[i - 1 - k];
-   nd[u].len= tail + nu - i, nd[v].len= j + i;
-   recalc(u), recalc(v);
+   const int up= ru ? nu - i : 0, vp= rv ? 0 : j;  // 外の部分の配列の上の位置
+   if constexpr(FA) {
+    const T su= fa_range(u, up, up + i), sv= fa_range(v, vp, vp + tail);
+    nd[u].cf+= sv - su, nd[v].cf+= su - sv;
+   }
+   tu.assign(U + up, U + up + i), tv.assign(V + vp, V + vp + tail);
+   if(ru) {  // u の配列は rev(u[i, nu)) + v[j, nv)
+    if(rv) std::reverse_copy(tv.begin(), tv.end(), U + nu - i);
+    else std::copy(tv.begin(), tv.end(), U + nu - i);
+   } else {  // u の配列は rev(v[j, nv)) + u[i, nu)
+    if(tail > i) std::move_backward(U + i, U + nu, U + newu);
+    else std::move(U + i, U + nu, U + tail);
+    if(rv) std::copy(tv.begin(), tv.end(), U);
+    else std::reverse_copy(tv.begin(), tv.end(), U);
+   }
+   if(rv) {  // v の配列は u[0, i) + rev(v[0, j))
+    if(i > tail) std::move_backward(V + tail, V + nv, V + newv);
+    else std::move(V + tail, V + nv, V + i);
+    if(ru) std::reverse_copy(tu.begin(), tu.end(), V);
+    else std::copy(tu.begin(), tu.end(), V);
+   } else {  // v の配列は v[0, j) + rev(u[0, i))
+    if(ru) std::copy(tu.begin(), tu.end(), V + j);
+    else std::reverse_copy(tu.begin(), tu.end(), V + j);
+   }
+   nd[u].len= newu, nd[v].len= newv;
+   if constexpr(!FA) recalc(u), recalc(v);
    pull_path(path2), pull_path(path);
   }
-  // 塊の境目 (u の先頭と v の末尾) で割って、間の木に反転の印を付ける。
+  // 塊の境目 (u の先頭と v の末尾) で割って、間の木に反転の印を付ける。MIN より短くなった塊は、つなぎ直すときに隣とまとめる。
   int a, b, c;
   split(root, l - i, a, b);
   split(b, r + tail - (l - i), b, c);
   tog(b);
-  root= merge_(merge_(a, b), c);
+  root= merge(merge(a, b), c);
  }
  std::vector<T> dump() {
   std::vector<T> out;
