@@ -228,7 +228,10 @@ template <class M, bool REV= false, int B= 0> class Sequence {
  }
  template <class U> using Vec= std::vector<U, sequence_internal::Alloc<U>>;
  static inline Vec<Node> nd= Vec<Node>(1, blank(0));  // 0 は空の木
- static inline Vec<T> dat;  // 節 x の塊は dat[x CAP, x CAP + len)
+ // 塊の配列の間隔は、CAP より 1 キャッシュ行 (64 byte) 長くする。CAP のままだと (FA の道は 2 KB)、どの塊の先頭も番地の下位の bit
+ // がそろい、短い塊はキャッシュの一部の組にしか入らない (procon-judge の dynamic-sequence の和だけのケースで 5% 遅かった)。
+ static constexpr std::size_t STRIDE= CAP + std::max<std::size_t>(1, 64 / sizeof(T));
+ static inline Vec<T> dat;  // 節 x の塊は dat[x STRIDE, x STRIDE + len)
  static inline std::vector<int> freed;
  // 乱数の種は起動の時刻から取る (決め打ちの種は、公開したライブラリでは hack で狙える)。
  static unsigned seed() {
@@ -240,7 +243,7 @@ template <class M, bool REV= false, int B= 0> class Sequence {
  static inline std::vector<int> path, path2;
  static inline std::vector<T> tu, tv;  // 反転で入れ替える塊の外の部分
  static unsigned rnd() { return rs^= rs << 13, rs^= rs >> 17, rs^= rs << 5; }
- static T* arr(int x) { return dat.data() + std::size_t(x) * CAP; }
+ static T* arr(int x) { return dat.data() + std::size_t(x) * STRIDE; }
  // ZMod は u32 を 1 つ持つ標準レイアウトの型なので、塊を u32 の列として読み書きする。
  static sequence_internal::u32* raw(T* a) { return reinterpret_cast<sequence_internal::u32*>(a); }
  static const sequence_internal::u32* raw(const T* a) { return reinterpret_cast<const sequence_internal::u32*>(a); }
@@ -252,7 +255,7 @@ template <class M, bool REV= false, int B= 0> class Sequence {
    return x;
   }
   nd.push_back(blank(pri));
-  if(dat.size() < nd.size() * CAP) dat.resize(std::max(nd.size() * CAP, dat.size() * 2));
+  if(dat.size() < nd.size() * STRIDE) dat.resize(std::max(nd.size() * STRIDE, dat.size() * 2));
   return (int)nd.size() - 1;
  }
  static void release(int x) { freed.push_back(x); }
