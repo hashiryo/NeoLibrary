@@ -31,7 +31,8 @@
 //   持ち、塊の反転の印は添字の読み替えで済ませる。
 // - 区間の反転は、両端の塊のうち区間の外にある部分を逆順にして互いの塊へ移してから、塊の境目で割って印を付ける。移したあとの塊が
 //   CAP を超えるときだけ区間の端で塊を割り、MIN より短くなった塊はつなぎ直すときに隣の塊とまとめる。移す 2 つの塊は、反転の印を
-//   残したまま外の部分だけを書き換える (Library Checker の nandhagk の 402977 の方法)。
+//   残したまま外の部分だけを書き換える。塊の境目で割るときは、両端の塊へ下りた 2 本の道を下からたどる (根から下り直さない)。
+//   どれも Library Checker の nandhagk の 402977 の方法。
 // - monoid::AffineSum<ZMod<P>> (法が定数) では、塊の大きさを 512 (MIN は 64、作るときは 128 ずつ) にし、塊の中の和、作用、遅延の
 //   当て直しを AVX2 で 8 個ずつ行う (値は 2P 未満のそのままの値、掛け算は Shoup の方法)。塊の一部への作用は残っている塊の遅延と
 //   合わせて 1 回の走査で書き、部分の和は短い側を足して求める。作用は恒等写像で初めて、印で分けずに合成する。ほかの型では、MIN
@@ -240,7 +241,8 @@ template <class M, bool REV= false, int B= 0> class Sequence {
   return v ? v : 2463534242u;
  }
  static inline unsigned rs= seed();
- static inline std::vector<int> path, path2;
+ static inline std::vector<int> path, path2, path3;
+ static inline std::vector<char> dl1, dl2, dl3;
  static inline std::vector<T> tu, tv;  // 反転で入れ替える塊の外の部分
  static unsigned rnd() { return rs^= rs << 13, rs^= rs >> 17, rs^= rs << 5; }
  static T* arr(int x) { return dat.data() + std::size_t(x) * STRIDE; }
@@ -610,6 +612,19 @@ template <class M, bool REV= false, int B= 0> class Sequence {
  static void pull_path(const std::vector<int>& ps) {
   for(int k= (int)ps.size(); k--;) pull(ps[k]);
  }
+ // 根からの道 ps (遅延を配ってあること) を下からたどって木を割る。L と R には道の末尾の節で割った左と右の木を入れて呼ぶ。
+ // dl[k] は ps[k + 1] が ps[k] の左の子かどうか。道の上の節は、左へ下りたなら R の根に、右へ下りたなら L の根になる。
+ static void split_up(const std::vector<int>& ps, const std::vector<char>& dl, int& L, int& R) {
+  for(int k= (int)ps.size() - 1; k--;) {
+   const int p= ps[k];
+   if(dl[k]) nd[p].l= R, pull(p), R= p;
+   else nd[p].r= L, pull(p), L= p;
+  }
+ }
+ static void dirs(const std::vector<int>& ps, std::vector<char>& dl) {
+  dl.resize(ps.size());
+  for(std::size_t k= 0; k + 1 < ps.size(); ++k) dl[k]= nd[ps[k]].l == ps[k + 1];
+ }
  // 塊の中の列の順の位置 o に v を入れる (空きがあること)。
  static void put(int x, int o, const T& v) {
   materialize(x);
@@ -838,14 +853,24 @@ public:
    }
    nd[u].len= newu, nd[v].len= newv;
    if constexpr(!FA) recalc(u), recalc(v);
-   pull_path(path2), pull_path(path);
   }
-  // 塊の境目 (u の先頭と v の末尾) で割って、間の木に反転の印を付ける。MIN より短くなった塊は、つなぎ直すときに隣とまとめる。
-  int a, b, c;
-  split(root, l - i, a, b);
-  split(b, r + tail - (l - i), b, c);
-  tog(b);
-  root= merge(merge(a, b), c);
+  // 塊の境目 (u の先頭と v の末尾) で、下りた 2 本の道を下からたどって割る (根から下り直さない。道の節の積もここで求め直す)。
+  // 1 本目で u の前で割ると、2 本目の道のうち u より前の節 (u の道が右へ下りた共通の節) は左の木へ移るので、2 本目は残りの節で割る。
+  dirs(path, dl1), dirs(path2, dl2);
+  std::size_t m= 0;  // 共通の道の長さ (path[m - 1] が分かれ目の節)
+  while(m < path.size() && m < path2.size() && path[m] == path2[m]) ++m;
+  int a= nd[u].l, b= u;
+  nd[u].l= 0, pull(u);
+  split_up(path, dl1, a, b);
+  path3.clear(), dl3.clear();
+  for(std::size_t k= 0; k + 1 < m; ++k)
+   if(dl1[k]) path3.push_back(path2[k]), dl3.push_back(1);
+  for(std::size_t k= m - 1; k < path2.size(); ++k) path3.push_back(path2[k]), dl3.push_back(k + 1 < path2.size() ? dl2[k] : 0);
+  int bm= v, c= nd[v].r;
+  nd[v].r= 0, pull(v);
+  split_up(path3, dl3, bm, c);
+  tog(bm);
+  root= merge(merge(a, bm), c);
  }
  std::vector<T> dump() {
   std::vector<T> out;
