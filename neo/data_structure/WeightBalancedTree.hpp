@@ -20,7 +20,8 @@
 //   作り直して写す分を省ける (procon-judge の aoj-3024 で、先に取らないと今の Library の 1.17 倍、取ると並んだ)。
 // - 永続のときは、pool_empty() が置き場の伸び (前の gc で生きていた節の 2 倍、少なくとも 2^22 個) を知らせ、gc(版の列) が渡した
 //   版から届く節に印を付けて置き場の前へ詰め、版の根を書き換える。版どうしで共有する節は共有したまま残り、渡さなかった木は
-//   使えなくなる。永続しないときは、split で外れた節と消した葉を使い回すので gc は要らない (pool_empty() は偽を返す)。
+//   使えなくなる。詰める前の半分より多くが生き残ったとき (版を全部残す使い方など) は、次までの伸びを 4 倍に広げる (procon-judge
+//   の yosupo-persistent-queue で、2 倍のままだと gc が時間の半分を占めた)。永続しないときは、split で外れた節と消した葉を使い回すので gc は要らない (pool_empty() は偽を返す)。
 // - 遅延の印 (作用と反転) は葉の数の上位 2 bit に置く。区間の積と 1 点の取得は、遅延を配らずに根から合わせて下りるので、永続の
 //   ときにも節を写さない。
 namespace weight_balanced_tree_internal {
@@ -333,6 +334,7 @@ template <class M, bool REV= false, bool PERSIST= false> class WeightBalancedTre
  }
  // 渡した根から届く節に印を付け、置き場の前へ詰める。根の番号は書き換える。
  static void gc_roots(const std::vector<int*>& roots) {
+  const std::size_t before= nm.size() + nl.size();
   std::vector<char> mi(nm.size()), ml(nl.size());
   std::vector<int> st;
   for(int* r: roots) st.push_back(*r);
@@ -362,7 +364,8 @@ template <class M, bool REV= false, bool PERSIST= false> class WeightBalancedTre
   nm.resize(k), nl.resize(kl);
   free_nm.clear(), free_nl.clear();
   for(int* r: roots) *r= remap(*r);
-  gc_at= std::max<std::size_t>(std::size_t(1) << 22, 2 * (nm.size() + nl.size()));
+  const std::size_t live= nm.size() + nl.size();
+  gc_at= std::max<std::size_t>(std::size_t(1) << 22, (2 * live > before ? 4 : 2) * live);
  }
  int root= 0;
  static WeightBalancedTree of(int rt) {
@@ -456,7 +459,8 @@ public:
   if(root) dump_(root, false, out, acts);
   return out;
  }
- // 永続のとき、置き場が前の gc のあとに生きていた節の 2 倍 (少なくとも 2^22 個) まで伸びたら真。
+ // 永続のとき、置き場が前の gc のあとに生きていた節の 2 倍 (半分より多くが生き残ったときは 4 倍、少なくとも 2^22 個) まで
+ // 伸びたら真。
  static bool pool_empty() { return PERSIST && nm.size() + nl.size() >= gc_at; }
  // 渡した版から届く節だけを残して置き場を詰める。渡さなかった木は使えなくなる。
  static void gc(std::vector<WeightBalancedTree>& vs) {
