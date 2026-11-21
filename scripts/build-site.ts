@@ -712,7 +712,7 @@ async function main() {
       }
       if (!entry.name.endsWith(".hpp")) continue;
 
-      const hppPath = path.relative(ROOT, full); // "neo/algebra/GF2p64.hpp"
+      const hppPath = path.relative(ROOT, full); // "neo/base/core/algebra/GF2p64.hpp"
       const mdRelPath = hppPath
         .replace(/^neo\//, "")
         .replace(/\.hpp$/, ".md");
