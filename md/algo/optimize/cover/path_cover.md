@@ -1,6 +1,6 @@
 ---
 title: 最小パス被覆と Dilworth の定理
-documentation_of: ../../neo/algo/optimize/dp/path_cover.hpp
+documentation_of: ../../neo/algo/optimize/cover/path_cover.hpp
 ---
 
 DAG の頂点を道で覆う問題を 2 つの意味で解きます。頂点を共有しない道で覆う最小パス被覆と、到達可能性の順序 (u から v へ道があれば u は v より前) を鎖に分ける最小の鎖の被覆です。後者の最小の本数は、最大反鎖の大きさと等しくなります (Dilworth の定理)。

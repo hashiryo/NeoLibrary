@@ -1,6 +1,6 @@
 ---
 title: k 値の燃やす埋める
-documentation_of: ../../neo/algo/optimize/dp/KaryOptimization.hpp
+documentation_of: ../../neo/algo/optimize/burn_bury/KaryOptimization.hpp
 ---
 
 変数 $x_i$ が 0 から $k_i - 1$ の値を取るとき、1 変数の項と 2 変数の項の和の最小を求めます。1 変数の項は何でもよく、2 変数の項は Monge である必要があります。項は値の表か、値を返す関数で渡します。

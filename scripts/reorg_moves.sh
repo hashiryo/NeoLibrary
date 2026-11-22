@@ -103,9 +103,9 @@ mv_one neo/algo/optimize/matching/bipartite_edge_coloring.hpp neo/algo/optimize/
 mv_one neo/algo/optimize/cut/global_min_cut.hpp neo/algo/optimize/cut/global_min_cut.hpp
 mv_one neo/algo/optimize/matroid/matroids.hpp neo/algo/optimize/matroid/matroids.hpp
 mv_one neo/algo/optimize/matroid/matroid_intersection.hpp neo/algo/optimize/matroid/matroid_intersection.hpp
-mv_one neo/algo/optimize/dp/BinaryOptimization.hpp neo/algo/optimize/dp/BinaryOptimization.hpp
-mv_one neo/algo/optimize/dp/KaryOptimization.hpp neo/algo/optimize/dp/KaryOptimization.hpp
-mv_one neo/algo/optimize/dp/path_cover.hpp neo/algo/optimize/dp/path_cover.hpp
+mv_one neo/algo/optimize/burn_bury/BinaryOptimization.hpp neo/algo/optimize/burn_bury/BinaryOptimization.hpp
+mv_one neo/algo/optimize/burn_bury/KaryOptimization.hpp neo/algo/optimize/burn_bury/KaryOptimization.hpp
+mv_one neo/algo/optimize/cover/path_cover.hpp neo/algo/optimize/cover/path_cover.hpp
 
 # --- algo/count ---
 mv_one neo/algo/count/automata/DFA.hpp neo/algo/count/automata/DFA.hpp

@@ -1,6 +1,6 @@
 ---
 title: 燃やす埋める
-documentation_of: ../../neo/algo/optimize/dp/BinaryOptimization.hpp
+documentation_of: ../../neo/algo/optimize/burn_bury/BinaryOptimization.hpp
 ---
 
 0 か 1 の値を取る変数について、1 変数の項と 2 変数の項の和の最小を求めます。項は値の表で渡します。劣モジュラでない 2 変数の項も、変数の 0 と 1 の入れ替えで直せるなら、入れ替えを自動で探して解きます。

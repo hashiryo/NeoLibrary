@@ -109,9 +109,9 @@ MAPPING: dict[str, str] = {
     "combinatorial_optimization/global_min_cut.hpp": "algo/optimize/cut/global_min_cut.hpp",
     "combinatorial_optimization/matroids.hpp": "algo/optimize/matroid/matroids.hpp",
     "combinatorial_optimization/matroid_intersection.hpp": "algo/optimize/matroid/matroid_intersection.hpp",
-    "combinatorial_optimization/BinaryOptimization.hpp": "algo/optimize/dp/BinaryOptimization.hpp",
-    "combinatorial_optimization/KaryOptimization.hpp": "algo/optimize/dp/KaryOptimization.hpp",
-    "combinatorial_optimization/path_cover.hpp": "algo/optimize/dp/path_cover.hpp",
+    "combinatorial_optimization/BinaryOptimization.hpp": "algo/optimize/burn_bury/BinaryOptimization.hpp",
+    "combinatorial_optimization/KaryOptimization.hpp": "algo/optimize/burn_bury/KaryOptimization.hpp",
+    "combinatorial_optimization/path_cover.hpp": "algo/optimize/cover/path_cover.hpp",
     # count
     "counting/DFA.hpp": "algo/count/automata/DFA.hpp",
     "number_theory/floor_sum.hpp": "algo/count/nt/floor_sum.hpp",
