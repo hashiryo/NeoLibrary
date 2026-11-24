@@ -1,14 +1,36 @@
 ---
-title: 畳み込み ($\mathbb{F}_{2^{64}}$)
+title: 畳み込み (GF(2^64))
 documentation_of: ../../neo/base/core/poly/convolve_GF2p64.hpp
 ---
 
-$\mathbb{F}_{2^{64}}$ 上の多項式の積を求めます。
+$\mathbb{F}_{2^{64}}$ を係数とする多項式の積 (畳み込み) を、[`GF2p64`](../algebra/GF2p64.md) の vector に対して求めます。Cantor 基底の加法的 FFT を使います。
 
 ```cpp
 std::vector<GF2p64> convolve(const std::vector<GF2p64>& a, const std::vector<GF2p64>& b);
 ```
 
-長さ $n$ の `a` と長さ $m$ の `b` から、$c_k = \sum_{i + j = k} a_i b_j$ ($0 \le k \le n + m - 2$) を並べた長さ $n + m - 1$ の vector を返します。どちらかが空なら空の vector を返します。
+長さ $n$ の `a` と長さ $m$ の `b` から、$c_k = \sum_{i + j = k} a_i b_j$ ($0 \le k \le n + m - 2$) を並べた長さ $n + m - 1$ の vector を返します。どちらかが空なら空の vector を返します。$n + m - 1 \le 64$ のときは素朴に掛け、畳むのは出力ごとに 1 回です。
 
-Cantor 基底の加法的 FFT で計算します。$N = n + m$ として、積は $O(N \log N)$ 回、基底変換の XOR は $O(N \log N \log \log N)$ 回です。$n + m - 1 \le 64$ のときは素朴に掛けます。x86-64 では VPCLMULQDQ が使えるかを実行時に調べ、使えれば 256 bit の clmul で計算します。
+引数は `std::vector<GF2p64>` です。中では要素を 64 bit の値として扱うので、`gf2p64_internal::cantor::convolve` を `std::vector<unsigned long long>` で呼ぶこともできます。
+
+$N = n + m - 1$ とし、$2^d \ge N$ となる $d$ を取ると、体の掛け算は $O(N \log N)$ 回、基底変換の XOR は 1 要素あたり $O(\log N)$ 回です。作業領域は 2 本の $2^d + 8$ 要素の配列です。長さの上限は、確保できるメモリで決まります。
+
+## 中身
+
+加法的 FFT は、Cantor 基底 $\beta_0 = 1$、$\beta_l^2 + \beta_l = \beta_{l-1}$ を使います。多項式を $\mathbb{F}_2$ 上の部分空間の点で評価し、点ごとに掛けて逆変換します。長さ $2^d$ の変換は DIF の radix-4 で組み、下の段は $2^{14}$ 要素の block に分けて L2 に載せたまま回します。
+
+単項式の係数から Cantor 基底への変換は、$s_a(x) = x^{2^a} + x$ が $s_{a+b} = s_a \circ s_b$ を満たすことを使って Taylor 展開の形に分けます。$k$ 未満で最大の 2 の冪 $a$ を取り、$y = s_a(x)$ について展開してから、$y$ についての変換と各塊の中の変換に分けます。長さが $2^{20}$ のとき、1 要素あたりの XOR は 20 回です。
+
+twiddle の表は、$M[j] = \sum_{j \text{ の bit } L} \beta_{L+1}$ が $j$ の bit について線形なことを使い、$M[j] = \mathrm{lo}[j \mathbin{\&} 1023] \oplus \mathrm{hi}[j \gg 10]$ の 2 枚 (24 KiB) を constexpr で作ります。
+
+radix-4 では、clmul の結果を畳まずに XOR し、畳む直前に 1 回だけ unpack します。radix-4 1 回あたりの unpack は 8 回から 6 回に減ります。段の分け方がそろうときは、順変換の最下段、各点の積、逆変換の最下段を 1 つの kernel (`fused_r4l1`) でつなぎます。積も畳まずに逆変換の式に入れます。
+
+入力が $2^{k_0}$ に収まるときは、上の段のうち下半分の写しになる段を飛ばし、最初の pass は配列の先頭から読みます。
+
+作業用の 2 本の配列は 64 byte 境界から使います。glibc の大きい確保は mmap のページの先頭 + 16 byte を返すので、32 byte の読み書きの半分が cache line をまたぐためです。Linux では確保したあと `MADV_POPULATE_WRITE` でページをまとめて用意させます (Linux 5.14 以降。古い kernel と Linux 以外では何もしません)。出力の vector をそのまま作業領域に使い、最後に長さ $N$ へ縮めます。もう 1 本の作業領域 `g` は全体を 0 で埋めず、入力の後ろの $2^{k_g}$ までだけを 0 にします。
+
+基底変換で行の間隔が 2 KB 以下 (要素が 4 から 256) の段は、列を 4 本ずつ取って行をレジスタに載せたまま回します。行は配列でなく別々の変数で持ちます。gcc は配列にするとループごとに YMM をスタックへ退避するためです。
+
+x86 で VPCLMULQDQ が使えるかは、`convolve` を呼ぶたびに 1 回だけ調べます。使えれば 256 bit の clmul で 2 つの積を一度に求めます。
+
+procon-judge の `yosupo-convolution-f2-64` で、Library Checker の Convolution ($\mathbb{F}_{2^{64}}$) の入力に対する時間を測っています。2026-10 の計測では、Schönhage の加法的 FFT を使う提出より速く、AVX-512 を使わない提出どうしでは半分以下の時間です。
