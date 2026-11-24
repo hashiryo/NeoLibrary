@@ -8,6 +8,9 @@
 //   bool can_add(int x)                    x が I に無いとき、I + x が独立か
 // さらに、2 引数の交換の判定 can_exchange(y, x) (I - y + x が独立か) と、閉路の列挙 circuit(x, f) (I + x の閉路に入る
 // I の要素 y ごとに f(y)) のうち、型にとって書きやすいほうを持つ。
+// 型は、独立と分かっている要素を足すだけの add(x) (x が I に無く、I + x が独立のとき、中の構造を作り直さずに x を足し、
+// can_add だけを正しく保つ。次の build まで can_exchange と circuit は使えない) も持てる。持つ型は、マトロイドの和
+// (matroid_union.hpp) が、そのまま入る要素ごとの build を省く。GraphicMatroid、PartitionMatroid、XorMatroid が持つ。
 // - GraphicMatroid: 辺の集合で、森になるもの。両方を持つ。
 // - PartitionMatroid: 要素ごとの組で、組 c からは cap[c] 個までのもの。両方を持つ。
 // - XorMatroid: 64 bit のベクトルの集合で、xor で線形独立なもの。両方を持つ。
@@ -21,10 +24,18 @@ class GraphicMatroid {
  int n_;
  std::vector<std::array<int, 2>> e_;
  std::vector<int> start_, adj_, comp_, dep_, pe_, pv_, tin_, tout_, it_, stk_;
+ // add のあとの連結。comp_ の値 (成分の根) の上の Union-Find で、added_ のときだけ使う。
+ std::vector<int> cu_;
+ bool added_= false;
+ int cfind(int v) {
+  while(cu_[v] != v) v= cu_[v]= cu_[cu_[v]];
+  return v;
+ }
 public:
- GraphicMatroid(int n, const std::vector<std::array<int, 2>>& edges): n_(n), e_(edges), start_(n + 1), comp_(n), dep_(n), pe_(n), pv_(n), tin_(n), tout_(n), it_(n) {}
+ GraphicMatroid(int n, const std::vector<std::array<int, 2>>& edges): n_(n), e_(edges), start_(n + 1), comp_(n), dep_(n), pe_(n), pv_(n), tin_(n), tout_(n), it_(n), cu_(n) {}
  int size() const { return e_.size(); }
  void build(const std::vector<int>& I) {
+  added_= false;
   std::fill(start_.begin(), start_.end(), 0);
   for(int y: I) ++start_[e_[y][0] + 1], ++start_[e_[y][1] + 1];
   for(int v= 0; v < n_; ++v) start_[v + 1]+= start_[v];
@@ -49,8 +60,18 @@ public:
    }
   }
  }
- [[gnu::always_inline]] bool can_add(int x) const { return comp_[e_[x][0]] != comp_[e_[x][1]]; }
- [[gnu::always_inline]] bool can_exchange(int y, int x) const {
+ [[gnu::always_inline]] bool can_add(int x) {
+  if(!added_) return comp_[e_[x][0]] != comp_[e_[x][1]];
+  return cfind(comp_[e_[x][0]]) != cfind(comp_[e_[x][1]]);
+ }
+ void add(int x) {
+  if(!added_) {
+   added_= true;
+   for(int v= 0; v < n_; ++v) cu_[v]= v;
+  }
+  cu_[cfind(comp_[e_[x][0]])]= cfind(comp_[e_[x][1]]);
+ }
+ [[gnu::always_inline]] bool can_exchange(int y, int x) {
   if(can_add(x)) return true;
   const int c= dep_[e_[y][0]] > dep_[e_[y][1]] ? e_[y][0] : e_[y][1];
   auto inside= [&](int v) { return tin_[c] <= tin_[v] && tin_[v] < tout_[c]; };
@@ -82,53 +103,62 @@ public:
   for(size_t c= 0; c < cnt_.size(); ++c) cnt_[c]= start_[c + 1] - start_[c];
  }
  [[gnu::always_inline]] bool can_add(int x) const { return part_[x] < 0 || cnt_[part_[x]] < cap_[part_[x]]; }
+ void add(int x) {
+  if(part_[x] >= 0) ++cnt_[part_[x]];
+ }
  [[gnu::always_inline]] bool can_exchange(int y, int x) const { return can_add(x) || part_[y] == part_[x]; }
  template <class F> void circuit(int x, F&& f) const {
   for(int k= start_[part_[x]]; k < start_[part_[x] + 1]; ++k) f(mem_[k]);
  }
 };
 // GF(2) の線形マトロイド (64 bit のベクトル)。build で I の基底を掃き出し、各行が I のどの要素の xor かを 64 bit の印で
-// 持つ (|I| <= 64)。x を基底で消して 0 になれば従属で、残った印が閉路。消した結果は build ごとに覚える。
+// 持つ (|I| <= 64)。x を基底で消して 0 になれば従属で、残った印が閉路。消した結果は覚えておき、基底が変わるまで使い回す。
+// add は行を足すだけなので、従属だった要素の結果はそのまま使え、独立だった要素の結果だけが古くなる (add の回数の印を
+// 別に付けて見分ける)。build は I が今の並びと同じなら何もしない (add した順の I を渡されたときがこれ)。
 class XorMatroid {
  std::vector<unsigned long long> v_, memo_;
  std::vector<int> idx_, elem_;
- std::vector<unsigned> stamp_;
+ std::vector<unsigned> stamp_, astamp_;
  unsigned long long row_[64]= {}, mask_[64]= {};
- unsigned now_= 1;
+ unsigned now_= 1, adds_= 0;
  // x を消したあとの印。独立なら ~0
  unsigned long long reduce(int x) {
-  if(stamp_[x] == now_) return memo_[x];
+  if(stamp_[x] == now_ && (memo_[x] != ~0ULL || astamp_[x] == adds_)) return memo_[x];
   stamp_[x]= now_;
   unsigned long long a= v_[x], m= 0;
   while(a) {
    const int b= 63 - __builtin_clzll(a);
-   if(!row_[b]) return memo_[x]= ~0ULL;
+   if(!row_[b]) return astamp_[x]= adds_, memo_[x]= ~0ULL;
    a^= row_[b], m^= mask_[b];
   }
   return memo_[x]= m;
  }
+ void insert(int x) {
+  const int k= elem_.size();
+  elem_.push_back(x), idx_[x]= k;
+  unsigned long long a= v_[x], m= 1ULL << k;
+  while(a) {
+   const int b= 63 - __builtin_clzll(a);
+   if(!row_[b]) {
+    row_[b]= a, mask_[b]= m;
+    break;
+   }
+   a^= row_[b], m^= mask_[b];
+  }
+ }
 public:
- explicit XorMatroid(const std::vector<unsigned long long>& v): v_(v), memo_(v.size()), idx_(v.size(), -1), stamp_(v.size(), 0) {}
+ explicit XorMatroid(const std::vector<unsigned long long>& v): v_(v), memo_(v.size()), idx_(v.size(), -1), stamp_(v.size(), 0), astamp_(v.size(), 0) {}
  int size() const { return v_.size(); }
  void build(const std::vector<int>& I) {
+  if(I == elem_) return;
   for(int y: elem_) idx_[y]= -1;
-  elem_= I;
+  elem_.clear();
   std::fill(row_, row_ + 64, 0);
-  for(int k= 0; k < (int)I.size(); ++k) {
-   idx_[I[k]]= k;
-   unsigned long long x= v_[I[k]], m= 1ULL << k;
-   while(x) {
-    const int b= 63 - __builtin_clzll(x);
-    if(!row_[b]) {
-     row_[b]= x, mask_[b]= m;
-     break;
-    }
-    x^= row_[b], m^= mask_[b];
-   }
-  }
+  for(int y: I) insert(y);
   ++now_;
  }
  bool can_add(int x) { return reduce(x) == ~0ULL; }
+ void add(int x) { insert(x), ++adds_; }
  bool can_exchange(int y, int x) {
   const unsigned long long m= reduce(x);
   return m == ~0ULL || (m >> idx_[y] & 1);
