@@ -20,6 +20,7 @@
 // 畳めば (2^62 未満になる) u64 に収まる。b の前後には 32 個の 0 を置き、塊の端で添字を調べない。
 // 短い側が 16 以下なら、出力ごとに u64 に足すスカラーの道にする (16 M^2 < 2^64)。
 // 多項式の族のほかのヘッダ (linear_recurrence、poly_roots など) も、この核 (convolve_internal::conv) を使う。
+// 末尾の構造体 Naive は、同じ核を neo/base/core/convolve/convolve.hpp の口に渡す形にしたもので、積の一部の範囲だけを求められる。
 namespace convolve_internal {
 using u32= unsigned;
 using u64= unsigned long long;
@@ -150,3 +151,47 @@ template <class T> std::vector<T> convolve_naive(const std::vector<T>& a, const 
   return c;
  }
 }
+namespace convolve_internal {
+// out[k - lo] = Σ_{i+j=k} a[i] b[j] mod M (lo <= k < hi)。a と b は ZMod の列 (値は 2M 未満) で、M 未満に直してから掛ける。
+// n >= 1、m >= 1、0 <= lo < hi <= n + m - 1。out は a、b と重ならないこと。
+template <class Z> void conv_range(const Z* a, int n, const Z* b, int m, int lo, int hi, Z* out) {
+ static_assert(std::is_standard_layout_v<Z> && sizeof(Z) == 4);
+ if(std::min(n, m) <= 16) {
+  if(n > m) std::swap(a, b), std::swap(n, m);
+  for(int k= lo; k < hi; ++k) {
+   u64 s= 0;
+   for(int i= std::max(0, k - m + 1), e= std::min(n - 1, k); i <= e; ++i) s+= u64(a[i].val()) * b[k - i].val();
+   out[k - lo]= Z(s);
+  }
+  return;
+ }
+ static thread_local std::vector<u32> ap, bp;
+ ap.resize(n), bp.assign(m + 2 * PAD, 0);
+ for(int i= 0; i < n; ++i) ap[i]= a[i].val();
+ for(int j= 0; j < m; ++j) bp[PAD + j]= b[j].val();
+ const __m256i R= _mm256_set1_epi64x(r32<Z>());
+ u32* o= reinterpret_cast<u32*>(out);  // 核は M 未満の値を書くので、そのまま ZMod の値になる (raw と同じ)
+ int k0= lo;
+ for(; k0 + 32 <= hi; k0+= 32) conv32<Z>(ap.data(), n, bp.data(), m, k0, o + (k0 - lo), R);
+ if(k0 < hi) {
+  u32 t[32];
+  conv32<Z>(ap.data(), n, bp.data(), m, k0, t, R);
+  std::copy(t, t + (hi - k0), o + (k0 - lo));
+ }
+}
+}  // namespace convolve_internal
+// 素朴な積の核。neo/base/core/convolve/convolve.hpp の Conv に渡して、convolve<Naive>(a, b) や convolve_range<Naive>(a, b, lo, hi) の
+// ように使う。K が ZMod なら AVX2 の核で、ほかの型 (足し算と掛け算を持ち、K() が 0 の型) は二重ループで求める。
+// 既定の核にはしない (default_kernel を宣言しない)。核を include し忘れたときに、黙って O(nm) で動かないようにするため。
+struct Naive {
+ // out[k - lo] = Σ_{i+j=k} a[i] b[j] (lo <= k < hi)。n >= 1、m >= 1、0 <= lo < hi <= n + m - 1。out は a、b と重ならないこと。
+ template <class K> static void convolve_range(const K* a, int n, const K* b, int m, int lo, int hi, K* out) {
+  if constexpr(convolve_internal::is_zmod_v<K>) convolve_internal::conv_range(a, n, b, m, lo, hi, out);
+  else
+   for(int k= lo; k < hi; ++k) {
+    K s= K();
+    for(int i= std::max(0, k - m + 1), e= std::min(n - 1, k); i <= e; ++i) s+= a[i] * b[k - i];
+    out[k - lo]= s;
+   }
+ }
+};

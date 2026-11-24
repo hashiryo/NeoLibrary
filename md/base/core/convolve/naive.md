@@ -16,3 +16,16 @@ template <class T> std::vector<T> convolve_naive(const std::vector<T>& a, const 
 `ZMod` は値を $M$ 未満の u32 に直してから掛けます。出力 32 個ずつの塊ごとに $a_i$ を 8 レーンに配り、$b$ の 32 個との積を u64 の 8 本のレジスタにためます。$b$ は 8 個ずつ読み、偶数番目と奇数番目を `_mm256_mul_epu32` で別のレジスタに足します。積は $M^2 < 2^{60}$ なので、8 回足すたびに $2^{32}$ の位を $2^{32} \bmod M$ 倍して下の位へ畳みます。畳んだ値は $2^{62}$ 未満なので、u64 から溢れません。$b$ の前後には 32 個の 0 を置き、塊の端で添字を調べません。短い側が 16 以下なら、出力を 1 つずつ u64 の和で求めるスカラーの道を通ります ($16 M^2 < 2^{64}$)。
 
 procon-judge の self-poly-convolution (長さ 8192 以下) で、Xeon 6975P-C の x64-gcc (run 44256846647) の最大は 9.04 ms でした。行ごとに u64 にためる素朴な参照実装 (gcc がベクトル化する) は 15.60 ms です。
+
+## 核として使う
+
+`Naive` は、同じ核を [畳み込みの共通の口](./convolve.md) に渡すための構造体です。積の一部の範囲だけを求められます。
+
+```cpp
+#include "neo/base/core/convolve/convolve.hpp"
+#include "neo/base/core/convolve/naive.hpp"
+std::vector<ZMod<998244353>> c= convolve<Naive>(a, b);                // convolve_naive(a, b) と同じ
+std::vector<ZMod<998244353>> d= convolve_range<Naive>(a, b, lo, hi);  // lo 次から hi - 1 次
+```
+
+`ZMod` でない型は、足し算と掛け算を持ち、`K()` が 0 であれば、二重ループで求めます。`Naive` は既定の核にならないので、`<Naive>` を書いて選びます。
