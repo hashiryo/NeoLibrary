@@ -1,6 +1,6 @@
 ---
 title: 素朴な畳み込み
-documentation_of: ../../neo/base/core/poly/convolve_naive.hpp
+documentation_of: ../../neo/base/core/convolve/naive.hpp
 ---
 
 2 つの列の畳み込み $c_k = \sum_{i+j=k} a_i b_j$ を、素朴な $O(nm)$ で求めます。

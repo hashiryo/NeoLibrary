@@ -22,8 +22,8 @@
 
 | ディレクトリ | 入れるもの |
 | --- | --- |
-| **`core/`** | 数学的な対象・演算の部品。`algebra/`、`linalg/`（型本体）、`nt/`、`poly/`、`set_fps/`（集合冪級数の核）、`util/`（圧縮・ソートなど） |
-| **`ds/`** | データ構造・索引。`range/`（セグ木・Wavelet など）、`set/`、`hash/`、`seq/`、`string/`、`tree/`（HLD・LCA など）、`2d/` |
+| **`core/`** | 数学的な対象・演算の部品。`algebra/`、`convolve/`（畳み込みの実装）、`linalg/`（型本体）、`nt/`、`poly/`（多項式・形式的冪級数の演算）、`set_fps/`（集合冪級数の核）、`util/`（圧縮・ソートなど） |
+| **`ds/`** | データ構造・インデックス。`range/`（セグ木・Wavelet など）、`set/`、`hash/`、`seq/`、`string/`、`tree/`（HLD・LCA など）、`2d/` |
 | **`engine/`** | データ構造ではなく、処理の枠組み。例: 全方位 DP（`engine/tree/Rerooting.hpp`） |
 
 `core/`、`ds/`、`engine/` のさらに下は、ドメイン名ではなく **扱う対象**（`math` に相当する `algebra` / `nt`、`graph` に相当する `tree` など）で切ります。ファイルが 1〜2 個しかないところでは、深くフォルダを増やさなくて構いません。
@@ -43,7 +43,8 @@
 
 - **セグ木・接尾辞配列・Rolling Hash** → `base/ds/`
 - **Dijkstra・最大流・凸包チャート** → `algo/optimize/`（相当するサブディレクトリへ）
-- **Z algorithm・回文前処理** → 索引として `base/ds/string/` に置くことが多い
+- **Z algorithm・回文前処理** → インデックスとして `base/ds/string/` に置くことが多い
+- **畳み込みの核（素朴・NTT・GF(2^64)）** → `base/core/convolve/`。その上の多項式の割り算や形式的冪級数の演算 → `base/core/poly/`
 - **集合冪級数**: ゼータ・畳み込みなどの核は `base/core/set_fps/`。グラフ上の閉路積やハフニアンなど、問題文に近い終着点は `algo/count/` や `algo/compute/` 側に置く
 
 新規ヘッダを足すときは、上の表に当てはめ、依存が `algo → base` だけになるようにしてください。

@@ -32,10 +32,10 @@ mv_one neo/base/core/nt/pow_table.hpp neo/base/core/nt/pow_table.hpp
 mv_one neo/base/core/nt/enumerate_primes.hpp neo/base/core/nt/enumerate_primes.hpp
 mv_one neo/base/core/nt/sqrt_mod.hpp neo/base/core/nt/sqrt_mod.hpp
 mv_one neo/base/core/nt/stern_brocot.hpp neo/base/core/nt/stern_brocot.hpp
-mv_one neo/base/core/poly/convolve_naive.hpp neo/base/core/poly/convolve_naive.hpp
+mv_one neo/base/core/convolve/naive.hpp neo/base/core/convolve/naive.hpp
 mv_one neo/base/core/poly/poly_divmod.hpp neo/base/core/poly/poly_divmod.hpp
 mv_one neo/base/core/poly/sparse_fps.hpp neo/base/core/poly/sparse_fps.hpp
-mv_one neo/base/core/poly/convolve_GF2p64.hpp neo/base/core/poly/convolve_GF2p64.hpp
+mv_one neo/base/core/convolve/GF2p64.hpp neo/base/core/convolve/GF2p64.hpp
 mv_one neo/base/core/set_fps/generic.hpp neo/base/core/set_fps/generic.hpp
 mv_one neo/base/core/set_fps/ranked_xor.hpp neo/base/core/set_fps/ranked_xor.hpp
 mv_one neo/base/core/set_fps/ranked_or64.hpp neo/base/core/set_fps/ranked_or64.hpp

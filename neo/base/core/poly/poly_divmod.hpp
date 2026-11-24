@@ -8,7 +8,7 @@
 #include <cassert>
 #include <utility>
 #include <vector>
-#include "neo/base/core/poly/convolve_naive.hpp"
+#include "neo/base/core/convolve/naive.hpp"
 // 多項式の商と余り、gcd (素朴な O(nm))。K は体で、ZMod なら法は素数であること。多項式は係数の vector (k 次の係数が [k]) で、
 // 末尾の 0 は取り除いて返す (0 は空の vector)。
 // ZMod は、割る式を monic にしてから、商の係数ごとに a[i - db + j] += (-c) b[j] を、掛ける数が決まっているので Shoup の方法で
@@ -63,18 +63,18 @@ template <class K> std::pair<std::vector<K>, std::vector<K>> poly_divmod(std::ve
  if(a.size() < b.size()) return {std::vector<K>{}, a};
  const K il= K(1) / b.back();
  for(auto& x: b) x*= il;
- if constexpr(poly_internal::is_zmod_v<K>) {
+ if constexpr(convolve_internal::is_zmod_v<K>) {
   if(b.size() == 1) {
    for(auto& x: a) x*= il;
    return {a, std::vector<K>{}};
   }
-  auto x= poly_internal::to_u32(a);
-  const auto y= poly_internal::to_u32(b);
+  auto x= convolve_internal::to_u32(a);
+  const auto y= convolve_internal::to_u32(b);
   std::vector<u32> q;
   divmod_monic<K>(x, y, &q);
-  auto Q= poly_internal::from_u32<K>(q);
+  auto Q= convolve_internal::from_u32<K>(q);
   for(auto& v: Q) v*= il;
-  return {Q, poly_internal::from_u32<K>(x)};
+  return {Q, convolve_internal::from_u32<K>(x)};
  } else {
   const int db= int(b.size()) - 1;
   std::vector<K> q(a.size() - db, K());
@@ -97,13 +97,13 @@ template <class K> std::vector<K> poly_gcd(std::vector<K> a, std::vector<K> b) {
   const K il= K(1) / v.back();
   for(auto& x: v) x*= il;
  };
- if constexpr(poly_internal::is_zmod_v<K>) {
+ if constexpr(convolve_internal::is_zmod_v<K>) {
   while(!b.empty()) {
    monic(b);
    if(b.size() == 1) return b;
-   auto x= poly_internal::to_u32(a);
-   divmod_monic<K>(x, poly_internal::to_u32(b), nullptr);
-   a= poly_internal::from_u32<K>(x);
+   auto x= convolve_internal::to_u32(a);
+   divmod_monic<K>(x, convolve_internal::to_u32(b), nullptr);
+   a= convolve_internal::from_u32<K>(x);
    std::swap(a, b);
   }
  } else {

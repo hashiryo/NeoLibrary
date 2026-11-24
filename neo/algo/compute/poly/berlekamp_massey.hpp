@@ -6,7 +6,7 @@
 #endif
 #include <algorithm>
 #include <vector>
-#include "neo/base/core/poly/convolve_naive.hpp"
+#include "neo/base/core/convolve/naive.hpp"
 // Berlekamp–Massey の方法。列 a_0, ..., a_{n-1} について、a_i = Σ_{j=1}^{d} c_j a_{i-j} (d ≤ i < n) を満たす最短の
 // c_1, ..., c_d を O(n^2) で求める。K は体で、ZMod なら法は素数であること。
 // ZMod は値を M 未満の u32 で持ち、ずれの内積は AVX2 で u64 にためて 8 回ごとに 2^32 の位を畳み、漸化式の更新
@@ -24,9 +24,9 @@ template <class Z> u32 dot(const u32* x, const u32* y, int n, __m256i R) {
   const __m256i u= _mm256_loadu_si256((const __m256i*)(x + i)), v= _mm256_loadu_si256((const __m256i*)(y + i));
   a0= _mm256_add_epi64(a0, _mm256_mul_epu32(u, v));
   a1= _mm256_add_epi64(a1, _mm256_mul_epu32(_mm256_srli_epi64(u, 32), _mm256_srli_epi64(v, 32)));
-  if(++t == 8) a0= poly_internal::fold(a0, R), a1= poly_internal::fold(a1, R), t= 0;
+  if(++t == 8) a0= convolve_internal::fold(a0, R), a1= convolve_internal::fold(a1, R), t= 0;
  }
- a0= _mm256_add_epi64(poly_internal::fold(a0, R), poly_internal::fold(a1, R));
+ a0= _mm256_add_epi64(convolve_internal::fold(a0, R), convolve_internal::fold(a1, R));
  alignas(32) u64 s[4];
  _mm256_store_si256((__m256i*)s, a0);
  Z r= Z(s[0]) + Z(s[1]) + Z(s[2]) + Z(s[3]);
@@ -81,7 +81,7 @@ template <class Z> std::vector<Z> zmod(const std::vector<Z>& seq) {
  std::vector<u32> bufC(n + 9, 0), bufB(n + 9, 0);
  u32 *C= bufC.data(), *B= bufB.data();
  C[0]= B[0]= 1 % M;
- const __m256i R= _mm256_set1_epi64x(poly_internal::r32<Z>());
+ const __m256i R= _mm256_set1_epi64x(convolve_internal::r32<Z>());
  int L= 0, m= 1, lc= 1, lb= 1;
  Z binv= Z(1);
  for(int i= 0; i < n; ++i) {
@@ -135,6 +135,6 @@ template <class K> std::vector<K> generic(const std::vector<K>& a) {
 }
 }  // namespace bm_internal
 template <class K> std::vector<K> berlekamp_massey(const std::vector<K>& a) {
- if constexpr(poly_internal::is_zmod_v<K>) return bm_internal::zmod(a);
+ if constexpr(convolve_internal::is_zmod_v<K>) return bm_internal::zmod(a);
  else return bm_internal::generic(a);
 }

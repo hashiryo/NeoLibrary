@@ -11,7 +11,7 @@
 #ifdef __linux__
 #include <sys/mman.h>
 #endif
-#include "neo/base/core/poly/convolve_naive.hpp"
+#include "neo/base/core/convolve/naive.hpp"
 // 多項式の補間。K は体で、ZMod なら法は素数であること。
 // - interpolate_iota(y, x): y_i = f(i) (0 ≤ i < n) を満たす n-1 次以下の f の f(x)。O(n)。
 // - interpolate(x, y): 点 (x_i, y_i) を通る n-1 次以下の多項式の係数 (x_i は相異なる)。O(n^2)。ZMod は冪の和と畳み込みの形。
@@ -27,7 +27,7 @@
 namespace lagrange_internal {
 using u32= unsigned;
 using u64= unsigned long long;
-using poly_internal::hvec;
+using convolve_internal::hvec;
 // x y 2^{-32} mod M を 8 個ずつ (M は奇数、x と y が 2M 未満なら結果も 2M 未満)。
 [[gnu::always_inline]] inline __m256i mont8(__m256i x, __m256i y, __m256i mv, __m256i mi) {
  const __m256i te= _mm256_mul_epu32(x, y), to= _mm256_mul_epu32(_mm256_srli_epi64(x, 32), _mm256_srli_epi64(y, 32));
@@ -318,7 +318,7 @@ template <class Z> std::vector<Z> interp_zmod(const std::vector<Z>& X, const std
  // 5. f_k = Σ_m P_{k+1+m} s_m。Prev[j] = P_{n-j} として f_k = (Prev s)[n-1-k]。
  std::vector<u32> Prev(n), c(n);
  for(int j= 0; j < n; ++j) Prev[j]= P[n - j];
- poly_internal::conv<Z>(Prev.data(), n, s.data(), n, c.data(), n);
+ convolve_internal::conv<Z>(Prev.data(), n, s.data(), n, c.data(), n);
  std::vector<Z> f(n);
  for(int k= 0; k < n; ++k) f[k]= Z::raw(c[n - 1 - k]);
  return f;
@@ -327,7 +327,7 @@ template <class Z> std::vector<Z> interp_zmod(const std::vector<Z>& X, const std
 // y_i = f(i) (0 ≤ i < n) を満たす n-1 次以下の f の f(x)。
 template <class K> K interpolate_iota(const std::vector<K>& y, unsigned long long x) {
  if(y.empty()) return K();
- if constexpr(poly_internal::is_zmod_v<K>) return lagrange_internal::iota_zmod(y, x);
+ if constexpr(convolve_internal::is_zmod_v<K>) return lagrange_internal::iota_zmod(y, x);
  else return x < y.size() ? y[x] : lagrange_internal::iota_generic(y, K(x));
 }
 // 点 (x_i, y_i) を通る n-1 次以下の多項式の係数。f = Σ_i w_i P(X)/(X - x_i) (P = Π (X - x_j)、w_i = y_i / P'(x_i))。
@@ -338,7 +338,7 @@ template <class K> K interpolate_iota(const std::vector<K>& y, unsigned long lon
 template <class K> std::vector<K> interpolate(const std::vector<K>& x, const std::vector<K>& y) {
  const int n= int(x.size());
  if(n == 0) return {};
- if constexpr(poly_internal::is_zmod_v<K>) {
+ if constexpr(convolve_internal::is_zmod_v<K>) {
   if(n > 8 && (K::mod() & 1)) return lagrange_internal::interp_zmod(x, y);
  }
  std::vector<K> P(n + 1, K());
@@ -366,7 +366,7 @@ template <class K> K sum_exp_poly(const std::vector<K>& y, K r, unsigned long lo
  if(r == K()) return y[0];
  const int D= int(y.size()) - 1;
  if(r == K(1)) {  // F(x) = Σ_{i<x} f(i) は d+1 次の多項式で、F(0..d+1) から補間する
-  if constexpr(poly_internal::is_zmod_v<K>) {
+  if constexpr(convolve_internal::is_zmod_v<K>) {
    if(K::mod() & 1) {  // 作業の配列の上で累積和を取り、そのまま補間する
     const Mont<K> mt;
     hvec t= copy_vals(y, 1);
@@ -384,7 +384,7 @@ template <class K> K sum_exp_poly(const std::vector<K>& y, K r, unsigned long lo
   for(int k= 0; k <= D; ++k) F[k + 1]= F[k] + y[k];
   return interpolate_iota(F, n);
  }
- if constexpr(poly_internal::is_zmod_v<K>) {
+ if constexpr(convolve_internal::is_zmod_v<K>) {
   if(K::mod() & 1) {
    const Mont<K> mt;
    hvec t= copy_vals(y, 1);
@@ -437,7 +437,7 @@ template <class K> K sum_exp_poly_limit(const std::vector<K>& y, K r) {
  if(y.empty()) return K();
  if(r == K()) return y[0];
  const int D= int(y.size()) - 1;
- if constexpr(poly_internal::is_zmod_v<K>) {
+ if constexpr(convolve_internal::is_zmod_v<K>) {
   if(K::mod() & 1) {
    const Mont<K> mt;
    hvec t= copy_vals(y, 1);

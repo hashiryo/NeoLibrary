@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 #include "neo/base/core/nt/sqrt_mod.hpp"
-#include "neo/base/core/poly/convolve_naive.hpp"
+#include "neo/base/core/convolve/naive.hpp"
 // 疎な形式的冪級数の演算 (namespace sparse_fps)。0 でない項が K 個の f について、先頭 n 項を O(nK) で求める。
 // f は密な vector で受け (0 の項は読み飛ばす)、答えは長さ n の vector で返す。K は体で、log、exp、冪、平方根は 1/i
 // (i < n) を使うので、ZMod なら法は n より大きい素数であること。
@@ -47,14 +47,14 @@ template <class Z> struct Ar {
 }
 // iv[i] = 1/i mod M (1 ≤ i < n、iv[0] = 0、M は n より大きい奇素数)。前向きに累積積を置き、レーンごとの総積の逆元から
 // 後ろ向きに戻す (Montgomery の 2^{-32} は前向きと後ろ向きで打ち消し合う)。
-template <class Z> poly_internal::hvec inverses(int n) {
- if(n <= 1) return poly_internal::hvec(std::max(n, 0));
+template <class Z> convolve_internal::hvec inverses(int n) {
+ if(n <= 1) return convolve_internal::hvec(std::max(n, 0));
  const u32 M= Z::mod();
  u32 minv= M;
  for(int i= 0; i < 5; ++i) minv*= 2 - M * minv;
  const __m256i mv= _mm256_set1_epi32(M), mi= _mm256_set1_epi32(-minv), eight= _mm256_set1_epi32(8);
  const int steps= (n - 1 + 7) / 8;
- poly_internal::hvec iv(8 * steps + 8);
+ convolve_internal::hvec iv(8 * steps + 8);
  __m256i acc= _mm256_set1_epi32(1), idx= _mm256_setr_epi32(1, 2, 3, 4, 5, 6, 7, 8);
  for(int t= 0; t < steps; ++t) {
   acc= mont8(acc, idx, mv, mi);
@@ -224,7 +224,7 @@ template <class K> void pw_mul_pw(K* f, const std::vector<std::pair<int, K>>& p,
 }
 // K の値として整数 m を作る (負でもよい)。
 template <class K> K from_ll(long long m) {
- if constexpr(poly_internal::is_zmod_v<K>) return K(m);
+ if constexpr(convolve_internal::is_zmod_v<K>) return K(m);
  else return m < 0 ? -K((unsigned long long)(-m)) : K((unsigned long long)m);
 }
 template <class K> K pow_ll(K a, long long k) {
@@ -243,10 +243,10 @@ template <class K> std::vector<K> div(const std::vector<K>& f, const std::vector
  const K ig= K(1) / g[0];
  auto ts= terms(g, 1, n);
  for(auto& [j, v]: ts) v= -v * ig;
- if constexpr(poly_internal::is_zmod_v<K>) {
+ if constexpr(convolve_internal::is_zmod_v<K>) {
   const Ar<K> ar;
   std::vector<K> res(n);  // 答えの置き場に直接書く (u32 の列として)
-  u32* h= poly_internal::raw(res);
+  u32* h= convolve_internal::raw(res);
   const auto x= ig.fixed();
   for(int i= 0; i < std::min<int>(n, int(f.size())); ++i) h[i]= (f[i] * x).val();
   if(!ts.empty()) run_lin<K>(h, n, ts, ar);
@@ -269,11 +269,11 @@ template <class K> std::vector<K> log(const std::vector<K>& f, int n) {
  using namespace sparse_fps_internal;
  assert(!f.empty() && f[0] == K(1));
  auto ts= terms(f, 1, n);
- if constexpr(poly_internal::is_zmod_v<K>) {
+ if constexpr(convolve_internal::is_zmod_v<K>) {
   const Ar<K> ar;
   std::vector<K> res(n);
   if(ts.empty()) return res;
-  u32* h= poly_internal::raw(res);
+  u32* h= convolve_internal::raw(res);
   for(auto& [j, v]: ts) h[j]= (v * K(j)).val(), v= -v;
   run_lin<K>(h, n, ts, ar);
   const auto iv= inverses<K>(n);
@@ -299,12 +299,12 @@ template <class K> std::vector<K> exp(const std::vector<K>& f, int n) {
  if(n <= 0) return {};
  auto ts= terms(f, 1, n);
  for(auto& [j, v]: ts) v*= K(j);
- if constexpr(poly_internal::is_zmod_v<K>) {
+ if constexpr(convolve_internal::is_zmod_v<K>) {
   const Ar<K> ar;
   std::vector<K> res(n);
   res[0]= K(1);
   if(ts.empty()) return res;
-  u32* g= poly_internal::raw(res);
+  u32* g= convolve_internal::raw(res);
   g[0]= K(1).val();
   const int t= int(ts.size());
   std::vector<int> e(t);
@@ -346,9 +346,9 @@ template <class K> std::vector<K> pow(const std::vector<K>& f, long long k, int 
  const K a0= f[e0], ia= K(1) / a0, am= pow_ll(a0, k);
  auto ts= terms(f, e0 + 1, e0 + L);
  for(auto& [j, v]: ts) j-= e0, v*= ia;
- if constexpr(poly_internal::is_zmod_v<K>) {
+ if constexpr(convolve_internal::is_zmod_v<K>) {
   const Ar<K> ar;
-  u32* v= poly_internal::raw(F) + o;  // 答えの置き場に直接書く
+  u32* v= convolve_internal::raw(F) + o;  // 答えの置き場に直接書く
   v[0]= K(1).val();
   const int t= int(ts.size());
   if(t) {
@@ -398,7 +398,7 @@ template <class K> std::vector<K> pow_mul_pow(const std::vector<K>& f, long long
 template <class K> std::vector<K> pow_of_div(const std::vector<K>& f, const std::vector<K>& g, long long k, int n) { return pow_mul_pow(f, k, g, -k, n); }
 // g^2 = f となる g の先頭 n 項を 1 つ。無ければ空の vector。K は ZMod (法は素数)。
 template <class K> std::vector<K> sqrt(const std::vector<K>& f, int n) {
- static_assert(poly_internal::is_zmod_v<K>, "sparse_fps::sqrt は ZMod だけ");
+ static_assert(convolve_internal::is_zmod_v<K>, "sparse_fps::sqrt は ZMod だけ");
  using namespace sparse_fps_internal;
  std::vector<K> F(std::max(n, 0), K());
  const int e0= min_deg(f);
@@ -413,7 +413,7 @@ template <class K> std::vector<K> sqrt(const std::vector<K>& f, int n) {
  auto ts= terms(f, e0 + 1, e0 + L);
  for(auto& [j, v]: ts) j-= e0, v*= ia;
  const Ar<K> ar;
- u32* v= poly_internal::raw(F) + o;  // 答えの置き場に直接書く
+ u32* v= convolve_internal::raw(F) + o;  // 答えの置き場に直接書く
  v[0]= K(1).val();
  const int t= int(ts.size());
  if(t) {

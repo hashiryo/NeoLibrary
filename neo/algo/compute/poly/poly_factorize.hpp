@@ -1,7 +1,7 @@
 #pragma once
 #include <utility>
 #include <vector>
-#include "neo/base/core/poly/convolve_naive.hpp"
+#include "neo/base/core/convolve/naive.hpp"
 #include "neo/base/core/poly/poly_divmod.hpp"
 // 素数 p を法とする多項式 f (0 でない) を、monic な既約多項式の積に分解する。返すのは (既約因子、重複度) の組で、順は決めて
 // いない。f の最高次の係数は落とす (monic にしてから分解する)。Z は ZMod (法は素数)。FFT を使わない素朴な形で、次数 100

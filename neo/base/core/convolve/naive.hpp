@@ -19,8 +19,8 @@
 // _mm256_mul_epu32 で別のレジスタに足す。値は M 未満なので積は M^2 < 2^60 で、8 回ごとに 2^32 の位を 2^32 mod M に掛けて
 // 畳めば (2^62 未満になる) u64 に収まる。b の前後には 32 個の 0 を置き、塊の端で添字を調べない。
 // 短い側が 16 以下なら、出力ごとに u64 に足すスカラーの道にする (16 M^2 < 2^64)。
-// 多項式の族のほかのヘッダ (linear_recurrence、poly_roots など) も、この核 (poly_internal::conv) を使う。
-namespace poly_internal {
+// 多項式の族のほかのヘッダ (linear_recurrence、poly_roots など) も、この核 (convolve_internal::conv) を使う。
+namespace convolve_internal {
 using u32= unsigned;
 using u64= unsigned long long;
 template <class T> struct is_zmod: std::false_type {};
@@ -134,15 +134,15 @@ template <class Z> std::vector<Z> from_u32(const std::vector<u32>& a) {
  for(std::size_t i= 0; i < a.size(); ++i) r[i]= Z::raw(a[i]);
  return r;
 }
-}  // namespace poly_internal
+}  // namespace convolve_internal
 template <class T> std::vector<T> convolve_naive(const std::vector<T>& a, const std::vector<T>& b) {
  if(a.empty() || b.empty()) return {};
  const int n= int(a.size()), m= int(b.size());
- if constexpr(poly_internal::is_zmod_v<T>) {
-  const auto x= poly_internal::to_u32(a), y= poly_internal::to_u32(b);
-  std::vector<poly_internal::u32> z(n + m - 1);
-  poly_internal::conv<T>(x.data(), n, y.data(), m, z.data(), n + m - 1);
-  return poly_internal::from_u32<T>(z);
+ if constexpr(convolve_internal::is_zmod_v<T>) {
+  const auto x= convolve_internal::to_u32(a), y= convolve_internal::to_u32(b);
+  std::vector<convolve_internal::u32> z(n + m - 1);
+  convolve_internal::conv<T>(x.data(), n, y.data(), m, z.data(), n + m - 1);
+  return convolve_internal::from_u32<T>(z);
  } else {
   std::vector<T> c(n + m - 1, T());
   for(int i= 0; i < n; ++i)

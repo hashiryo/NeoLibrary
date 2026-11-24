@@ -1,12 +1,12 @@
 #pragma once
 #include <algorithm>
 #include <vector>
-#include "neo/base/core/poly/convolve_naive.hpp"
+#include "neo/base/core/convolve/naive.hpp"
 // [x^k] P(x)/Q(x) (Q(0) は可逆) と、定数係数の線形漸化式の第 k 項を、Bostan–Mori の方法で O(d^2 log k) で求める
 // (d は Q の次数、FFT を使わない)。T は可換環 (ZMod なら法は合成数でもよい) で、割り算は最初に Q(0) の逆元を掛けるときだけ。
 // 1 段で Q(x) Q(-x) = V(x^2) と P(x) Q(-x) の偶数部か奇数部を作り、k を半分にする。Q = E(x^2) + x O(x^2)、
 // P = Pe(x^2) + x Po(x^2) と分けると、V(y) = E(y)^2 - y O(y)^2、偶数部 = Pe E - y Po O、奇数部 = Po E - Pe O で、
-// 半分の大きさの積 4 回で 1 段進む。ZMod の積は poly_internal::conv (短い側が 16 以下ならスカラー、それより大きければ AVX2)。
+// 半分の大きさの積 4 回で 1 段進む。ZMod の積は convolve_internal::conv (短い側が 16 以下ならスカラー、それより大きければ AVX2)。
 // procon-judge の self-poly-kth-term で書き比べた bmo を写したもの。
 namespace linrec_internal {
 using u32= unsigned;
@@ -30,21 +30,21 @@ template <class Z> u32 zmod(std::vector<u32> P, std::vector<u32> Q, u64 k) {
   for(int i= 0; i < npo; ++i) Po[i]= P[2 * i + 1];
   // V(y) = E^2 - y O^2 (長さ lq)
   T1.assign(2 * ne, 0), T2.assign(std::max(2 * no, 1), 0);
-  poly_internal::conv<Z>(E.data(), ne, E.data(), ne, T1.data(), 2 * ne - 1);
-  if(no) poly_internal::conv<Z>(O.data(), no, O.data(), no, T2.data(), 2 * no - 1);
+  convolve_internal::conv<Z>(E.data(), ne, E.data(), ne, T1.data(), 2 * ne - 1);
+  if(no) convolve_internal::conv<Z>(O.data(), no, O.data(), no, T2.data(), 2 * no - 1);
   for(int i= 0; i < lq; ++i) Q[i]= sub(i < 2 * ne - 1 ? T1[i] : 0, i >= 1 && i - 1 < 2 * no - 1 ? T2[i - 1] : 0);
   if(k & 1) {  // Po E - Pe O
    const int l1= npo ? npo + ne - 1 : 0, l2= no ? npe + no - 1 : 0, len= std::max(l1, l2);
    T1.assign(len, 0), T2.assign(len, 0);
-   if(l1) poly_internal::conv<Z>(Po.data(), npo, E.data(), ne, T1.data(), l1);
-   if(l2) poly_internal::conv<Z>(Pe.data(), npe, O.data(), no, T2.data(), l2);
+   if(l1) convolve_internal::conv<Z>(Po.data(), npo, E.data(), ne, T1.data(), l1);
+   if(l2) convolve_internal::conv<Z>(Pe.data(), npe, O.data(), no, T2.data(), l2);
    P.resize(len);
    for(int i= 0; i < len; ++i) P[i]= sub(T1[i], T2[i]);
   } else {  // Pe E - y Po O
    const int l1= npe + ne - 1, l2= npo && no ? npo + no - 1 : 0, len= std::max(l1, l2 + 1);
    T1.assign(len, 0), T2.assign(len, 0);
-   poly_internal::conv<Z>(Pe.data(), npe, E.data(), ne, T1.data(), l1);
-   if(l2) poly_internal::conv<Z>(Po.data(), npo, O.data(), no, T2.data() + 1, l2);
+   convolve_internal::conv<Z>(Pe.data(), npe, E.data(), ne, T1.data(), l1);
+   if(l2) convolve_internal::conv<Z>(Po.data(), npo, O.data(), no, T2.data() + 1, l2);
    P.resize(len);
    for(int i= 0; i < len; ++i) P[i]= sub(T1[i], T2[i]);
   }
@@ -109,7 +109,7 @@ template <class T> T div_at(std::vector<T> P, std::vector<T> Q, unsigned long lo
   for(auto& x: P) x*= iv;
   for(auto& x: Q) x*= iv;
  }
- if constexpr(poly_internal::is_zmod_v<T>) return T::raw(linrec_internal::zmod<T>(poly_internal::to_u32(P), poly_internal::to_u32(Q), k));
+ if constexpr(convolve_internal::is_zmod_v<T>) return T::raw(linrec_internal::zmod<T>(convolve_internal::to_u32(P), convolve_internal::to_u32(Q), k));
  else return linrec_internal::generic(P, Q, k);
 }
 // a_n = Σ_{j=1}^{d} c_j a_{n-j} (n ≥ d) の第 k 項。c = (c_1, ..., c_d)、a は初項 a_0, ..., a_{d-1} (d 個以上あれば先頭の
@@ -124,7 +124,7 @@ template <class T> T linear_recurrence(const std::vector<T>& c, const std::vecto
    if(k & 1) r*= b;
   return r;
  }
- if constexpr(poly_internal::is_zmod_v<T>) {
+ if constexpr(convolve_internal::is_zmod_v<T>) {
   if(d <= 15) {  // 配列をヒープに取らない: Q = 1 - Σ c_j x^j、P = (A Q) mod x^d
    using linrec_internal::u32, linrec_internal::u64;
    const u32 M= T::mod();
@@ -144,6 +144,6 @@ template <class T> T linear_recurrence(const std::vector<T>& c, const std::vecto
  for(int j= 1; j <= d; ++j) Q[j]= T() - c[j - 1];
  std::vector<T> A(a.begin(), a.begin() + d), P= convolve_naive(A, Q);
  P.resize(d);
- if constexpr(poly_internal::is_zmod_v<T>) return T::raw(linrec_internal::zmod<T>(poly_internal::to_u32(P), poly_internal::to_u32(Q), k));
+ if constexpr(convolve_internal::is_zmod_v<T>) return T::raw(linrec_internal::zmod<T>(convolve_internal::to_u32(P), convolve_internal::to_u32(Q), k));
  else return linrec_internal::generic(P, Q, k);
 }

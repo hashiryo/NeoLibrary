@@ -20,6 +20,7 @@ ENTRIES: list[tuple[str, str, int]] = [
     ("base/core/algebra", "代数", 10),
     ("base/core/linalg", "線形代数", 20),
     ("base/core/nt", "数論", 30),
+    ("base/core/convolve", "畳み込み", 35),
     ("base/core/poly", "多項式", 40),
     ("base/core/set_fps", "集合冪級数", 50),
     ("base/core/util", "ユーティリティ", 60),

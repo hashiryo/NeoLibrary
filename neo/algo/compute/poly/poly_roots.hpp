@@ -1,13 +1,13 @@
 #pragma once
 #include <algorithm>
 #include <vector>
-#include "neo/base/core/poly/convolve_naive.hpp"
+#include "neo/base/core/convolve/naive.hpp"
 #include "neo/base/core/poly/poly_divmod.hpp"
 // 素数 p を法とする多項式 f の根を、重複なしで求める (順は決めていない)。Z は ZMod (法は素数)。f が 0 なら空を返す。
 // Cantor–Zassenhaus の方法で、FFT を使わない。p が奇数なら h = x^{(p-1)/2} mod f から gcd(f, h - 1) と gcd(f, h + 1) で
 // 0 でない根を平方剰余とそうでないものに分け、それぞれを乱択の a による gcd(g, (x + a)^{(p-1)/2} - 1) で 1 次まで割る。
 // p = 2 なら 0 と 1 を代入して調べる。
-// 冪は f を法とする剰余の 2 乗で、積は poly_internal::conv (AVX2)、剰余は rev(f)^{-1} mod x^{N-1} を先に作っておく Barrett の
+// 冪は f を法とする剰余の 2 乗で、積は convolve_internal::conv (AVX2)、剰余は rev(f)^{-1} mod x^{N-1} を先に作っておく Barrett の
 // 方法 (積の下半分 2 回)。次数 N の f で O(N^2 log p)。
 // procon-judge の yosupo-polynomial-root-finding で書き比べた naive を、法を定数にしない形で写したもの。
 namespace polyroots_internal {
@@ -22,7 +22,7 @@ template <class Z> poly mul_low(const poly& a, const poly& b, int len) {
  if(!n || !m || len <= 0) return {};
  len= std::min(len, n + m - 1);
  poly c(len);
- poly_internal::conv<Z>(a.data(), n, b.data(), m, c.data(), len);
+ convolve_internal::conv<Z>(a.data(), n, b.data(), m, c.data(), len);
  return c;
 }
 // monic な f を法とする剰余。inv_rev = rev(f)^{-1} mod x^{N-1}。
@@ -76,7 +76,7 @@ template <class Z> struct ModF {
    if(r.size() > 1) {
     const int n= int(r.size());
     poly sq(2 * n - 1);
-    poly_internal::conv<Z>(r.data(), n, r.data(), n, sq.data(), 2 * n - 1);
+    convolve_internal::conv<Z>(r.data(), n, r.data(), n, sq.data(), 2 * n - 1);
     r= reduce(std::move(sq));
    } else if(r.size() == 1) r[0]= (Z::raw(r[0]) * Z::raw(r[0])).val();
    if(e >> b & 1) r= mul_linear(r, s);
@@ -84,7 +84,7 @@ template <class Z> struct ModF {
   return r;
  }
 };
-template <class Z> std::vector<Z> to_z(const poly& a) { return poly_internal::from_u32<Z>(a); }
+template <class Z> std::vector<Z> to_z(const poly& a) { return convolve_internal::from_u32<Z>(a); }
 // h + d (d は定数)。空の vector に push_back しない形にする (gcc 15 が -Wfree-nonheap-object を誤って出すため)。
 template <class Z> poly add_scalar(const poly& h, Z d) {
  poly r(std::max<std::size_t>(h.size(), 1), 0);
@@ -93,8 +93,8 @@ template <class Z> poly add_scalar(const poly& h, Z d) {
  trim(r);
  return r;
 }
-template <class Z> poly gcd(const poly& a, const poly& b) { return poly_internal::to_u32(poly_gcd(to_z<Z>(a), to_z<Z>(b))); }
-template <class Z> poly divide(const poly& g, const poly& d) { return poly_internal::to_u32(poly_divmod(to_z<Z>(g), to_z<Z>(d)).first); }
+template <class Z> poly gcd(const poly& a, const poly& b) { return convolve_internal::to_u32(poly_gcd(to_z<Z>(a), to_z<Z>(b))); }
+template <class Z> poly divide(const poly& g, const poly& d) { return convolve_internal::to_u32(poly_divmod(to_z<Z>(g), to_z<Z>(d)).first); }
 struct Rng {
  u64 x= 88172645463325252ull;
  u64 operator()() { return x^= x << 7, x^= x >> 9; }
@@ -136,7 +136,7 @@ template <class Z> std::vector<Z> poly_roots(std::vector<Z> f) {
  }
  const Z il= f.back().inv();
  for(auto& x: f) x*= il;
- poly g= poly_internal::to_u32(f);
+ poly g= convolve_internal::to_u32(f);
  Rng rng;
  const ModF<Z> mf(g);
  const poly h= mf.pow_linear(0, (M - 1) / 2);  // x^{(p-1)/2} mod f
