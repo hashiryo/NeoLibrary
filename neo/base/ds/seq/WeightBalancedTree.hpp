@@ -9,6 +9,7 @@
 #ifdef __linux__
 #include <sys/mman.h>
 #endif
+#include "neo/base/core/algebra/concepts.hpp"
 // 列の重み平衡木 (今の Library の WeightBalancedTree の中身を写したもの)。値は葉にだけ持ち、左右の葉の数の比を 4 以下に保つ。
 // split と併合は、重い方の背を下りて回転 1 回で直す join で書く。構造体 M の決まりは SegmentTree と同じで、モノイドは T、ti、op、
 // 作用は E、mp、cp (mp は区間の長さを受けてもよい)。M の代わりに int などの型を渡すと値を並べるだけの列になる。REV で反転を
@@ -25,12 +26,7 @@
 // - 遅延の印 (作用と反転) は葉の数の上位 2 bit に置く。区間の積と 1 点の取得は、遅延を配らずに根から合わせて下りるので、永続の
 //   ときにも節を写さない。
 namespace weight_balanced_tree_internal {
-template <class M, class= void> struct monoid: std::false_type {};
-template <class M> struct monoid<M, std::void_t<typename M::T, decltype(&M::op), decltype(&M::ti)>>: std::true_type {};
-template <class M, class= void> struct action: std::false_type {};
-template <class M> struct action<M, std::void_t<typename M::T, typename M::E, decltype(&M::mp), decltype(&M::cp)>>: std::true_type {};
-template <class M, class= void> struct commute: std::false_type {};
-template <class M> struct commute<M, std::void_t<typename M::commute>>: std::true_type {};
+// モノイド、作用、可換の判定は neo/base/core/algebra/concepts.hpp (Monoid、Action、Commutative)。
 template <class M, class= void> struct value_of {
  using type= M;
 };
@@ -69,8 +65,8 @@ template <class T> struct Alloc {
 template <class M, bool REV= false, bool PERSIST= false> class WeightBalancedTree {
  using T= typename weight_balanced_tree_internal::value_of<M>::type;
  using E= typename weight_balanced_tree_internal::action_of<M>::type;
- static constexpr bool MO= weight_balanced_tree_internal::monoid<M>::value, AC= weight_balanced_tree_internal::action<M>::value;
- static constexpr bool RS= MO && REV && !weight_balanced_tree_internal::commute<M>::value;  // 逆順の積も持つ
+ static constexpr bool MO= Monoid<M>, AC= Action<M>;
+ static constexpr bool RS= MO && REV && !Commutative<M>;  // 逆順の積も持つ
  static constexpr bool FL= AC || REV;  // 葉の数の上位 bit に遅延の印を置く
  static constexpr unsigned LZ= 0x80000000u, TG= 0x40000000u, SZ= 0x3fffffffu;
  using S= std::conditional_t<MO, T, char>;

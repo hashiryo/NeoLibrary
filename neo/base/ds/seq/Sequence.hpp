@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 #include "neo/base/core/algebra/ZMod.hpp"
+#include "neo/base/core/algebra/concepts.hpp"
 #include "neo/base/ds/range/segtree/Affine.hpp"
 #ifdef __x86_64__
 #include <immintrin.h>
@@ -40,12 +41,7 @@
 // - 節は、塊の長さを 16 bit、印を 1 byte にし、使わない欄を消して小さくする (AffineSum<ZMod<P>> で 48 byte)。
 // procon-judge の dynamic-sequence-range-affine-range-sum などで書き比べた (記録は algo-notes の notes/sequence-tree.md)。
 namespace sequence_internal {
-template <class M, class= void> struct monoid: std::false_type {};
-template <class M> struct monoid<M, std::void_t<typename M::T, decltype(&M::op), decltype(&M::ti)>>: std::true_type {};
-template <class M, class= void> struct action: std::false_type {};
-template <class M> struct action<M, std::void_t<typename M::T, typename M::E, decltype(&M::mp), decltype(&M::cp)>>: std::true_type {};
-template <class M, class= void> struct commute: std::false_type {};
-template <class M> struct commute<M, std::void_t<typename M::commute>>: std::true_type {};
+// モノイド、作用、可換の判定は neo/base/core/algebra/concepts.hpp (Monoid、Action、Commutative)。
 template <class M, class= void> struct value_of {
  using type= M;
 };
@@ -82,7 +78,7 @@ template <class T> struct Alloc {
  }
  template <class U> bool operator==(const Alloc<U>&) const { return true; }
 };
-// ::monoid::AffineSum<ZMod<P>> (P は定数) かどうか (この名前空間の monoid は、モノイドかを見る判定)。
+// ::monoid::AffineSum<ZMod<P>> (P は定数) かどうか。
 template <class M> struct fast_affine: std::false_type {};
 template <unsigned P> struct fast_affine<::monoid::AffineSum<ZMod<P>>>: std::bool_constant<P != 0> {};
 using u32= unsigned;
@@ -189,10 +185,10 @@ template <class M> struct kern_of<M, true> {
 template <class M, bool REV= false, int B= 0> class Sequence {
  using T= typename sequence_internal::value_of<M>::type;
  using E= typename sequence_internal::action_of<M>::type;
- static constexpr bool MO= sequence_internal::monoid<M>::value, AC= sequence_internal::action<M>::value;
+ static constexpr bool MO= Monoid<M>, AC= Action<M>;
  static constexpr bool FA= sequence_internal::fast_affine<M>::value;  // 塊の中を AVX2 の核で回す
  using K= typename sequence_internal::kern_of<M>::type;
- static constexpr bool CM= FA || sequence_internal::commute<M>::value;  // 塊の積に値を順を問わずに足せる
+ static constexpr bool CM= FA || Commutative<M>;  // 塊の積に値を順を問わずに足せる
  static constexpr bool RS= MO && REV && !CM;  // 逆順の積も持つ
  // MIN は塊の長さの下限 (列の両端を除く)、FILL は作るときの塊の長さ。
  static constexpr int CAP= B ? B : FA ? 512 : std::clamp<int>(int(512 / sizeof(T)) / 16 * 16, 16, 128), MIN= FA ? CAP / 8 : CAP / 4,

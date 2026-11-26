@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <type_traits>
 #include <vector>
+#include "neo/base/core/algebra/concepts.hpp"
 #include "neo/base/ds/range/SegmentTree.hpp"
 // 添字の範囲 [0, n) が大きい (n は long long) セグメント木。触った所だけ節を作る。構造体 M の決まりは SegmentTree と同じで
 // (neo/base/ds/range/SegmentTree.hpp)、はじめはどの要素も ti() (作用だけなら T())。渡す構造体で中身が替わる。
@@ -170,8 +171,8 @@ template <class M> class Lazy {
  using T= typename M::T;
  using E= typename M::E;
  using Ea= std::conditional_t<std::is_trivially_copyable_v<E> && sizeof(E) <= 32, E, const E&>;
- static constexpr bool MO= segment_tree_internal::monoid<M>::value;
- static_assert(segment_tree_internal::action<M>::value);
+ static constexpr bool MO= Monoid<M>;
+ static_assert(Action<M>);
  struct Node {
   T val;  // モノイドがあれば部分木の積 (節の作用まで当てた値)、作用だけなら葉の値
   E lz;   // 子へ配っていない作用
@@ -333,8 +334,8 @@ public:
  }
 };
 }  // namespace dynamic_segment_tree_internal
-template <class M> class DynamicSegmentTree: public std::conditional_t<segment_tree_internal::action<M>::value, dynamic_segment_tree_internal::Lazy<M>, dynamic_segment_tree_internal::Patricia<M>> {
- using Base= std::conditional_t<segment_tree_internal::action<M>::value, dynamic_segment_tree_internal::Lazy<M>, dynamic_segment_tree_internal::Patricia<M>>;
+template <class M> class DynamicSegmentTree: public std::conditional_t<Action<M>, dynamic_segment_tree_internal::Lazy<M>, dynamic_segment_tree_internal::Patricia<M>> {
+ using Base= std::conditional_t<Action<M>, dynamic_segment_tree_internal::Lazy<M>, dynamic_segment_tree_internal::Patricia<M>>;
 public:
  using Base::Base;
 };

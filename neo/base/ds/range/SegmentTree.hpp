@@ -10,6 +10,7 @@
 #ifdef __linux__
 #include <sys/mman.h>
 #endif
+#include "neo/base/core/algebra/concepts.hpp"
 // セグメント木。構造体 M でモノイドと作用を渡す (今の Library の SegmentTree と同じ決まり)。
 //   モノイド: using T、static T ti() (単位元)、static T op(T a, T b)
 //   作用:     using E、static void mp(T& v, E x) か mp(T& v, E x, int len) (len は区間の長さ)、
@@ -21,10 +22,7 @@
 // 区間の積は、値が算術型なら節が決まった段ですぐ畳み、それ以外は覆う節の番号を分岐なしで集めてから左と右の 2 本の
 // 鎖で畳む。作用が残っているかは別の配列の印で持つので、作用の型に恒等元は要らない。
 namespace segment_tree_internal {
-template <class M, class= void> struct monoid: std::false_type {};
-template <class M> struct monoid<M, std::void_t<typename M::T, decltype(&M::op), decltype(&M::ti)>>: std::true_type {};
-template <class M, class= void> struct action: std::false_type {};
-template <class M> struct action<M, std::void_t<typename M::T, typename M::E, decltype(&M::mp), decltype(&M::cp)>>: std::true_type {};
+// モノイドと作用の判定は neo/base/core/algebra/concepts.hpp (Monoid、Action)。
 template <class M, class= void> struct action_type {
  using type= char;
 };
@@ -71,7 +69,7 @@ template <class M> class Generic {
  using E= typename action_type<M>::type;
  // 小さい作用は値で渡す。参照で渡すと、子の lz への書き込みと重なりうるとみなされて、書くたびに読み直しが入る。
  using Ea= std::conditional_t<std::is_trivially_copyable_v<E> && sizeof(E) <= 32, E, const E&>;
- static constexpr bool MO= monoid<M>::value, AC= action<M>::value;
+ static constexpr bool MO= Monoid<M>, AC= Action<M>;
  static_assert(MO || AC, "M にはモノイド (T, ti, op) か作用 (T, E, mp, cp) が要る");
  int n= 0, lg= 0, sz= 1;
  Vec<T> d;  // モノイドがあれば節 1..2sz-1 の値、作用だけなら葉の値 (sz 個)
