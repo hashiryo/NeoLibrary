@@ -440,8 +440,8 @@ public:
   }
  }
 };
-template <class Z> struct const_zmod: std::false_type {};
-template <unsigned M> struct const_zmod<ZMod<M>>: std::bool_constant<M != 0> {};
+// 法が定数の ZMod か。法は neo/base/core/algebra/ZMod.hpp の zmod_mod_v (ZMod でなければ -1)。
+template <class Z> struct const_zmod: std::bool_constant<(zmod_mod_v<Z> > 0)> {};
 template <class Z, class= void> struct Pick {
  using lazy= segment_tree_internal::Generic<monoid::AffineSum<Z>>;
  using dual= segment_tree_internal::Generic<monoid::Affine<Z>>;

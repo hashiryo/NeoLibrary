@@ -164,16 +164,15 @@ template <bool MIN> [[gnu::noinline]] inline void semiring_tile(const int* __res
   }
 }
 #endif
-template <class T> struct is_zmod: std::false_type {};
-template <unsigned M> struct is_zmod<ZMod<M>>: std::true_type {};
-template <class T> constexpr bool is_zmod_v= is_zmod<T>::value;
+// 型が ZMod かの判定は neo/base/core/algebra/ZMod.hpp。使う場所の名前は変えない。
+using ::is_zmod;
+using ::is_zmod_v;
 // ZMod の行列の核。行列は行優先の配列で受ける。
 namespace zmat {
 using u32= unsigned;
 using u64= unsigned long long;
 using u128= unsigned __int128;
-template <class Z> struct mod_param;
-template <unsigned M> struct mod_param<ZMod<M>>: std::integral_constant<unsigned, M> {};
+template <class Z> struct mod_param: std::integral_constant<unsigned, unsigned(zmod_mod_v<Z>)> {};
 // 2^32 未満の n が素数か。底 2、7、61 の Miller-Rabin (4759123141 未満で正しい)。
 constexpr bool is_prime32(u32 n) {
  if(n < 64) return 0x28208a20a08a28acull >> n & 1;

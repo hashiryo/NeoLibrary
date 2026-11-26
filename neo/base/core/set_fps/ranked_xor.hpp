@@ -1103,8 +1103,8 @@ inline void proj_post(const std::vector<u32>& vk, u32 c0, int M, u32* ans, const
 }
 
 // ---- sps の各ヘッダから使う道具 ----
-template <class T> struct is_zmod: std::false_type {};
-template <unsigned M> struct is_zmod<ZMod<M>>: std::true_type {};
+// 型が ZMod かの判定は neo/base/core/algebra/ZMod.hpp。使う場所の名前は変えない。
+using ::is_zmod;
 // T が法が奇数の ZMod で、n が速い核で受ける大きさ (lo <= n <= NMAX) か。
 template <class T> inline bool fast(int n, int lo) {
  if constexpr(is_zmod<T>::value) return (T::mod() & 1) && T::mod() >= 3 && lo <= n && n <= NMAX;

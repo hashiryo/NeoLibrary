@@ -19,8 +19,8 @@
 namespace pow_table_internal {
 using u32= unsigned;
 using u64= unsigned long long;
-template <class T> struct is_zmod: std::false_type {};
-template <unsigned M> struct is_zmod<ZMod<M>>: std::true_type {};
+// 型が ZMod かの判定は neo/base/core/algebra/ZMod.hpp。使う場所の名前は変えない。
+using ::is_zmod;
 // 8 個の x (M 未満) の d 乗を 4 組 (32 個) まとめて求め、M 未満で out に書く。
 template <class Z> void pow32(const u32* x, u32* out, u64 d, __m256i mv, __m256i mi, u32 R1, u32 R2) {
  auto mont8= [&](__m256i a, __m256i b) {

@@ -213,3 +213,11 @@ public:
   return is;
  }
 };
+// 型が ZMod かどうかと、その法。法は ZMod でなければ -1 で、ZMod<0> は 0 (法は実行時に決まる)。
+// 各ヘッダが持っていた同じ判定 (linalg_internal::is_zmod、mod_param、const_zmod など) は、この名前の別名にする。
+template <class T> struct is_zmod: std::false_type {};
+template <unsigned M> struct is_zmod<ZMod<M>>: std::true_type {};
+template <class T> constexpr bool is_zmod_v= is_zmod<T>::value;
+template <class T> struct zmod_mod: std::integral_constant<int, -1> {};
+template <unsigned M> struct zmod_mod<ZMod<M>>: std::integral_constant<int, int(M)> {};
+template <class T> constexpr int zmod_mod_v= zmod_mod<T>::value;

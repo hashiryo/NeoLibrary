@@ -24,9 +24,9 @@
 namespace convolve_internal {
 using u32= unsigned;
 using u64= unsigned long long;
-template <class T> struct is_zmod: std::false_type {};
-template <unsigned M> struct is_zmod<ZMod<M>>: std::true_type {};
-template <class T> constexpr bool is_zmod_v= is_zmod<T>::value;
+// 型が ZMod かの判定は neo/base/core/algebra/ZMod.hpp。使う場所の名前は変えない。
+using ::is_zmod;
+using ::is_zmod_v;
 template <class Z> [[gnu::always_inline]] inline u32 r32() { return Z(u64(1) << 32).val(); }
 [[gnu::always_inline]] inline __m256i fold(__m256i x, __m256i R) { return _mm256_add_epi64(_mm256_mul_epu32(_mm256_srli_epi64(x, 32), R), _mm256_and_si256(x, _mm256_set1_epi64x(0xffffffffll))); }
 constexpr int PAD= 32;

@@ -21,8 +21,8 @@ template <class T> constexpr T one() {
  if constexpr(requires { T::one(); }) return T::one();
  else return T(1);
 }
-template <class T> struct mod_param: std::integral_constant<int, -1> {};  // ZMod でなければ -1
-template <unsigned M> struct mod_param<ZMod<M>>: std::integral_constant<int, int(M)> {};
+// 法は neo/base/core/algebra/ZMod.hpp の zmod_mod_v。ZMod でなければ -1。
+template <class T> struct mod_param: std::integral_constant<int, zmod_mod_v<T>> {};
 // ZMod の値を表現のまま (2M 未満) 読む。
 template <class Z> constexpr unsigned raw(Z x) { return std::bit_cast<unsigned>(x); }
 // 表現のまま (2M 未満) の値どうしの積を、いくつまで u64 に足せるか。ZMod<0> は法が 2^30 未満なので 4。
