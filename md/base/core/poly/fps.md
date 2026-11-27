@@ -25,7 +25,7 @@ template <class Conv, class K> std::vector<K> fps::sqrt(const std::vector<K>& f,
 
 - `inv` は Newton 法で、長さ $m$ から $2m$ ずつ倍にします。$f g = 1 + x^m e$ のとき $g (2 - f g) = g - x^m g e$ なので、1 段は、$e$ を $f g$ の $m$ 次から $2m - 1$ 次までで求め、$g$ の $m$ 次から $2m - 1$ 次までを $-g e$ の先頭 $m$ 項で直します。
 - `log` は $\log f = \int f' / f$ です。`inv` で $1/f$ を作り、$f'$ との積を 1 回の範囲の積で求めて積分します。
-- `exp` は $g \leftarrow g (1 - \log g + f)$ を倍々に回します。各段で $\log g$ を計算する素直な形で、変換の回数を詰める形はまだ作っていません。
+- `exp` は $g \leftarrow g (1 - \log g + f)$ を倍々に回します。段の入口で $g = \exp f$ の $x^m$ までと $h = 1/g$ の $x^m$ までを持ち、1 段で $h$ を Newton 1 段で $2m$ 桁に直し、$(\log g)' = g' h$ から $w = f - \log g$ の $x^m$ 以上を作って $g$ を直し、$h$ も $g$ が変わった分だけ直します。変換の長さは 4 回とも $2m$ で済みます。
 - `pow` は、0 でない最初の次数を外に出し、先頭を 1 にした級数を `exp` と `log` で $k$ 乗し、定数の $k$ 乗を掛けて戻します。
 - `sqrt` は、0 でない最初の次数 $v$ を外に出し、残りを Newton 法 ($h \leftarrow (h + (f / x^v) / h) / 2$) で作ります。$v$ が奇数か、定数の平方根が無ければ空を返します。
 
