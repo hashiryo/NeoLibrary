@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cassert>
 #include <vector>
+#include "neo/base/core/algebra/ZMod.hpp"
 #include "neo/base/core/convolve/convolve.hpp"
+#include "neo/base/core/nt/sqrt_mod.hpp"
 
 namespace fps {
 // f の先頭 n 項の逆数 g (f g = 1 mod x^n)。f[0] は逆元を持つこと。
@@ -101,13 +103,37 @@ template <class Conv= convolve_internal::Auto, class K> std::vector<K> pow(const
  return g;
 }
 
-// f の先頭 n 項の平方根 (f[0] = 1)。sqrt f = exp(log f / 2)。
+// f の先頭 n 項の平方根。平方根が無ければ空を返す。
+// 先頭が 0 のときは、0 でない最初の次数 v が偶数なら x^{v/2} を外に出す (v が奇数なら無い)。
+// 残りの定数 c の平方根は、K が ZMod なら sqrt_mod で求め (無ければ空)、それ以外の型では c = 1 のときだけ扱う。
+// 外に出した残りは exp(log / 2) で作る。
 template <class Conv= convolve_internal::Auto, class K> std::vector<K> sqrt(const std::vector<K>& f, int n) {
  assert(n >= 1);
- assert(!f.empty() && f[0] == K(1));
- std::vector<K> lg= log<Conv>(f, n);
+ int v= 0;
+ while (v < int(f.size()) && f[v] == K()) ++v;
+ if (v == int(f.size())) return std::vector<K>(n);  // 0 の平方根は 0
+ if (v & 1) return {};                             // 位数が奇数なら無い
+ const int half= v >> 1;
+ if (half >= n) return std::vector<K>(n);
+ const K c= f[v];
+ K r0;
+ if constexpr (is_zmod_v<K>) {
+  const long long r= sqrt_mod(c.val(), K::mod());
+  if (r < 0) return {};
+  r0= K((unsigned long long)r);
+ } else {
+  assert(c == K(1));
+  r0= K(1);
+ }
+ const K ci= c.inv();
+ std::vector<K> u(n - half);  // u[0] = 1。f の n - half + v 次以上は 0 と見る
+ for (int i= 0; i < int(u.size()) && v + i < int(f.size()); ++i) u[i]= f[v + i] * ci;
+ std::vector<K> lg= log<Conv>(u, n - half);
  const K iv2= K(2).inv();
  for (auto& x: lg) x*= iv2;
- return exp<Conv>(lg, n);
+ const std::vector<K> t= exp<Conv>(lg, n - half);
+ std::vector<K> g(n);
+ for (int i= 0; i < int(t.size()); ++i) g[half + i]= t[i] * r0;
+ return g;
 }
 }  // namespace fps

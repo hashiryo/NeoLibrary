@@ -17,7 +17,7 @@ template <class Conv, class K> std::vector<K> fps::sqrt(const std::vector<K>& f,
 - `fps::log<Conv>(f, n)`: $\log f$ の先頭 $n$ 項。`f[0] = 1` が要ります。
 - `fps::exp<Conv>(f, n)`: $\exp f$ の先頭 $n$ 項。`f[0] = 0` が要ります。
 - `fps::pow<Conv>(f, k, n)`: $f^k$ の先頭 $n$ 項 ($k \ge 0$)。`f[0] = 0` のときは、0 でない最初の次数 $v$ として $x^{vk}$ を外に出します。$0^0$ は 1 です。
-- `fps::sqrt<Conv>(f, n)`: $\sqrt f$ の先頭 $n$ 項。`f[0] = 1` が要ります。
+- `fps::sqrt<Conv>(f, n)`: $\sqrt f$ の先頭 $n$ 項。平方根が無ければ空を返します。`f[0]` は 1 でなくてもかまいません (0 のときは、0 でない最初の次数 $v$ が偶数なら $x^{v/2}$ を外に出し、定数 $c$ の平方根は `ZMod` なら `sqrt_mod` で求めます)。
 
 `f` は $n$ 項より短くても長くてもかまいません (足りない係数は 0 と見ます)。核はテンプレート引数 `Conv` で受け、畳み込みの共通の口 (`neo/base/core/convolve/convolve.hpp`) の `convolve_range` に渡します。省くと、include した核のうち `K` を受け持つ既定の核になります。
 
@@ -27,6 +27,6 @@ template <class Conv, class K> std::vector<K> fps::sqrt(const std::vector<K>& f,
 - `log` は $\log f = \int f' / f$ です。`inv` で $1/f$ を作り、$f'$ との積を 1 回の範囲の積で求めて積分します。
 - `exp` は $g \leftarrow g (1 - \log g + f)$ を倍々に回します。各段で $\log g$ を計算する素直な形で、変換の回数を詰める形はまだ作っていません。
 - `pow` は、0 でない最初の次数を外に出し、先頭を 1 にした級数を `exp` と `log` で $k$ 乗し、定数の $k$ 乗を掛けて戻します。
-- `sqrt` は $\exp(\log f / 2)$ です。
+- `sqrt` は、0 でない最初の次数 $v$ を外に出し、先頭を 1 にした級数を作って $\exp(\log / 2)$ で平方根を取ります。$v$ が奇数か、定数の平方根が無ければ空を返します。
 
 範囲の積は、核が巡回の長さを必要な分だけに詰めるので、`inv` の 1 段の変換の長さは $2m$ で済みます。核を差し替えると、998244353 でも $10^9 + 7$ でも動きます (変換を使わない素朴な核でも同じ関数が動きます)。
