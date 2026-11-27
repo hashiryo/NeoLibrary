@@ -6,22 +6,22 @@ documentation_of: ../../neo/algo/compute/poly/lagrange.hpp
 連続する点の値からの 1 点の値、任意の点からの係数、多項式と指数の積の和を求めます。
 
 ```cpp
-template <class K> K interpolate_iota(const std::vector<K>& y, unsigned long long x);
-template <class K> std::vector<K> interpolate(const std::vector<K>& x, const std::vector<K>& y);
-template <class K> K sum_exp_poly(const std::vector<K>& y, K r, unsigned long long n);
-template <class K> K sum_exp_poly_limit(const std::vector<K>& y, K r);
+template <class K> K lagrange::interpolate_iota(const std::vector<K>& y, unsigned long long x);
+template <class K> std::vector<K> lagrange::interpolate(const std::vector<K>& x, const std::vector<K>& y);
+template <class K> K lagrange::sum_exp_poly(const std::vector<K>& y, K r, unsigned long long n);
+template <class K> K lagrange::sum_exp_poly_limit(const std::vector<K>& y, K r);
 ```
 
-- `interpolate_iota(y, x)` は、$y_i = f(i)$ ($0 \le i < n$) を満たす $n - 1$ 次以下の $f$ の $f(x)$ を $O(n)$ で返します。今の Library の `sample_points_shift` にあたります。
-- `interpolate(x, y)` は、点 $(x_i, y_i)$ を通る $n - 1$ 次以下の多項式の係数を $O(n^2)$ で返します。$x_i$ は相異なることが要ります。
-- `sum_exp_poly(y, r, n)` は $\sum_{i=0}^{n-1} r^i f(i)$ を $O(d)$ で返します。$f$ は $y_i = f(i)$ ($0 \le i \le d$) を満たす $d$ 次以下の多項式で、$0^0 = 1$ とします。
-- `sum_exp_poly_limit(y, r)` は $\sum_{i=0}^{\infty} r^i f(i)$ ($r \ne 1$) です。和は分母が $(1 - r)^{d+1}$ の有理式として定めます。
+- `lagrange::interpolate_iota(y, x)` は、$y_i = f(i)$ ($0 \le i < n$) を満たす $n - 1$ 次以下の $f$ の $f(x)$ を $O(n)$ で返します。今の Library の `sample_points_shift` にあたります。
+- `lagrange::interpolate(x, y)` は、点 $(x_i, y_i)$ を通る $n - 1$ 次以下の多項式の係数を $O(n^2)$ で返します。$x_i$ は相異なることが要ります。
+- `lagrange::sum_exp_poly(y, r, n)` は $\sum_{i=0}^{n-1} r^i f(i)$ を $O(d)$ で返します。$f$ は $y_i = f(i)$ ($0 \le i \le d$) を満たす $d$ 次以下の多項式で、$0^0 = 1$ とします。
+- `lagrange::sum_exp_poly_limit(y, r)` は $\sum_{i=0}^{\infty} r^i f(i)$ ($r \ne 1$) です。和は分母が $(1 - r)^{d+1}$ の有理式として定めます。
 
 `K` は体で、`ZMod` なら法は素数であることが要ります。べき乗和 $\sum_{i<n} i^d$ は、`pow_table<K>(d, d)` (`neo/base/core/nt/pow_table.hpp`) を $r = 1$ で `sum_exp_poly` に渡せば求まります。
 
 ## 中身
 
-`interpolate_iota` は、ラグランジュの基底 $L_k(x) = \prod_{j \ne k} (x - j)/(k - j)$ で $f(x) = \sum_k y_k L_k(x)$ を求めます。隣どうしの比は次の形です。
+`lagrange::interpolate_iota` は、ラグランジュの基底 $L_k(x) = \prod_{j \ne k} (x - j)/(k - j)$ で $f(x) = \sum_k y_k L_k(x)$ を求めます。隣どうしの比は次の形です。
 
 $$\frac{L_{k+1}(x)}{L_k(x)} = -\frac{(n-1-k)(x-k)}{(k+1)(x-k-1)}$$
 

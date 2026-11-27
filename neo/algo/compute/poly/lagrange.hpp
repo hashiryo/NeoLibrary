@@ -324,6 +324,8 @@ template <class Z> std::vector<Z> interp_zmod(const std::vector<Z>& X, const std
  return f;
 }
 }  // namespace lagrange_internal
+// 小さい側の補間と和の道具 (namespace lagrange)。速い木の版は neo/base/core/poly/multipoint.hpp の interpolate。
+namespace lagrange {
 // y_i = f(i) (0 ≤ i < n) を満たす n-1 次以下の f の f(x)。
 template <class K> K interpolate_iota(const std::vector<K>& y, unsigned long long x) {
  if(y.empty()) return K();
@@ -465,3 +467,4 @@ template <class K> K sum_exp_poly_limit(const std::vector<K>& y, K r) {
   return num * rd / om;
  }
 }
+}  // namespace lagrange
