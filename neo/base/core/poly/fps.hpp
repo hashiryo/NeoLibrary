@@ -125,15 +125,24 @@ template <class Conv= convolve_internal::Auto, class K> std::vector<K> sqrt(cons
   assert(c == K(1));
   r0= K(1);
  }
- const K ci= c.inv();
- std::vector<K> u(n - half);  // u[0] = 1。f の n - half + v 次以上は 0 と見る
- for (int i= 0; i < int(u.size()) && v + i < int(f.size()); ++i) u[i]= f[v + i] * ci;
- std::vector<K> lg= log<Conv>(u, n - half);
+ // x^half を外に出した残り h = sqrt(f / x^v) を Newton 法で作る: h <- (h + (f / x^v) / h) / 2。
+ // h の先頭は r0 (r0^2 = c)。
+ std::vector<K> up(n - half);  // f / x^v
+ for (int i= 0; i < int(up.size()) && v + i < int(f.size()); ++i) up[i]= f[v + i];
+ std::vector<K> h(1, r0);
  const K iv2= K(2).inv();
- for (auto& x: lg) x*= iv2;
- const std::vector<K> t= exp<Conv>(lg, n - half);
+ for (int m= 1; m < n - half;) {
+  const int m2= std::min(2 * m, n - half);
+  const std::vector<K> ih= inv<Conv>(h, m2);  // 1/h (h は 0 詰め)
+  std::vector<K> t(m2);
+  const int ul= std::min(int(up.size()), m2);
+  convolve_range<Conv>(up.data(), ul, ih.data(), m2, 0, m2, t.data());
+  h.resize(m2);
+  for (int i= 0; i < m2; ++i) h[i]= (h[i] + t[i]) * iv2;
+  m= m2;
+ }
  std::vector<K> g(n);
- for (int i= 0; i < int(t.size()); ++i) g[half + i]= t[i] * r0;
+ for (int i= 0; i < int(h.size()); ++i) g[half + i]= h[i];
  return g;
 }
 }  // namespace fps
