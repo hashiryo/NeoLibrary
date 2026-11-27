@@ -311,28 +311,30 @@ template <class T> vector<T> egf_T(const vector<T>& f, vector<T> g) {
 }
 
 // 引き算の無い半環 (MinPlus など) の部分集合畳み込み。h[S] = sum_{T ⊆ S} f[T] g[S \ T] を 3^n で。
-template <class T> vector<T> semiring_convolve(const vector<T>& f, const vector<T>& g) {
+template <class M> vector<typename M::T> semiring_convolve(const vector<typename M::T>& f, const vector<typename M::T>& g) {
+ using T= typename M::T;
  const int N= f.size();
  vector<T> h(N);
  for(int s= 0; s < N; ++s) {
-  T acc= f[s] * g[0];
-  for(int t= (s - 1) & s; t > 0; t= (t - 1) & s) acc+= f[t] * g[s ^ t];
-  if(s) acc+= f[0] * g[s];
+  T acc= M::mul(f[s], g[0]);
+  for(int t= (s - 1) & s; t > 0; t= (t - 1) & s) acc= M::add(acc, M::mul(f[t], g[s ^ t]));
+  if(s) acc= M::add(acc, M::mul(f[0], g[s]));
   h[s]= acc;
  }
  return h;
 }
 // 半環の exp。h[∅] = 1、h[S] = sum_{T ⊆ S、T は S の最小の要素を含む} f[T] h[S \ T] (集合を塊に分ける和、3^n)。f[∅] は読まない。
-template <class T> vector<T> semiring_exp(const vector<T>& f, T one) {
+template <class M> vector<typename M::T> semiring_exp(const vector<typename M::T>& f) {
+ using T= typename M::T;
  const int N= f.size();
  vector<T> h(N);
- h[0]= one;
+ h[0]= M::one();
  for(int s= 1; s < N; ++s) {
   const int lo= s & -s, rest= s ^ lo;
-  T acc= f[s] * h[0];
+  T acc= M::mul(f[s], h[0]);
   for(int a= (rest - 1) & rest;; a= (a - 1) & rest) {
    if(a == rest) break;
-   acc+= f[lo | a] * h[rest ^ a];
+   acc= M::add(acc, M::mul(f[lo | a], h[rest ^ a]));
    if(!a) break;
   }
   h[s]= acc;

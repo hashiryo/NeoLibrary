@@ -20,11 +20,13 @@
 #include <sys/mman.h>
 #endif
 #include "neo/base/core/algebra/ZMod.hpp"
+#include "neo/base/core/algebra/structure.hpp"
 // 行列。大きさを実行時に決め、行優先の 1 本の配列 a に持つ (a[i * w + j] が i 行 j 列)。a は 2 MB 以上なら、Linux では
-// 2 MB 境界の mmap に置いて huge page を頼む (linalg_internal::HugeAlloc)。要素の型 T は和 (+)、積 (*)、0、1 を
-// 持てばよい (半環)。0 と 1 は、T に静的メンバ関数 zero() と one() があればそれを、なければ T(0) と T(1) を使う
-// (neo/base/core/algebra/semiring.hpp の MinPlus などは前者)。引き算とスカラー倍は、T がそれを持つときだけ使える。
-// T が ZMod なら、行列の積、ベクトルとの積、累乗は linalg_internal::zmat の核を使う。積は値を M 未満に直して u64 の和にため、
+// 2 MB 境界の mmap に置いて huge page を頼む (linalg_internal::HugeAlloc)。テンプレート引数 X は構造の場所で、
+// neo/base/core/algebra/structure.hpp の読み替えで構造 M を決める。X が値の型 T を持てば X が構造 (要素の型は X::T)、
+// 持たなければ PlusTimes<X> で、要素の型は X (int、double、ZMod など)。構造は値の型 T と static 関数 add、mul、zero、one
+// を持てばよい (半環)。引き算 (sub) とスカラー倍は、構造がそれを持つときだけ使える。
+// 要素の型が ZMod なら、行列の積、ベクトルとの積、累乗は linalg_internal::zmat の核を使う。積は値を法未満に直して u64 の和にため、
 // 最後に 1 回だけ還元する。小さい行列はスカラーで、ほかは AVX2 の 4 行 × 8 列のタイルで掛け、1 辺を 2 の冪に広げても
 // 無駄の少ない大きい積 (法が奇数) は Strassen の再帰 (Winograd の形) にする。累乗は、法が素数で辺と指数が大きければ Frobenius 標準形を経由し、
 // それ以外は二分累乗。
@@ -110,10 +112,10 @@ template <class T> constexpr T one() {
  if constexpr(requires { T::one(); }) return T::one();
  else return T(1);
 }
-// 行列の積の速い道の 1 行分 c[j] += T::fast_mul(x, r[j]) (j < n)。c と r が重ならないことを伝えないと、x64 の GCC 15 は
-// 64 bit の値の min のループをベクトル化しない。
-template <class T> [[gnu::always_inline]] inline void fast_axpy(T* __restrict c, const T* __restrict r, T x, int n) {
- for(int j= 0; j < n; ++j) c[j]+= T::fast_mul(x, r[j]);
+// 行列の積の速い道の 1 行分 c[j]= M::add(c[j], M::fast_mul(x, r[j])) (j < n)。c と r が重ならないことを伝えないと、x64 の
+// GCC 15 は 64 bit の値の min のループをベクトル化しない。
+template <class M> [[gnu::always_inline]] inline void fast_axpy(typename M::T* __restrict c, const typename M::T* __restrict r, typename M::T x, int n) {
+ for(int j= 0; j < n; ++j) c[j]= M::add(c[j], M::fast_mul(x, r[j]));
 }
 #ifdef __x86_64__
 // MinPlus<int> と MaxPlus<int> の速い道の積 c = a b を、4 行 × 16 列の和を 8 本の ymm に持つタイルで求める。a は h4 行 × m 列
@@ -836,11 +838,13 @@ template <class Z> void pow(const Z* A, int n, u64 K, Z* R) {
 }
 }
 }
-template <class T> struct Matrix {
+template <class X> struct Matrix {
+ using M= structure_of<X>;
+ using T= typename M::T;
  int h= 0, w= 0;
  std::vector<T, linalg_internal::HugeAlloc<T>> a;
  Matrix()= default;
- Matrix(int h, int w): h(h), w(w), a((size_t)h * w, linalg_internal::zero<T>()) {}
+ Matrix(int h, int w): h(h), w(w), a((size_t)h * w, M::zero()) {}
  Matrix(int h, int w, const T& v): h(h), w(w), a((size_t)h * w, v) {}
  Matrix(const std::vector<std::vector<T>>& v): h(v.size()), w(v.empty() ? 0 : v[0].size()), a((size_t)h * w) {
   for(int i= 0; i < h; ++i) {
@@ -850,7 +854,7 @@ template <class T> struct Matrix {
  }
  static Matrix identity(int n) {
   Matrix r(n, n);
-  for(int i= 0; i < n; ++i) r.a[(size_t)i * n + i]= linalg_internal::one<T>();
+  for(int i= 0; i < n; ++i) r.a[(size_t)i * n + i]= M::one();
   return r;
  }
  int height() const { return h; }
@@ -859,23 +863,23 @@ template <class T> struct Matrix {
  const T* operator[](int i) const { return a.data() + (size_t)i * w; }
  Matrix& operator+=(const Matrix& r) {
   assert(h == r.h && w == r.w);
-  for(size_t i= 0; i < a.size(); ++i) a[i]+= r.a[i];
+  for(size_t i= 0; i < a.size(); ++i) a[i]= M::add(a[i], r.a[i]);
   return *this;
  }
  Matrix& operator-=(const Matrix& r) {
   assert(h == r.h && w == r.w);
-  for(size_t i= 0; i < a.size(); ++i) a[i]-= r.a[i];
+  for(size_t i= 0; i < a.size(); ++i) a[i]= M::sub(a[i], r.a[i]);
   return *this;
  }
  Matrix& operator*=(const T& c) {
-  for(auto& x: a) x*= c;
+  for(auto& x: a) x= M::mul(x, c);
   return *this;
  }
  friend Matrix operator+(Matrix l, const Matrix& r) { return l+= r; }
  friend Matrix operator-(Matrix l, const Matrix& r) { return l-= r; }
  friend Matrix operator*(Matrix l, const T& c) { return l*= c; }
  friend Matrix operator*(const T& c, Matrix r) {
-  for(auto& x: r.a) x= c * x;
+  for(auto& x: r.a) x= M::mul(c, x);
   return r;
  }
  // 行列の積。T が ZMod なら linalg_internal::zmat::mul、ほかは i-k-j の順に足す。
@@ -884,50 +888,50 @@ template <class T> struct Matrix {
   Matrix c(l.h, r.w);
   if constexpr(linalg_internal::is_zmod_v<T>) linalg_internal::zmat::mul(l.a.data(), r.a.data(), c.a.data(), l.h, l.w, r.w);
   else {
-   // T が速い道 (neo/base/core/algebra/semiring.hpp の MinPlus と MaxPlus の fast_one_sided、fast_bounded、fast_mul、fast_fix) を持ち、
+   // 構造 M が速い道 (neo/base/core/algebra/semiring.hpp の MinPlus と MaxPlus の fast_one_sided、fast_bounded、fast_mul、fast_fix) を持ち、
    // 両方の行列の値が同じ範囲にあれば、積を fast_mul (INF の比べのない和) にして足し、行ごとに fast_fix で直す (範囲の中では
    // 厳密な積と同じ値)。片側の範囲に入れば、fast_bounded は調べない。
    if constexpr(requires {
-                 T::fast_mul(l.a[0], r.a[0]);
-                 T::fast_one_sided(l.a.data(), size_t(0));
-                 T::fast_bounded(l.a.data(), size_t(0));
-                 T::fast_fix(l.a[0], false);
+                 M::fast_mul(l.a[0], r.a[0]);
+                 M::fast_one_sided(l.a.data(), size_t(0));
+                 M::fast_bounded(l.a.data(), size_t(0));
+                 M::fast_fix(l.a[0], false);
                 }) {
-    const bool one= T::fast_one_sided(l.a.data(), l.a.size()) && T::fast_one_sided(r.a.data(), r.a.size());
-    if(one || (T::fast_bounded(l.a.data(), l.a.size()) && T::fast_bounded(r.a.data(), r.a.size()))) {
+    const bool one= M::fast_one_sided(l.a.data(), l.a.size()) && M::fast_one_sided(r.a.data(), r.a.size());
+    if(one || (M::fast_bounded(l.a.data(), l.a.size()) && M::fast_bounded(r.a.data(), r.a.size()))) {
 #ifdef __x86_64__
      // MinPlus<int> と MaxPlus<int> で、どの辺も 16 以上なら、行と列を広げた int の配列に写してタイルで掛け、答えの行列に直接書く。
      // 写す配列は呼び出しをまたいで使い回す。積ごとに確保して答えも別の配列に書いた 115be19 は、cf-147-b の EPYC 7763 で写し元の
      // 1.65 倍かかっていた (4 KB のページを初めて触る分が、積 1 回あたり 0.6 ms ほどと見ている)。
-     if constexpr(requires { T::zero().x; } && sizeof(T) == sizeof(int) && std::is_same_v<std::remove_cvref_t<decltype(T::zero().x)>, int>) {
+     if constexpr(requires { M::fast_tile; } && std::is_same_v<T, int>) {
       if(l.h >= 16 && l.w >= 16 && r.w >= 16) {
-       constexpr int z= T::zero().x;
-       static linalg_internal::hvec<int> a, b;
+       const T z= M::zero();
+       static linalg_internal::hvec<T> a, b;
        const int h= l.h, h4= (h + 3) & ~3, m= l.w, w= r.w, w16= (w + 15) & ~15;
        if(a.size() < std::size_t(h4) * m) a.resize(std::size_t(h4) * m);
        if(b.size() < std::size_t(m) * w16) b.resize(std::size_t(m) * w16);
        for(int i= 0; i < h; ++i)
-        for(int k= 0; k < m; ++k) a[std::size_t(i) * m + k]= l[i][k].x;
+        for(int k= 0; k < m; ++k) a[std::size_t(i) * m + k]= l[i][k];
        std::fill(a.begin() + std::size_t(h) * m, a.begin() + std::size_t(h4) * m, z);
        for(int k= 0; k < m; ++k) {
-        int* bk= b.data() + std::size_t(k) * w16;
-        for(int j= 0; j < w; ++j) bk[j]= r[k][j].x;
+        T* bk= b.data() + std::size_t(k) * w16;
+        for(int j= 0; j < w; ++j) bk[j]= r[k][j];
         std::fill(bk + w, bk + w16, z);
        }
-       linalg_internal::semiring_tile<(z > 0)>(a.data(), b.data(), reinterpret_cast<int*>(c.a.data()), h, m, w, w16, z);
-       if constexpr(requires { T::fast_fix_all(c.a.data(), c.a.size(), true); }) T::fast_fix_all(c.a.data(), c.a.size(), !one);
+       linalg_internal::semiring_tile<(M::fast_tile == 0)>(a.data(), b.data(), c.a.data(), h, m, w, w16, z);
+       if constexpr(requires { M::fast_fix_all(c.a.data(), c.a.size(), true); }) M::fast_fix_all(c.a.data(), c.a.size(), !one);
        else
-        for(auto& v: c.a) v= T::fast_fix(v, !one);
+        for(auto& v: c.a) v= M::fast_fix(v, !one);
        return c;
       }
      }
 #endif
      for(int i= 0; i < l.h; ++i) {
       T* ci= c[i];
-      for(int k= 0; k < l.w; ++k) linalg_internal::fast_axpy(ci, r[k], l[i][k], r.w);
-      if constexpr(requires { T::fast_fix_all(ci, std::size_t(r.w), true); }) T::fast_fix_all(ci, r.w, !one);
+      for(int k= 0; k < l.w; ++k) linalg_internal::fast_axpy<M>(ci, r[k], l[i][k], r.w);
+      if constexpr(requires { M::fast_fix_all(ci, std::size_t(r.w), true); }) M::fast_fix_all(ci, r.w, !one);
       else
-       for(int j= 0; j < r.w; ++j) ci[j]= T::fast_fix(ci[j], !one);
+       for(int j= 0; j < r.w; ++j) ci[j]= M::fast_fix(ci[j], !one);
      }
      return c;
     }
@@ -937,7 +941,7 @@ template <class T> struct Matrix {
     for(int k= 0; k < l.w; ++k) {
      const T x= l[i][k];
      const T* rk= r[k];
-     for(int j= 0; j < r.w; ++j) ci[j]+= x * rk[j];
+     for(int j= 0; j < r.w; ++j) ci[j]= M::add(ci[j], M::mul(x, rk[j]));
     }
    }
   }
@@ -947,13 +951,13 @@ template <class T> struct Matrix {
  // 列ベクトルとの積 A v。
  friend std::vector<T> operator*(const Matrix& l, const std::vector<T>& v) {
   assert(l.w == (int)v.size());
-  std::vector<T> r(l.h, linalg_internal::zero<T>());
+  std::vector<T> r(l.h, M::zero());
   if constexpr(linalg_internal::is_zmod_v<T>) linalg_internal::zmat::mul_vec(l.a.data(), v.data(), r.data(), l.h, l.w);
   else {
    for(int i= 0; i < l.h; ++i) {
     const T* li= l[i];
-    T s= linalg_internal::zero<T>();
-    for(int j= 0; j < l.w; ++j) s+= li[j] * v[j];
+    T s= M::zero();
+    for(int j= 0; j < l.w; ++j) s= M::add(s, M::mul(li[j], v[j]));
     r[i]= s;
    }
   }

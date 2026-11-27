@@ -5,13 +5,13 @@
 #include <cstddef>
 #include <limits>
 #include <type_traits>
-// 半環の値の型。和と積と 0 と 1 (静的メンバ関数 zero() と one()) を持ち、行列 (neo/base/core/linalg/Matrix.hpp、SquareMatrix.hpp) の
-// 要素やセグメント木の値にそのまま使える。
-//   MinPlus<T>: 和は min、積は + (最短路)。0 は INF、1 は 0。
-//   MaxPlus<T>: 和は max、積は + (最長路)。0 は -INF、1 は 0。
-//   MaxMin<T>: 和は max、積は min (道の幅の最大)。0 は T の最小、1 は T の最大。
+// 半環の構造 (値の型 T と static 関数を並べた struct)。Matrix や SquareMatrix のテンプレート引数にそのまま書き、
+// 要素の型は T になる (neo/base/core/algebra/structure.hpp の読み替え)。
+//   MinPlus<X>: 和は min、積は + (最短路)。0 は INF、1 は 0。
+//   MaxPlus<X>: 和は max、積は + (最長路)。0 は -INF、1 は 0。
+//   MaxMin<X>: 和は max、積は min (道の幅の最大)。0 は X の最小、1 は X の最大。
 //   OrAnd: 和は or、積は and (到達)。
-// 整数の INF は T の最大の半分で、積は片方が INF (MaxPlus は -INF) ならそのまま INF にし、和が INF を超えれば INF に丸める。
+// 整数の INF は X の最大の半分で、積は片方が INF (MaxPlus は -INF) ならそのまま INF にし、和が INF を超えれば INF に丸める。
 // 負の重みがあっても INF は INF のまま。浮動小数点数の INF は infinity。
 // 整数の MinPlus と MaxPlus は、行列の積の速い道を持つ。積を INF の比べのない和 x + y (fast_mul) にして和 (min か max) で足し、
 // 最後に成分ごとに fast_fix で INF に直す。掛ける 2 つの行列の値がどれも fast_one_sided の範囲 (MinPlus は 0 以上 INF 以下、
@@ -106,33 +106,42 @@ template <class T, bool MIN> inline std::size_t chunks_fix(void* p, std::size_t 
  return 0;
 }
 }
-template <class T> struct MinPlus {
- static constexpr T INF= semiring_internal::inf<T>();
- T x;
- constexpr MinPlus(): x(INF) {}
- constexpr MinPlus(T x): x(x) {}
- static constexpr MinPlus zero() { return MinPlus(INF); }
- static constexpr MinPlus one() { return MinPlus(T(0)); }
+template <class X> struct MinPlus {
+ using T= X;
+ static constexpr T INF= semiring_internal::inf<X>();
+ static constexpr T zero() { return INF; }
+ static constexpr T one() { return T(0); }
+ static constexpr T add(T a, T b) { return a < b ? a : b; }
+ // 積。max(x, y, x + y) >= INF なら INF。
+ static constexpr T mul(T a, T b) {
+  if constexpr(std::is_floating_point_v<T>) return T(a + b);
+  else {
+   using U= std::make_unsigned_t<T>;
+   const T s= T(U(a) + U(b)), t= a > b ? a : b;
+   const U m= U(0) - U((t > s ? t : s) >= INF);
+   return T((U(s) & ~m) | (U(INF) & m));
+  }
+ }
  // 行列の積の速い道。fast_one_sided は p の値がすべて 0 以上 INF 以下か。このとき積は min(x + y, INF) と同じで (INF に 0 以上を
  // 足しても INF 以上)、min は単調なので、和 x + y の min を取ってから INF 以上を INF にしてよい。INF は 2^k - 1 の形なので、
  // 範囲に入るかは値の or が INF の外の bit を持たないかで分かる。
- static constexpr bool fast_one_sided(const MinPlus* p, std::size_t n) { return fast_one_sided(p, p, n); }
+ static constexpr bool fast_one_sided(const T* p, std::size_t n) { return fast_one_sided(p, p, n); }
  // p と q の n 個ずつを 1 本のループで調べる (大きさを型で決める行列の積で、判定を 1 回の or の畳み込みにする)。
- static constexpr bool fast_one_sided(const MinPlus* p, const MinPlus* q, std::size_t n) {
+ static constexpr bool fast_one_sided(const T* p, const T* q, std::size_t n) {
   if constexpr(std::is_floating_point_v<T>) return false;
   else {
    using U= std::make_unsigned_t<T>;
    long long i= 0;
    if(!std::is_constant_evaluated() && (i= semiring_internal::chunks_within<T, false>(p, q, n, T(~U(INF)))) < 0) return false;
    U o= 0;
-   for(std::size_t j= i; j < n; ++j) o|= U(p[j].x) | U(q[j].x);
+   for(std::size_t j= i; j < n; ++j) o|= U(p[j]) | U(q[j]);
    return !(o & ~U(INF));
   }
  }
  // fast_bounded は p の値がすべて INF か、絶対値が L = INF / 4 以下か。このとき有限の値どうしの和は絶対値が INF / 2 未満で、
  // INF を含む和は INF - L 以上 (2 INF 以下なので溢れない) なので、和の min を取ってから INF / 2 以上を INF にすれば、厳密な積の
  // min と同じになる。
- static constexpr bool fast_bounded(const MinPlus* p, std::size_t n) {
+ static constexpr bool fast_bounded(const T* p, std::size_t n) {
   if constexpr(std::is_floating_point_v<T> || !std::is_signed_v<T>) return false;
   else {
    using U= std::make_unsigned_t<T>;
@@ -140,61 +149,55 @@ template <class T> struct MinPlus {
    long long i= 0;
    if(!std::is_constant_evaluated() && (i= semiring_internal::chunks_bounded<T>(p, n, INF, T(L))) < 0) return false;
    bool ok= true;
-   for(std::size_t j= i; j < n; ++j) ok&= (U(p[j].x) == U(INF)) | (U(U(p[j].x) + L) <= 2 * L);
+   for(std::size_t j= i; j < n; ++j) ok&= (U(p[j]) == U(INF)) | (U(U(p[j]) + L) <= 2 * L);
    return ok;
   }
  }
- static constexpr MinPlus fast_mul(MinPlus l, MinPlus r) { return MinPlus(T(l.x + r.x)); }
+ static constexpr T fast_mul(T a, T b) { return T(a + b); }
  // 速い道で足した和を直す。bounded は fast_bounded の範囲で掛けたか。
- static constexpr MinPlus fast_fix(MinPlus v, bool bounded) {
+ static constexpr T fast_fix(T v, bool bounded) {
   const T t= bounded ? T(INF >> 1) : INF;
-  return MinPlus(v.x >= t ? INF : v.x);
+  return v >= t ? INF : v;
  }
  // p の n 個に fast_fix を当てる (行列の積の速い道の最後。x86 で AVX2 が使えれば 32 byte ずつ)。
- static void fast_fix_all(MinPlus* p, std::size_t n, bool bounded) {
+ static void fast_fix_all(T* p, std::size_t n, bool bounded) {
   std::size_t i= 0;
   if constexpr(!std::is_floating_point_v<T> && std::is_signed_v<T>) i= semiring_internal::chunks_fix<T, true>(p, n, bounded ? T(INF >> 1) : INF, INF);
   for(; i < n; ++i) p[i]= fast_fix(p[i], bounded);
  }
- constexpr MinPlus& operator+=(MinPlus r) { return x= r.x < x ? r.x : x, *this; }
- constexpr MinPlus& operator*=(MinPlus r) {
-  if constexpr(std::is_floating_point_v<T>) x+= r.x;
-  else {
-   // max(x, r.x, x + r.x) >= INF なら INF。GCC は条件式の選択を分岐にするので、和は符号なしで求め、マスクで選ぶ。
-   using U= std::make_unsigned_t<T>;
-   const T s= T(U(x) + U(r.x)), t= x > r.x ? x : r.x;
-   const U m= U(0) - U((t > s ? t : s) >= INF);
-   x= T((U(s) & ~m) | (U(INF) & m));
-  }
-  return *this;
- }
- friend constexpr MinPlus operator+(MinPlus l, MinPlus r) { return l+= r; }
- friend constexpr MinPlus operator*(MinPlus l, MinPlus r) { return l*= r; }
- friend constexpr bool operator==(MinPlus l, MinPlus r) { return l.x == r.x; }
- friend constexpr bool operator!=(MinPlus l, MinPlus r) { return l.x != r.x; }
+ static constexpr int fast_tile= 0;  // 要素が int のときの行列の積の AVX2 のタイル (0 は min、1 は max)
 };
-template <class T> struct MaxPlus {
- static constexpr T INF= semiring_internal::inf<T>();
- T x;
- constexpr MaxPlus(): x(-INF) {}
- constexpr MaxPlus(T x): x(x) {}
- static constexpr MaxPlus zero() { return MaxPlus(-INF); }
- static constexpr MaxPlus one() { return MaxPlus(T(0)); }
+template <class X> struct MaxPlus {
+ using T= X;
+ static constexpr T INF= semiring_internal::inf<X>();
+ static constexpr T zero() { return T(-INF); }
+ static constexpr T one() { return T(0); }
+ static constexpr T add(T a, T b) { return a > b ? a : b; }
+ // 積。min(x, y, x + y) <= -INF なら -INF。
+ static constexpr T mul(T a, T b) {
+  if constexpr(std::is_floating_point_v<T>) return T(a + b);
+  else {
+   using U= std::make_unsigned_t<T>;
+   const T s= T(U(a) + U(b)), t= a < b ? a : b;
+   const U m= U(0) - U((t < s ? t : s) <= -INF);
+   return T((U(s) & ~m) | (U(-INF) & m));
+  }
+ }
  // 行列の積の速い道。MinPlus の符号を逆にしたもので、fast_one_sided は p の値がすべて -INF 以上 0 以下か、fast_bounded は
  // すべて -INF か、絶対値が INF / 4 以下か。
- static constexpr bool fast_one_sided(const MaxPlus* p, std::size_t n) { return fast_one_sided(p, p, n); }
- static constexpr bool fast_one_sided(const MaxPlus* p, const MaxPlus* q, std::size_t n) {
+ static constexpr bool fast_one_sided(const T* p, std::size_t n) { return fast_one_sided(p, p, n); }
+ static constexpr bool fast_one_sided(const T* p, const T* q, std::size_t n) {
   if constexpr(std::is_floating_point_v<T> || !std::is_signed_v<T>) return false;
   else {
    using U= std::make_unsigned_t<T>;
    long long i= 0;
    if(!std::is_constant_evaluated() && (i= semiring_internal::chunks_within<T, true>(p, q, n, T(~U(INF)))) < 0) return false;
    U o= 0;
-   for(std::size_t j= i; j < n; ++j) o|= (U(0) - U(p[j].x)) | (U(0) - U(q[j].x));
+   for(std::size_t j= i; j < n; ++j) o|= (U(0) - U(p[j])) | (U(0) - U(q[j]));
    return !(o & ~U(INF));
   }
  }
- static constexpr bool fast_bounded(const MaxPlus* p, std::size_t n) {
+ static constexpr bool fast_bounded(const T* p, std::size_t n) {
   if constexpr(std::is_floating_point_v<T> || !std::is_signed_v<T>) return false;
   else {
    using U= std::make_unsigned_t<T>;
@@ -202,59 +205,33 @@ template <class T> struct MaxPlus {
    long long i= 0;
    if(!std::is_constant_evaluated() && (i= semiring_internal::chunks_bounded<T>(p, n, T(-INF), T(L))) < 0) return false;
    bool ok= true;
-   for(std::size_t j= i; j < n; ++j) ok&= (U(p[j].x) == U(-INF)) | (U(U(p[j].x) + L) <= 2 * L);
+   for(std::size_t j= i; j < n; ++j) ok&= (U(p[j]) == U(-INF)) | (U(U(p[j]) + L) <= 2 * L);
    return ok;
   }
  }
- static constexpr MaxPlus fast_mul(MaxPlus l, MaxPlus r) { return MaxPlus(T(l.x + r.x)); }
- static constexpr MaxPlus fast_fix(MaxPlus v, bool bounded) {
+ static constexpr T fast_mul(T a, T b) { return T(a + b); }
+ static constexpr T fast_fix(T v, bool bounded) {
   const T t= bounded ? T(INF >> 1) : INF;
-  return MaxPlus(v.x <= -t ? -INF : v.x);
+  return v <= -t ? T(-INF) : v;
  }
- static void fast_fix_all(MaxPlus* p, std::size_t n, bool bounded) {
+ static void fast_fix_all(T* p, std::size_t n, bool bounded) {
   std::size_t i= 0;
   if constexpr(!std::is_floating_point_v<T> && std::is_signed_v<T>) i= semiring_internal::chunks_fix<T, false>(p, n, bounded ? T(-(INF >> 1)) : T(-INF), T(-INF));
   for(; i < n; ++i) p[i]= fast_fix(p[i], bounded);
  }
- constexpr MaxPlus& operator+=(MaxPlus r) { return x= r.x > x ? r.x : x, *this; }
- constexpr MaxPlus& operator*=(MaxPlus r) {
-  if constexpr(std::is_floating_point_v<T>) x+= r.x;
-  else {
-   using U= std::make_unsigned_t<T>;
-   const T s= T(U(x) + U(r.x)), t= x < r.x ? x : r.x;
-   const U m= U(0) - U((t < s ? t : s) <= -INF);
-   x= T((U(s) & ~m) | (U(-INF) & m));
-  }
-  return *this;
- }
- friend constexpr MaxPlus operator+(MaxPlus l, MaxPlus r) { return l+= r; }
- friend constexpr MaxPlus operator*(MaxPlus l, MaxPlus r) { return l*= r; }
- friend constexpr bool operator==(MaxPlus l, MaxPlus r) { return l.x == r.x; }
- friend constexpr bool operator!=(MaxPlus l, MaxPlus r) { return l.x != r.x; }
+ static constexpr int fast_tile= 1;  // 要素が int のときの行列の積の AVX2 のタイル (0 は min、1 は max)
 };
-template <class T> struct MaxMin {
- T x;
- constexpr MaxMin(): x(std::numeric_limits<T>::lowest()) {}
- constexpr MaxMin(T x): x(x) {}
- static constexpr MaxMin zero() { return MaxMin(std::numeric_limits<T>::lowest()); }
- static constexpr MaxMin one() { return MaxMin(std::numeric_limits<T>::max()); }
- constexpr MaxMin& operator+=(MaxMin r) { return x= r.x > x ? r.x : x, *this; }
- constexpr MaxMin& operator*=(MaxMin r) { return x= r.x < x ? r.x : x, *this; }
- friend constexpr MaxMin operator+(MaxMin l, MaxMin r) { return l+= r; }
- friend constexpr MaxMin operator*(MaxMin l, MaxMin r) { return l*= r; }
- friend constexpr bool operator==(MaxMin l, MaxMin r) { return l.x == r.x; }
- friend constexpr bool operator!=(MaxMin l, MaxMin r) { return l.x != r.x; }
+template <class X> struct MaxMin {
+ using T= X;
+ static constexpr T zero() { return std::numeric_limits<X>::lowest(); }
+ static constexpr T one() { return std::numeric_limits<X>::max(); }
+ static constexpr T add(T a, T b) { return a > b ? a : b; }
+ static constexpr T mul(T a, T b) { return a < b ? a : b; }
 };
 struct OrAnd {
- bool x;
- constexpr OrAnd(): x(false) {}
- constexpr OrAnd(bool x): x(x) {}
- static constexpr OrAnd zero() { return OrAnd(false); }
- static constexpr OrAnd one() { return OrAnd(true); }
- constexpr OrAnd& operator+=(OrAnd r) { return x|= r.x, *this; }
- constexpr OrAnd& operator*=(OrAnd r) { return x&= r.x, *this; }
- friend constexpr OrAnd operator+(OrAnd l, OrAnd r) { return l+= r; }
- friend constexpr OrAnd operator*(OrAnd l, OrAnd r) { return l*= r; }
- friend constexpr bool operator==(OrAnd l, OrAnd r) { return l.x == r.x; }
- friend constexpr bool operator!=(OrAnd l, OrAnd r) { return l.x != r.x; }
+ using T= bool;
+ static constexpr T zero() { return false; }
+ static constexpr T one() { return true; }
+ static constexpr T add(T a, T b) { return a | b; }
+ static constexpr T mul(T a, T b) { return a & b; }
 };

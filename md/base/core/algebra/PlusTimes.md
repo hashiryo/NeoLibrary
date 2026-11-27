@@ -16,8 +16,8 @@ template <class X> struct PlusTimes {
 };
 ```
 
-構造だけを受け取る道具に、演算子つきの型をそのまま渡すときに使います。たとえば `Matrix<PlusTimes<long long>>` は、要素が `long long` で、和と積が普通の `+` と `*` の行列です。
+構造だけを受け取る道具に、演算子つきの型をそのまま渡すときに使います。行列などの構造の場所に演算子つきの型を書くと、[構造の読み替え](structure.md) の `structure_of` が `PlusTimes<X>` として読むので、使う人が書くことはほとんどありません。`Matrix<long long>` は `Matrix<PlusTimes<long long>>` と同じで、要素が `long long`、和と積が普通の `+` と `*` の行列です。
 
-`one()` は `X::one()` を先に見ます。`MinPlus` のように単位元を自分で持つ型ではそちらの値に、`int` や `ZMod` のように持たない型では `X(1)` になります。
+`one()` は `X::one()` を先に見ます。`X::one()` を持つ値の型ではそちらの値に、`int` や `ZMod` のように持たない型では `X(1)` になります。
 
 引き算を持たない型でも、`add`、`mul`、`zero`、`one` だけを使う道具には渡せます。`sub` を使うのは、環を受ける道具と、`sub` から `inv` を作る [monoid](monoid.md) の `Additive` だけです。

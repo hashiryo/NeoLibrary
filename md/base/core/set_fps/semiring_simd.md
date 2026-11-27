@@ -3,7 +3,7 @@ title: 半環の部分集合畳み込みの AVX2 の核 (内部)
 documentation_of: ../../neo/base/core/set_fps/semiring_simd.hpp
 ---
 
-引き算の無い半環の `sps::convolve` と `sps::exp` が呼ぶ内部の核です。直接は使いません。型は `MinPlus`、`MaxPlus`、`MaxMin` ([semiring.hpp](../algebra/semiring.md)) で、値が 32 bit か 64 bit の符号付き整数のものです。ほかの半環は、汎用の道 ([generic.hpp](generic.md)) の $3^n$ で行います。
+引き算の無い半環の `sps::convolve<M>` と `sps::exp<M>` が呼ぶ内部の核です。直接は使いません。構造は `MinPlus`、`MaxPlus`、`MaxMin` ([semiring.hpp](../algebra/semiring.md)) で、値の型が 32 bit か 64 bit の符号付き整数のものです。ほかの構造は、汎用の道 ([generic.hpp](generic.md)) の $3^n$ で行います。
 
 ## 部分集合畳み込み
 

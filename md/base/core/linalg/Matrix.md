@@ -6,7 +6,9 @@ documentation_of: ../../neo/base/core/linalg/Matrix.hpp
 大きさを実行時に決める行列です。行優先の 1 本の配列 `a` に持ち、`a[i * w + j]` が i 行 j 列です。`a` は $2^{19}$ byte 以上なら、Linux では 2 MB 境界の mmap に置いて huge page を頼みます (allocator の `linalg_internal::HugeAlloc`)。
 
 ```cpp
-template <class T> struct Matrix {
+template <class X> struct Matrix {
+ using M= structure_of<X>;           // 構造
+ using T= typename M::T;             // 要素の型
  int h, w;
  std::vector<T, linalg_internal::HugeAlloc<T>> a;
  Matrix(int h, int w);               // 0 で埋める
@@ -26,13 +28,13 @@ std::vector<T> operator*(const Matrix& l, const std::vector<T>& v);
 bool operator==(const Matrix& l, const Matrix& r);
 ```
 
-要素の型 `T` は、和 (`+`)、積 (`*`)、0、1 を持つ半環であればよく、積は可換でなくてかまいません。0 と 1 は、`T` に静的メンバ関数 `zero()` と `one()` があればそれを、なければ `T(0)` と `T(1)` を使います。`neo/base/core/algebra/semiring.hpp` の `MinPlus` などは前者です。引き算とスカラー倍は、`T` がそれを持つときだけ使えます。
+テンプレート引数 `X` は構造の場所です。`X` が値の型 `T` を持つなら `X` が構造で、要素の型は `X::T` です (`Matrix<MinPlus<int>>` の要素は `int`)。持たなければ `PlusTimes<X>` の略記で、要素の型は `X` です (`Matrix<long long>`、`Matrix<ZMod<P>>`)。読み替えは [構造の読み替え](../algebra/structure.md) にあります。構造は値の型 `T` と、和 `add`、積 `mul`、0 の `zero`、1 の `one` を持てばよく、積は可換でなくてかまいません。引き算 `sub` とスカラー倍は、構造がそれを持つときだけ使えます。
 
-`A * B` は $h \times m$ と $m \times w$ の積、`A * v` は列ベクトルとの積、`A.pow(k)` は正方行列の $k$ 乗です。一般の `T` では、積は i-k-j の順に足す $O(hmw)$、累乗は二分累乗です。`MinPlus` と `MaxPlus` の値が速い道の範囲 (`neo/base/core/algebra/semiring.hpp`) にあれば、INF の比べのない和で掛けます。値が `int` なら、x86 でどの辺も 16 以上のとき、4 行 × 16 列の和を 8 本の ymm に持つタイルで掛けます。
+`A * B` は $h \times m$ と $m \times w$ の積、`A * v` は列ベクトルとの積、`A.pow(k)` は正方行列の $k$ 乗です。一般の構造では、積は i-k-j の順に足す $O(hmw)$、累乗は二分累乗です。構造が `MinPlus` か `MaxPlus` ([semiring.hpp](../algebra/semiring.md)) で、行列の値が速い道の範囲にあれば、INF の比べのない和で掛けます。要素が `int` なら、x86 でどの辺も 16 以上のとき、4 行 × 16 列の和を 8 本の ymm に持つタイルで掛けます。
 
 ## ZMod の行列
 
-`T` が `ZMod` のときは、積、ベクトルとの積、累乗を専用の核で求めます。法は `ZMod` と同じく $1 \le M < 2^{30}$ で、偶奇も素数かどうかも問わず、`ZMod<0>` も使えます。
+要素の型が `ZMod` のときは、積、ベクトルとの積、累乗を専用の核で求めます。法は `ZMod` と同じく $1 \le M < 2^{30}$ で、偶奇も素数かどうかも問わず、`ZMod<0>` も使えます。
 
 積は、値を $M$ 未満に直して u64 の和にため、最後に 1 回だけ還元します。小さい行列や細長い行列 (タイルに広げた分が 2.5 倍を超えるもの) はスカラーで掛けます。それより大きければ AVX2 の 4 行 × 8 列のタイルで掛けます。$M$ が奇数で、1 辺を 2 の冪に広げても積和の数がタイルより 2 割以上少ない大きさ (256、500 から 512、1024 など) では、Strassen の再帰にします。
 

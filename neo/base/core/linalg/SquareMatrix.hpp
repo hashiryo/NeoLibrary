@@ -5,22 +5,15 @@
 #include <cstdint>
 #include <type_traits>
 #include "neo/base/core/algebra/ZMod.hpp"
+#include "neo/base/core/algebra/structure.hpp"
 // 大きさを型で決める N × N の行列。std::array に行優先で持つ (a[i * N + j] が i 行 j 列) ので、セグメント木の要素にしても
-// ヒープを使わず、N が定数なので内側のループが展開される。要素の型 T は Matrix と同じく半環でよく、0 と 1 は、T に静的メンバ関数
-// zero() と one() があればそれを、なければ T(0) と T(1) を使う。引き算とスカラー倍は、T がそれを持つときだけ使える。
-// T が ZMod なら、積の成分ごとに N 個の積を u64 の和にためて 1 回だけ還元する。値は表現のまま (2M 未満) 掛け、和が u64 を
-// 溢れうるとき (法が 2^30 に近いと N > 4) だけ M 未満に直してから掛ける。さらに N > 16 なら、17 個目からは 8 段ごとに和の
-// 2^32 の位を 2^32 mod M に掛けて畳む。procon-judge の atcoder-abc246-h の zmod_fixed_acc を写したもので、積と和のたびに
-// 還元する形の 1.6 倍 (x64-gcc) と 1.9 倍 (x64-clang) の速さだった。
+// ヒープを使わず、N が定数なので内側のループが展開される。テンプレート引数 X は構造の場所で、Matrix と同じく
+// neo/base/core/algebra/structure.hpp の読み替えで構造 M を決める。要素の型は M::T。引き算 (sub) とスカラー倍は、構造が
+// それを持つときだけ使える。要素の型が ZMod なら、積の成分ごとに N 個の積を u64 の和にためて 1 回だけ還元する。値は表現のまま
+// (2M 未満) 掛け、和が u64 を溢れうるとき (法が 2^30 に近いと N > 4) だけ M 未満に直してから掛ける。さらに N > 16 なら、
+// 17 個目からは 8 段ごとに和の 2^32 の位を 2^32 mod M に掛けて畳む。procon-judge の atcoder-abc246-h の zmod_fixed_acc を
+// 写したもので、積と和のたびに還元する形の 1.6 倍 (x64-gcc) と 1.9 倍 (x64-clang) の速さだった。
 namespace square_matrix_internal {
-template <class T> constexpr T zero() {
- if constexpr(requires { T::zero(); }) return T::zero();
- else return T(0);
-}
-template <class T> constexpr T one() {
- if constexpr(requires { T::one(); }) return T::one();
- else return T(1);
-}
 // 法は neo/base/core/algebra/ZMod.hpp の zmod_mod_v。ZMod でなければ -1。
 template <class T> struct mod_param: std::integral_constant<int, zmod_mod_v<T>> {};
 // ZMod の値を表現のまま (2M 未満) 読む。
@@ -53,48 +46,50 @@ template <class Z, int L, int S> constexpr Z dot(const Z* x, const Z* y) {
  }
 }
 }
-template <class T, int N> struct SquareMatrix {
+template <class X, int N> struct SquareMatrix {
+ using M= structure_of<X>;
+ using T= typename M::T;
  static_assert(N >= 1);
  std::array<T, N * N> a;
- constexpr SquareMatrix() { a.fill(square_matrix_internal::zero<T>()); }
+ constexpr SquareMatrix() { a.fill(M::zero()); }
  constexpr SquareMatrix(const std::array<T, N * N>& a): a(a) {}
  static constexpr SquareMatrix identity() {
   SquareMatrix r;
-  for(int i= 0; i < N; ++i) r.a[i * N + i]= square_matrix_internal::one<T>();
+  for(int i= 0; i < N; ++i) r.a[i * N + i]= M::one();
   return r;
  }
  constexpr T* operator[](int i) { return a.data() + i * N; }
  constexpr const T* operator[](int i) const { return a.data() + i * N; }
  constexpr SquareMatrix& operator+=(const SquareMatrix& r) {
-  for(int i= 0; i < N * N; ++i) a[i]+= r.a[i];
+  for(int i= 0; i < N * N; ++i) a[i]= M::add(a[i], r.a[i]);
   return *this;
  }
  constexpr SquareMatrix& operator-=(const SquareMatrix& r) {
-  for(int i= 0; i < N * N; ++i) a[i]-= r.a[i];
+  for(int i= 0; i < N * N; ++i) a[i]= M::sub(a[i], r.a[i]);
   return *this;
  }
  constexpr SquareMatrix& operator*=(const T& c) {
-  for(auto& x: a) x*= c;
+  for(auto& x: a) x= M::mul(x, c);
   return *this;
  }
  friend constexpr SquareMatrix operator+(SquareMatrix l, const SquareMatrix& r) { return l+= r; }
  friend constexpr SquareMatrix operator-(SquareMatrix l, const SquareMatrix& r) { return l-= r; }
  friend constexpr SquareMatrix operator*(SquareMatrix l, const T& c) { return l*= c; }
  friend constexpr SquareMatrix operator*(const T& c, SquareMatrix r) {
-  for(auto& x: r.a) x= c * x;
+  for(auto& x: r.a) x= M::mul(c, x);
   return r;
  }
- // 行列の積。ZMod なら成分ごとの内積を 1 回で還元する。T が速い道 (neo/base/core/algebra/semiring.hpp の MinPlus と MaxPlus の
+ // 行列の積。ZMod なら成分ごとの内積を 1 回で還元する。構造 M が速い道 (neo/base/core/algebra/semiring.hpp の MinPlus と MaxPlus の
  // fast_one_sided、fast_bounded、fast_mul、fast_fix) を持ち、両方の値が同じ範囲にあれば、INF の比べのない i-k-j で掛ける
  // (GCC が列の向きをベクトル化する)。片側の範囲では項ごとに fast_fix(fast_mul(x, y)) (min(x + y, INF)) を足し、両側の範囲では
  // fast_mul (和 x + y) を足してから成分ごとに fast_fix で直す。片側の範囲で和を最後に直す形は、手元 (arm の clang) の
  // cf-1609-e で 15% 遅かった。それ以外は mul_slow。片側の範囲の積だけを呼び出し元に展開し、両側の範囲を調べる道は展開しない
  // 関数 (mul_other) に分ける (全部を 1 つにすると GCC が展開しなくなり、cf-1609-e の 3 × 3 の積が手元で 3 割遅かった)。
  static constexpr bool has_fast= requires(const T* p, T x) {
-  T::fast_mul(x, x);
-  T::fast_one_sided(p, p, std::size_t(N));
-  T::fast_bounded(p, std::size_t(N));
-  T::fast_fix(x, false);
+  M::fast_mul(x, x);
+  M::fast_one_sided(p, p, std::size_t(N));
+  M::fast_bounded(p, std::size_t(N));
+  M::fast_fix(x, false);
  };
  template <bool B> [[gnu::always_inline]] static constexpr SquareMatrix fast_product(const SquareMatrix& l, const SquareMatrix& r) {
   SquareMatrix c;
@@ -102,16 +97,16 @@ template <class T, int N> struct SquareMatrix {
    for(int k= 0; k < N; ++k) {
     const T x= l.a[i * N + k];
     for(int j= 0; j < N; ++j) {
-     if constexpr(B) c.a[i * N + j]+= T::fast_mul(x, r.a[k * N + j]);
-     else c.a[i * N + j]+= T::fast_fix(T::fast_mul(x, r.a[k * N + j]), false);
+     if constexpr(B) c.a[i * N + j]= M::add(c.a[i * N + j], M::fast_mul(x, r.a[k * N + j]));
+     else c.a[i * N + j]= M::add(c.a[i * N + j], M::fast_fix(M::fast_mul(x, r.a[k * N + j]), false));
     }
    }
   if constexpr(B)
-   for(auto& v: c.a) v= T::fast_fix(v, true);
+   for(auto& v: c.a) v= M::fast_fix(v, true);
   return c;
  }
  [[gnu::noinline]] static constexpr SquareMatrix mul_other(const SquareMatrix& l, const SquareMatrix& r) {
-  if(T::fast_bounded(l.a.data(), N * N) && T::fast_bounded(r.a.data(), N * N)) return fast_product<true>(l, r);
+  if(M::fast_bounded(l.a.data(), N * N) && M::fast_bounded(r.a.data(), N * N)) return fast_product<true>(l, r);
   return mul_slow(l, r);
  }
  friend constexpr SquareMatrix operator*(const SquareMatrix& l, const SquareMatrix& r) {
@@ -121,7 +116,7 @@ template <class T, int N> struct SquareMatrix {
     for(int j= 0; j < N; ++j) c.a[i * N + j]= square_matrix_internal::dot<T, N, N>(&l.a[i * N], &r.a[j]);
    return c;
   } else if constexpr(has_fast) {
-   if(T::fast_one_sided(l.a.data(), r.a.data(), N * N)) return fast_product<false>(l, r);
+   if(M::fast_one_sided(l.a.data(), r.a.data(), N * N)) return fast_product<false>(l, r);
    return mul_other(l, r);
   } else return mul_slow(l, r);
  }
@@ -132,15 +127,15 @@ template <class T, int N> struct SquareMatrix {
   if constexpr(N <= 8) {
    for(int i= 0; i < N; ++i)
     for(int j= 0; j < N; ++j) {
-     T s= l.a[i * N] * r.a[j];
-     for(int k= 1; k < N; ++k) s+= l.a[i * N + k] * r.a[k * N + j];
+     T s= M::mul(l.a[i * N], r.a[j]);
+     for(int k= 1; k < N; ++k) s= M::add(s, M::mul(l.a[i * N + k], r.a[k * N + j]));
      c.a[i * N + j]= s;
     }
   } else {
    for(int i= 0; i < N; ++i)
     for(int k= 0; k < N; ++k) {
      const T x= l.a[i * N + k];
-     for(int j= 0; j < N; ++j) c.a[i * N + j]+= x * r.a[k * N + j];
+     for(int j= 0; j < N; ++j) c.a[i * N + j]= M::add(c.a[i * N + j], M::mul(x, r.a[k * N + j]));
     }
   }
   return c;
@@ -152,8 +147,8 @@ template <class T, int N> struct SquareMatrix {
   for(int i= 0; i < N; ++i) {
    if constexpr(square_matrix_internal::mod_param<T>::value >= 0) r[i]= square_matrix_internal::dot<T, N, 1>(&l.a[i * N], v.data());
    else {
-    T s= square_matrix_internal::zero<T>();
-    for(int j= 0; j < N; ++j) s+= l.a[i * N + j] * v[j];
+    T s= M::zero();
+    for(int j= 0; j < N; ++j) s= M::add(s, M::mul(l.a[i * N + j], v[j]));
     r[i]= s;
    }
   }

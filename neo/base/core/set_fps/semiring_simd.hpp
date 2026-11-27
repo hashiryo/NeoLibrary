@@ -131,69 +131,71 @@ template <int E, int K, class W> void conv_core(const W* f, const W* g, W* h, in
  }
 }
 // 厳密な積で 3^n (小さい n と、exp の始めの段)。h[S] = ⊕_{T ⊆ S} f[T] ⊗ g[S \ T]。
-template <class T> void conv_scalar(const T* f, const T* g, T* h, std::size_t N) {
+template <class M> void conv_scalar(const typename M::T* f, const typename M::T* g, typename M::T* h, std::size_t N) {
+ using T= typename M::T;
  for(std::size_t s= 0; s < N; ++s) {
-  T acc= f[s] * g[0];
-  for(std::size_t t= (s - 1) & s; t > 0; t= (t - 1) & s) acc+= f[t] * g[s ^ t];
-  if(s) acc+= f[0] * g[s];
+  T acc= M::mul(f[s], g[0]);
+  for(std::size_t t= (s - 1) & s; t > 0; t= (t - 1) & s) acc= M::add(acc, M::mul(f[t], g[s ^ t]));
+  if(s) acc= M::add(acc, M::mul(f[0], g[s]));
   h[s]= acc;
  }
 }
-template <class T> constexpr int lanes_bits() { return sizeof(typename traits<T>::W) == 4 ? 3 : 2; }
+template <class M> constexpr int lanes_bits() { return sizeof(typename traits<M>::W) == 4 ? 3 : 2; }
 // 速い道で掛けてよいか。0 はよくない、1 は値が片側 (MinPlus は 0 以上 INF 以下)、2 は ±INF か絶対値が INF / 4 以下。MaxMin は 1。
-template <class T> inline int mode(const T* p, const T* q, std::size_t n) {
- if constexpr(traits<T>::kind == 2) return 1;
+template <class M> inline int mode(const typename M::T* p, const typename M::T* q, std::size_t n) {
+ if constexpr(traits<M>::kind == 2) return 1;
  else {
-  if(T::fast_one_sided(p, q, n)) return 1;
-  if(T::fast_bounded(p, n) && T::fast_bounded(q, n)) return 2;
+  if(M::fast_one_sided(p, q, n)) return 1;
+  if(M::fast_bounded(p, n) && M::fast_bounded(q, n)) return 2;
   return 0;
  }
 }
 // 速い道の部分集合畳み込み (n >= B)。h の値は直してから返す。
-template <class T> inline void conv_fast(const T* f, const T* g, T* h, int n, int md) {
- using W= typename traits<T>::W;
- constexpr int K= traits<T>::kind, E= sizeof(W);
- static_assert(sizeof(T) == sizeof(W) && std::is_standard_layout_v<T>);
+template <class M> inline void conv_fast(const typename M::T* f, const typename M::T* g, typename M::T* h, int n, int md) {
+ using W= typename traits<M>::W;
+ constexpr int K= traits<M>::kind, E= sizeof(W);
+ static_assert(sizeof(typename M::T) == sizeof(W) && std::is_standard_layout_v<typename M::T>);
  W hv;
- if constexpr(K == 0) hv= T::INF;
- else if constexpr(K == 1) hv= -T::INF;
+ if constexpr(K == 0) hv= M::INF;
+ else if constexpr(K == 1) hv= -M::INF;
  else hv= std::numeric_limits<W>::lowest();
  conv_core<E, K>(reinterpret_cast<const W*>(f), reinterpret_cast<const W*>(g), reinterpret_cast<W*>(h), n, hv);
- if constexpr(K != 2) T::fast_fix_all(h, std::size_t(1) << n, md == 2);
+ if constexpr(K != 2) M::fast_fix_all(h, std::size_t(1) << n, md == 2);
 }
-template <class T> std::vector<T> convolve(const std::vector<T>& f, const std::vector<T>& g) {
- if constexpr(traits<T>::ok) {
+template <class M> std::vector<typename M::T> convolve(const std::vector<typename M::T>& f, const std::vector<typename M::T>& g) {
+ if constexpr(traits<M>::ok) {
   const std::size_t N= f.size();
   const int n= __builtin_ctzll(N);
-  if(n >= lanes_bits<T>())
-   if(const int md= mode(f.data(), g.data(), N)) {
-    std::vector<T> h(N);
-    conv_fast(f.data(), g.data(), h.data(), n, md);
+  if(n >= lanes_bits<M>())
+   if(const int md= mode<M>(f.data(), g.data(), N)) {
+    std::vector<typename M::T> h(N);
+    conv_fast<M>(f.data(), g.data(), h.data(), n, md);
     return h;
    }
  }
- return sps_generic::semiring_convolve(f, g);
+ return sps_generic::semiring_convolve<M>(f, g);
 }
 // 速い道で掛けられない段が出たら、全体を sps_generic の道でやり直す (値が INF に近いときの止め方を、今までの形と同じにするため)。
-template <class T> std::vector<T> exp(const std::vector<T>& f) {
- if constexpr(traits<T>::ok) {
-  constexpr int B= lanes_bits<T>();
+template <class M> std::vector<typename M::T> exp(const std::vector<typename M::T>& f) {
+ if constexpr(traits<M>::ok) {
+  constexpr int B= lanes_bits<M>();
   const std::size_t N= f.size();
   const int n= __builtin_ctzll(N);
+  using T= typename M::T;
   if(n > B) {
    std::vector<T> h(N);
-   h[0]= T::one();
+   h[0]= M::one();
    bool ok= true;
    for(int i= 0; i < n && ok; ++i) {
     const std::size_t L= std::size_t(1) << i;
-    if(i < B) conv_scalar(f.data() + L, h.data(), h.data() + L, L);
-    else if(const int md= mode(f.data() + L, h.data(), L)) conv_fast(f.data() + L, h.data(), h.data() + L, i, md);
+    if(i < B) conv_scalar<M>(f.data() + L, h.data(), h.data() + L, L);
+    else if(const int md= mode<M>(f.data() + L, h.data(), L)) conv_fast<M>(f.data() + L, h.data(), h.data() + L, i, md);
     else ok= false;
    }
    if(ok) return h;
   }
  }
- return sps_generic::semiring_exp(f, T::one());
+ return sps_generic::semiring_exp<M>(f);
 }
 #undef SS_AI
 }  // namespace sps_semi
