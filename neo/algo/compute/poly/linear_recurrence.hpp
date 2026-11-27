@@ -1,12 +1,18 @@
 #pragma once
 #include <algorithm>
+#include <type_traits>
 #include <vector>
+#include "neo/base/core/convolve/convolve.hpp"
 #include "neo/base/core/convolve/naive.hpp"
-// [x^k] P(x)/Q(x) (Q(0) は可逆) と、定数係数の線形漸化式の第 k 項を、Bostan–Mori の方法で O(d^2 log k) で求める
-// (d は Q の次数、FFT を使わない)。T は可換環 (ZMod なら法は合成数でもよい) で、割り算は最初に Q(0) の逆元を掛けるときだけ。
+#include "neo/base/core/poly/fps.hpp"
+// [x^k] P(x)/Q(x) (Q(0) は可逆) と、定数係数の線形漸化式の第 k 項を、Bostan–Mori の方法で求める。
+// T は可換環 (ZMod なら法は合成数でもよい) で、割り算は最初に Q(0) の逆元を掛けるときだけ。
 // 1 段で Q(x) Q(-x) = V(x^2) と P(x) Q(-x) の偶数部か奇数部を作り、k を半分にする。Q = E(x^2) + x O(x^2)、
 // P = Pe(x^2) + x Po(x^2) と分けると、V(y) = E(y)^2 - y O(y)^2、偶数部 = Pe E - y Po O、奇数部 = Po E - Pe O で、
-// 半分の大きさの積 4 回で 1 段進む。ZMod の積は convolve_internal::conv (短い側が 16 以下ならスカラー、それより大きければ AVX2)。
+// 半分の大きさの積 4 回で 1 段進む。
+// 小さい d (40 以下) は積を convolve_internal::conv (短い側が 16 以下ならスカラー、それより大きければ AVX2) で回す
+// O(d^2 log k) の道。d が大きいときは畳み込みの共通の口 (convolve_range) で回す O(M(d) log k) の道
+// (E^2 と O^2 は同じ配列を 2 回渡して 2 乗の道に乗せ、k が d より小さくなったら Q の逆数を k+1 項作って内積で出す)。
 // procon-judge の self-poly-kth-term で書き比べた bmo を写したもの。
 namespace linrec_internal {
 using u32= unsigned;
@@ -101,20 +107,76 @@ template <class T> T generic(std::vector<T> P, std::vector<T> Q, u64 k) {
  return P.empty() ? T() : P[0];
 }
 }  // namespace linrec_internal
-// [x^k] P(x)/Q(x)。Q(0) は可逆であること。
-template <class T> T div_at(std::vector<T> P, std::vector<T> Q, unsigned long long k) {
+
+namespace linrec_internal {
+// T の既定の核が include されているか。このヘッダは核を include しないので、無ければ遅い道だけを使う。
+template <class T> constexpr bool has_kernel_v= requires(const T* p) { default_kernel(p); };
+template <class T, class Conv> constexpr bool fast_ok= !std::is_same_v<Conv, convolve_internal::Auto> || has_kernel_v<T>;
+// d が大きいときの道。out[shift + i] += (a*b)[i] (neg なら引く)。a と b が同じ配列なら 2 乗の道に乗る。
+template <class Conv, class K>
+void mul_into(const std::vector<K>& a, const std::vector<K>& b, std::vector<K>& out, int shift, bool neg) {
+ if (a.empty() || b.empty() || shift >= int(out.size())) return;
+ const int c= std::min(int(out.size()) - shift, int(a.size() + b.size()) - 1);
+ std::vector<K> t(c);
+ convolve_range<Conv>(a.data(), int(a.size()), b.data(), int(b.size()), 0, c, t.data());
+ if (neg)
+  for (int i= 0; i < c; ++i) out[shift + i]-= t[i];
+ else
+  for (int i= 0; i < c; ++i) out[shift + i]+= t[i];
+}
+// 1 段。(P, Q, k) を (P', Q', k/2) に進める。odd なら P' は奇数部。
+template <class Conv, class K> void bm_step(std::vector<K>& p, std::vector<K>& q, bool odd) {
+ const int lp= int(p.size()), lq= int(q.size());
+ std::vector<K> pe((lp + 1) / 2), po(lp / 2), e((lq + 1) / 2), o(lq / 2);
+ for (int i= 0; i < int(pe.size()); ++i) pe[i]= p[2 * i];
+ for (int i= 0; i < int(po.size()); ++i) po[i]= p[2 * i + 1];
+ for (int i= 0; i < int(e.size()); ++i) e[i]= q[2 * i];
+ for (int i= 0; i < int(o.size()); ++i) o[i]= q[2 * i + 1];
+ std::vector<K> V(lq, K()), S((lp + 1) / 2 + (lq + 1) / 2 + 1, K());  // deg P >= deg Q でも S が入る大きさ
+ mul_into<Conv, K>(e, e, V, 0, false);  // V = E^2 - y O^2
+ mul_into<Conv, K>(o, o, V, 1, true);
+ if (odd) {  // S = Po E - Pe O
+  mul_into<Conv, K>(po, e, S, 0, false);
+  mul_into<Conv, K>(pe, o, S, 0, true);
+ } else {  // S = Pe E - y Po O
+  mul_into<Conv, K>(pe, e, S, 0, false);
+  mul_into<Conv, K>(po, o, S, 1, true);
+ }
+ while (!V.empty() && V.back() == K()) V.pop_back();
+ while (!S.empty() && S.back() == K()) S.pop_back();
+ q= std::move(V), p= std::move(S);
+}
+// [x^k] P/Q (Q[0] は 1 にそろえてある)。k が d より小さくなるまで段を回し、あとは Q の逆数で出す。
+template <class Conv, class K> K div_at_fast(std::vector<K> p, std::vector<K> q, u64 k) {
+ const int m= int(q.size());
+ for (; k >= u64(m); k>>= 1) bm_step<Conv, K>(p, q, (k & 1) != 0);
+ const int kk= int(k);
+ const std::vector<K> iq= fps::inv<Conv>(q, kk + 1);
+ K ret= K();
+ const int len= std::min(kk + 1, int(p.size()));
+ for (int i= 0; i < len; ++i) ret+= p[i] * iq[kk - i];
+ return ret;
+}
+}  // namespace linrec_internal
+// [x^k] P(x)/Q(x)。Q(0) は可逆であること。Conv は畳み込みの核 (省くと T の既定の核)。
+// 核は T のあとのテンプレート引数 (linear_recurrence<Mint> と書く既存の呼び出しを壊さないため)。
+template <class T, class Conv= convolve_internal::Auto> T div_at(std::vector<T> P, std::vector<T> Q, unsigned long long k) {
+ assert(!Q.empty());
  // Q(0) = 1 にそろえる (段を進めても Q(0) は 1 のまま)。
  if(!(Q[0] == T(1))) {
   const T iv= T(1) / Q[0];
   for(auto& x: P) x*= iv;
   for(auto& x: Q) x*= iv;
  }
+ if constexpr(linrec_internal::fast_ok<T, Conv>) {
+  if(int(Q.size()) > 40) return linrec_internal::div_at_fast<Conv, T>(std::move(P), std::move(Q), k);
+ }
  if constexpr(convolve_internal::is_zmod_v<T>) return T::raw(linrec_internal::zmod<T>(convolve_internal::to_u32(P), convolve_internal::to_u32(Q), k));
  else return linrec_internal::generic(P, Q, k);
 }
 // a_n = Σ_{j=1}^{d} c_j a_{n-j} (n ≥ d) の第 k 項。c = (c_1, ..., c_d)、a は初項 a_0, ..., a_{d-1} (d 個以上あれば先頭の
 // d 個を使い、k がその範囲なら a_k を返す)。
-template <class T> T linear_recurrence(const std::vector<T>& c, const std::vector<T>& a, unsigned long long k) {
+template <class T, class Conv= convolve_internal::Auto> T linear_recurrence(const std::vector<T>& c, const std::vector<T>& a, unsigned long long k) {
  if(k < a.size()) return a[k];
  const int d= int(c.size());
  if(d == 0) return T();
@@ -138,6 +200,16 @@ template <class T> T linear_recurrence(const std::vector<T>& c, const std::vecto
    }
    return T::raw(linrec_internal::zmod_small<T>(P, d, Q, d + 1, k));
   }
+ }
+ if constexpr(linrec_internal::fast_ok<T, Conv>)
+  if(d > 40) {  // 大きい d は畳み込みの共通の口で回す道。[x^k] に要る P の先頭だけ作る。
+  std::vector<T> Q(d + 1);
+  Q[0]= T(1);
+  for(int j= 1; j <= d; ++j) Q[j]= T() - c[j - 1];
+  const int plen= k < (unsigned long long)(d) ? int(k) + 1 : d;
+  std::vector<T> P(plen);
+  convolve_range<Conv>(a.data(), d, Q.data(), d + 1, 0, plen, P.data());
+  return div_at<T, Conv>(std::move(P), std::move(Q), k);
  }
  std::vector<T> Q(d + 1);
  Q[0]= T(1);
