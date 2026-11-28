@@ -408,31 +408,72 @@ public:
   return ret;
  }
  std::size_t size() const { return n_[lr[0]].sz + n_[lr[1]].sz + !!mn; }
- PiecewiseLinearConvex& operator+=(const PiecewiseLinearConvex& g) { return *this= *this + g; }
+ // f += g。g は値で受けるので、右辺値 (`f += dfs(...)` の形) ではノードを移し、this を
+ // コピーしない。木の DP で累積に += を続けても O(N^2) にならない。
+ PiecewiseLinearConvex& operator+=(PiecewiseLinearConvex g) { return absorb(std::move(g)), *this; }
  PiecewiseLinearConvex operator+(PiecewiseLinearConvex g) const {
   PiecewiseLinearConvex ret= *this;
-  if(g.bf[0]) ret.add_inf(false, g.bx[0]);
-  if(g.bf[1]) ret.add_inf(true, g.bx[1]);
-  if(bf[0]) g.add_inf(false, bx[0]);
-  if(bf[1]) g.add_inf(true, bx[1]);
-  ret.y+= g.y, ret.rem+= g.rem;
-  if(!g.mn) return ret;
-  // g のノードを ret の配列に移し、添字を付け直す
-  const int base= (int)ret.n_.size();
-  ret.n_.reserve(ret.n_.size() + g.n_.size() - 1);
-  for(std::size_t i= 1; i < g.n_.size(); ++i) ret.n_.push_back(g.n_[i]);
-  const int off= base - 1;
-  for(int i= base; i < (int)ret.n_.size(); ++i)
-   for(int c= 0; c < 2; ++c) ret.n_[i].ch[c]= ret.n_[i].ch[c] ? ret.n_[i].ch[c] + off : 0;
-  const int gmn= g.mn ? g.mn + off : 0, gl0= g.lr[0] ? g.lr[0] + off : 0, gl1= g.lr[1] ? g.lr[1] + off : 0;
-  if(!ret.mn)
-   return ret.mn= gmn, ret.lr[0]= gl0, ret.lr[1]= gl1, ret.o[0]= g.o[0], ret.o[1]= g.o[1], ret;
-  ret.y+= ret.n_[ret.lr[0]].s + D(ret.n_[ret.mn].x) * ret.o[0] + ret.n_[gl0].s + D(ret.n_[gmn].x) * g.o[0];
-  ret.rem-= ret.o[0] + ret.n_[ret.lr[0]].a + g.o[0] + ret.n_[gl0].a;
-  int t= ret.unite(ret.join(ret.lr[0], ret.mn, ret.lr[1]), ret.join(gl0, gmn, gl1));
-  return std::tie(ret.lr[1], ret.mn)= ret.pop<0>(t), ret.lr[0]= 0, ret.o[0]= 0, ret.o[1]= ret.n_[ret.mn].d, ret;
+  ret.absorb(std::move(g));
+  return ret;
  }
 private:
+ // g を this に併合する。足し算は可換だが、unite の引数の向きは mylib と同じ (this が
+ // 左) に保つ。向きを変えると木の形が変わり、平らな最小のときに argmin が返す区間が
+ // 変わる。ノードの移し直しは常に少ないほうの側だけにする (chain のような形の木の DP で、
+ // 深さのぶんコピーが積み上がって O(N^2) になるのを防ぐ)。
+ void absorb(PiecewiseLinearConvex&& g) {
+  // g の定義域を this に、this の定義域を g に。mylib と同じく、this の定義域は
+  // 動かす前のものを g に使う。
+  const bool tbf0= bf[0], tbf1= bf[1];
+  const T tbx0= bx[0], tbx1= bx[1];
+  if(g.bf[0]) add_inf(false, g.bx[0]);
+  if(g.bf[1]) add_inf(true, g.bx[1]);
+  if(tbf0) g.add_inf(false, tbx0);
+  if(tbf1) g.add_inf(true, tbx1);
+  y+= g.y, rem+= g.rem;
+  if(!g.mn) return;
+  // this の定義域 (bf/bx) は、bx が shift の累積も持つので、土台を移すときに控えて戻す。
+  const bool fbf0= bf[0], fbf1= bf[1];
+  const T fbx0= bx[0], fbx1= bx[1];
+  if(g.n_.size() > n_.size()) {
+   // g の配列を土台にし、this のノードをその後ろへ移す。添字を付け直してから
+   // 土台を this に移し、unite は (this, g) の順で呼ぶ。
+   const bool t_has= mn != 0;
+   const int t_l0= lr[0], t_mn= mn, t_l1= lr[1], g_l0= g.lr[0], g_mn= g.mn, g_l1= g.lr[1];
+   const T to0= o[0], go0= g.o[0];
+   const D ysum= y;
+   const T remsum= rem;
+   const int base= (int)g.n_.size(), off= base - 1;
+   for(std::size_t i= 1; i < n_.size(); ++i) g.n_.push_back(n_[i]);
+   for(int i= base; i < (int)g.n_.size(); ++i)
+    for(int c= 0; c < 2; ++c) g.n_[i].ch[c]= g.n_[i].ch[c] ? g.n_[i].ch[c] + off : 0;
+   const int tl0= t_l0 ? t_l0 + off : 0, tmn= t_mn ? t_mn + off : 0, tl1= t_l1 ? t_l1 + off : 0;
+   *this= std::move(g);
+   y= ysum, rem= remsum;
+   bf[0]= fbf0, bf[1]= fbf1, bx[0]= fbx0, bx[1]= fbx1;
+   if(!t_has) return;
+   y+= n_[tl0].s + D(n_[tmn].x) * to0 + n_[g_l0].s + D(n_[g_mn].x) * go0;
+   rem-= to0 + n_[tl0].a + go0 + n_[g_l0].a;
+   int t= unite(join(tl0, tmn, tl1), join(g_l0, g_mn, g_l1));
+   std::tie(lr[1], mn)= pop<0>(t), lr[0]= 0, o[0]= 0, o[1]= n_[mn].d;
+   return;
+  }
+  // this の配列を土台にし、g のノードをその後ろへ移す。reserve を毎回ちょうどの
+  // 大きさで呼ぶと、1 ノードずつ併合する形で配列を作り直し続けて O(N^2) になる。
+  const int base= (int)n_.size(), off= base - 1;
+  for(std::size_t i= 1; i < g.n_.size(); ++i) n_.push_back(g.n_[i]);
+  for(int i= base; i < (int)n_.size(); ++i)
+   for(int c= 0; c < 2; ++c) n_[i].ch[c]= n_[i].ch[c] ? n_[i].ch[c] + off : 0;
+  const int gmn= g.mn + off, gl0= g.lr[0] ? g.lr[0] + off : 0, gl1= g.lr[1] ? g.lr[1] + off : 0;
+  if(!mn) {
+   mn= gmn, lr[0]= gl0, lr[1]= gl1, o[0]= g.o[0], o[1]= g.o[1];
+   return;
+  }
+  y+= n_[lr[0]].s + D(n_[mn].x) * o[0] + n_[gl0].s + D(n_[gmn].x) * g.o[0];
+  rem-= o[0] + n_[lr[0]].a + g.o[0] + n_[gl0].a;
+  int t= unite(join(lr[0], mn, lr[1]), join(gl0, gmn, gl1));
+  std::tie(lr[1], mn)= pop<0>(t), lr[0]= 0, o[0]= 0, o[1]= n_[mn].d;
+ }
  template <class Iter> int build(Iter bg, Iter ed) {
   if(bg == ed) return 0;
   auto md= bg + (ed - bg) / 2;
