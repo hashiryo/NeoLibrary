@@ -53,7 +53,7 @@ template <class T= long long, bool MAX= false, class F= LiChaoLine<T, MAX>> clas
   int c[2];
   [[no_unique_address]] li_chao_tree_internal::MarkOf<F> has;
  };
- long long lo_;
+ long long lo_, hi_;
  int depth_= 0, root_= -1;  // 根が覆う幅は 2^depth_
  std::vector<Node> t_;
  static bool wins(const T& u, const T& v) { return li_chao_tree_internal::wins<T, MAX>(u, v); }
@@ -69,7 +69,7 @@ template <class T= long long, bool MAX= false, class F= LiChaoLine<T, MAX>> clas
     nd.f= f, nd.has.set();
     return;
    }
-   const long long xl= lo_ + l, xr= xl + (1LL << d) - 1;
+   const long long xl= std::min(lo_ + l, hi_ - 1), xr= std::min(lo_ + l + (1LL << d) - 1, hi_ - 1);
    const bool bl= wins(f(xl), nd.f(xl)), br= wins(f(xr), nd.f(xr));
    if(bl == br) {
     if(bl) nd.f= f;
@@ -104,7 +104,7 @@ template <class T= long long, bool MAX= false, class F= LiChaoLine<T, MAX>> clas
  }
 public:
  // x の範囲は [lo, hi)。reserve_nodes は節の数の見込み (全体に足す関数 1 つにつき高々 1 つ)。
- LiChaoTree(long long lo, long long hi, int reserve_nodes= 0): lo_(lo) {
+ LiChaoTree(long long lo, long long hi, int reserve_nodes= 0): lo_(lo), hi_(hi) {
   while((1LL << depth_) < hi - lo) ++depth_;
   t_.reserve(reserve_nodes);
  }
