@@ -12,7 +12,9 @@ template <class T> std::vector<T> min_plus_convolution_convex(const std::vector<
 
 `min_plus_convolution_convex_convex` は、a と b の両方が凸 (差分が広義単調増加) のときに使えます。差分の列を併合するので O(n + m) です。
 
-`min_plus_convolution_convex` は、a が凸で b が任意のときに使えます。行 k 列 j の値を a[k-j] + b[j] にすると行の最小の列が行について単調になるので、[SMAWK](smawk.md) で O(n + m) 回の評価で作ります。a[i] + b[j] が `T` に収まる必要があります。分割統治でも作れ、そちらが速いコンパイラもあるので、計測を見て中身を選び直すことがあります。
+`min_plus_convolution_convex` は、a が凸で b が任意のときに使えます。行 k 列 j の値を a[k-j] + b[j] にすると行の最小の列が行について単調になるので、[分割統治](monotone_minima.md) で作ります。a[i] + b[j] が `T` に収まる必要があります。
+
+中身は [SMAWK](smawk.md) でも作れます。評価回数は SMAWK のほうが少ないですが、計測では 1 候補 1 評価の分割統治のほうが x64 の gcc と clang の両方で 1.6 倍速かったため、分割統治にしています (記録は algo-notes の notes/dp-optimization.md)。
 
 ## 使い方
 
