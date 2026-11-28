@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <numeric>
 #include <vector>
@@ -14,6 +15,7 @@ struct MoWithUpdates {
  std::vector<int> ql_, qr_, qt_;
  int n_= 0;
  void query(int l, int r, int t) {
+  assert(0 <= l && l <= r && t >= 0);
   ql_.push_back(l), qr_.push_back(r), qt_.push_back(t);
   if(n_ < r) n_= r;
  }

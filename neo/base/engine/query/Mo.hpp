@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <bit>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <numeric>
@@ -39,6 +40,7 @@ struct Mo {
  int n_= 0;
  // 半開区間 [l, r) のクエリを足す。n_ は右端の最大 (数列の長さ) になる。
  void query(int l, int r) {
+  assert(0 <= l && l <= r);
   ql_.push_back(l), qr_.push_back(r);
   if(n_ < r) n_= r;
  }

@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <numeric>
 #include <vector>
@@ -15,6 +16,7 @@ struct Mo2D {
  std::vector<int> qxl_, qxr_, qyl_, qyr_;
  int nx_= 0, ny_= 0;
  void query(int xl, int xr, int yl, int yr) {
+  assert(0 <= xl && xl <= xr && 0 <= yl && yl <= yr);
   qxl_.push_back(xl), qxr_.push_back(xr), qyl_.push_back(yl), qyr_.push_back(yr);
   if(nx_ < xr) nx_= xr;
   if(ny_ < yr) ny_= yr;

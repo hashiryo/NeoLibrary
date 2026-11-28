@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <numeric>
 #include <vector>
@@ -15,6 +16,7 @@ struct RollbackMo {
  std::vector<int> ql_, qr_;
  int n_= 0;
  void query(int l, int r) {
+  assert(0 <= l && l <= r);
   ql_.push_back(l), qr_.push_back(r);
   if(n_ < r) n_= r;
  }

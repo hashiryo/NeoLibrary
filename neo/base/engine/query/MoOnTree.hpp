@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <cassert>
 #include <bit>
 #include <utility>
 #include <vector>
@@ -140,7 +141,10 @@ struct MoOnTreeWithUpdates {
   tree_.query(u, v);
   qt_.push_back(t);
  }
- void build(int root= 0) { tree_.build(root); }
+ void build(int root= 0) {
+  assert(qt_.size() == tree_.qu_.size());
+  tree_.build(root);
+ }
  bool is_on(int v) const { return tree_.on_[v]; }
  template <class Toggle, class Apply, class Undo, class Out>
  void run(const Toggle& toggle, const Apply& apply, const Undo& undo, const Out& out) {
