@@ -43,6 +43,8 @@ auto s = ett.prod_subtree(v, p);
 
 辺は (u, v) の値で覚えるので、`cut` は `link` したときと逆順でもかまいません。同じ 2 頂点の辺を何度も切って張り直せます。辺の節は free list で使い回すので、節の数は生きた辺の数で決まります。
 
+`link(u, v)` は u と v が別の連結成分にあるときだけ呼んでください。同じ成分の 2 頂点をつなぐと巡回列が二重になり、以後の積と `cut` が壊れます (assert で確かめています)。辺の列からの構築も森 (閉路の無いグラフ) を前提にします。
+
 ## 中身
 
 木を、頂点の節と辺ごとの 2 つの向きの節を並べた巡回列で持ち、大きさで釣り合いを取る木 (WBT) で分けます。優先度は持たず、併合は大きい側の木へ降ります。`link(u, v)` は u の列、u から v へ向かう節、v の列、v から u へ向かう節の順につなぎます。向きは、p から v へ向かう節から前方に進むと v の側、v から p へ向かう節の手前で終わるように決めています。
@@ -55,4 +57,4 @@ auto s = ett.prod_subtree(v, p);
 
 区間の積と作用は、splay 版のように木を組み替えて取らないので、そのぶんクエリが軽いです。逆に分割と併合は splay 版より少し重いです。
 
-値です。procon-judge の提出 (`submissions/lib-neo-build.cpp`) は dynamic-tree-subtree-add-subtree-sum の 18 ケースがすべて AC で、手元の M2 Max の almost_line_00 が 668〜714 ms です (splay 版の下書き `_shared/dyntree/ett.hpp` は 645〜688 ms)。yuki-828 は 46 ケースがすべて AC で、最大 1282 ms です (splay 版は 1226 ms)。同問題の Library Checker の首位は 192 ms (オフラインのクラスタ木) です。部分木の加算と和は、クエリを先読みできるならオフラインの構造の方が速いです。記録は algo-notes の notes/dynamic-tree.md にあります。
+値です。procon-judge の提出 (`submissions/lib-neo-build.cpp`) は dynamic-tree-subtree-add-subtree-sum の 18 ケースがすべて AC で、x64-gcc (Xeon 6975P-C) の最大 500 ms、合計 4188 ms、メモリ 91 MB です (NeoLibrary 7345992 の回)。同じ CPU モデルで測った splay 版の提出は 716 ms、6102 ms、77 MB、素朴な WBT (回転の直しなし) は 582 ms、4750 ms でした。yuki-828 は 46 ケースがすべて AC、x64-gcc で最大 295 ms です。手元の M2 Max の almost_line_00 は 600〜620 ms です (splay 版の下書き `_shared/dyntree/ett.hpp` が 645〜688 ms)。同問題の Library Checker の首位は 192 ms (オフラインのクラスタ木) です。部分木の加算と和は、クエリを先読みできるならオフラインの構造の方が速いです。記録は algo-notes の notes/dynamic-tree.md にあります。
