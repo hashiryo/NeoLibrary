@@ -28,14 +28,13 @@ struct MoWithUpdates {
   int bs= 1;
   if(n_ > 1) bs= (int)std::pow((double)n_, 2.0 / 3.0);
   if(bs < 1) bs= 1;
-  std::vector<int> ord(q);
+  std::vector<int> ord(q), lb(q), rb(q);
   std::iota(ord.begin(), ord.end(), 0);
+  for(int i= 0; i < q; ++i) lb[i]= ql_[i] / bs, rb[i]= qr_[i] / bs;
   std::sort(ord.begin(), ord.end(), [&](int a, int b) {
-   const int alb= ql_[a] / bs, blb= ql_[b] / bs;
-   if(alb != blb) return alb < blb;
-   const int arb= qr_[a] / bs, brb= qr_[b] / bs;
-   if(arb != brb) return (alb & 1) ? arb > brb : arb < brb;
-   return (arb & 1) ? qt_[a] > qt_[b] : qt_[a] < qt_[b];
+   if(lb[a] != lb[b]) return lb[a] < lb[b];
+   if(rb[a] != rb[b]) return (lb[a] & 1) ? rb[a] > rb[b] : rb[a] < rb[b];
+   return (rb[a] & 1) ? qt_[a] > qt_[b] : qt_[a] < qt_[b];
   });
   int l= 0, r= 0, t= 0;
   for(int id: ord) {

@@ -31,14 +31,13 @@ struct Mo2D {
   int bx= nx_ / root, by= ny_ / root;
   if(bx < 1) bx= 1;
   if(by < 1) by= 1;
-  std::vector<int> ord(q);
+  std::vector<int> ord(q), xb(q), yb(q);
   std::iota(ord.begin(), ord.end(), 0);
+  for(int i= 0; i < q; ++i) xb[i]= qxl_[i] / bx, yb[i]= qyl_[i] / by;
   std::sort(ord.begin(), ord.end(), [&](int a, int b) {
-   const int axb= qxl_[a] / bx, bxb= qxl_[b] / bx;
-   if(axb != bxb) return axb < bxb;
-   const int ayb= qyl_[a] / by, byb= qyl_[b] / by;
-   if(ayb != byb) return (axb & 1) ? ayb > byb : ayb < byb;
-   if(qxr_[a] != qxr_[b]) return (ayb & 1) ? qxr_[a] > qxr_[b] : qxr_[a] < qxr_[b];
+   if(xb[a] != xb[b]) return xb[a] < xb[b];
+   if(yb[a] != yb[b]) return (xb[a] & 1) ? yb[a] > yb[b] : yb[a] < yb[b];
+   if(qxr_[a] != qxr_[b]) return (yb[a] & 1) ? qxr_[a] > qxr_[b] : qxr_[a] < qxr_[b];
    return (qxr_[a] & 1) ? qyr_[a] > qyr_[b] : qyr_[a] < qyr_[b];
   });
   int xl= 0, xr= 0, yl= 0, yr= 0;

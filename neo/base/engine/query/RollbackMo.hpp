@@ -28,18 +28,18 @@ struct RollbackMo {
   if(q == 0) return;
   int bs= n_ / std::max(1, (int)std::sqrt((double)q));
   if(bs < 1) bs= 1;
-  std::vector<int> ord(q);
+  std::vector<int> ord(q), lb(q);
   std::iota(ord.begin(), ord.end(), 0);
+  for(int i= 0; i < q; ++i) lb[i]= ql_[i] / bs;
   std::sort(ord.begin(), ord.end(), [&](int a, int b) {
-   const int ab= ql_[a] / bs, bb= ql_[b] / bs;
-   if(ab != bb) return ab < bb;
+   if(lb[a] != lb[b]) return lb[a] < lb[b];
    return qr_[a] < qr_[b];
   });
   for(int i= 0; i < q;) {
-   const int bb= ql_[ord[i]] / bs;
+   const int bb= lb[ord[i]];
    const int be= std::min(n_, (bb + 1) * bs);
    int j= i;
-   while(j < q && ql_[ord[j]] / bs == bb) ++j;
+   while(j < q && lb[ord[j]] == bb) ++j;
    int rcur= be, kept= 0;
    for(int k= i; k < j; ++k) {
     const int id= ord[k], l= ql_[id], r= qr_[id];

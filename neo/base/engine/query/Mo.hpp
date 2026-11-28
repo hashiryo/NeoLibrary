@@ -53,12 +53,12 @@ struct Mo {
   if(q == 0) return;
   int bs= n_ / std::max(1, (int)std::sqrt((double)q));
   if(bs < 1) bs= 1;
-  std::vector<int> ord(q);
+  std::vector<int> ord(q), blk(q);
   std::iota(ord.begin(), ord.end(), 0);
+  for(int i= 0; i < q; ++i) blk[i]= ql_[i] / bs;
   std::sort(ord.begin(), ord.end(), [&](int a, int b) {
-   const int ab= ql_[a] / bs, bb= ql_[b] / bs;
-   if(ab != bb) return ab < bb;
-   return (ab & 1) ? qr_[a] > qr_[b] : qr_[a] < qr_[b];
+   if(blk[a] != blk[b]) return blk[a] < blk[b];
+   return (blk[a] & 1) ? qr_[a] > qr_[b] : qr_[a] < qr_[b];
   });
   int l= 0, r= 0;
   for(int id: ord) {
