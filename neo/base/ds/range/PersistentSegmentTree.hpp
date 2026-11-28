@@ -137,6 +137,25 @@ public:
   assert(a.sz_ == b.sz_);
   return prod_diff_rec(a.root_, b.root_, 0, b.sz_, l, r, sub);
  }
+ // T が整数 (数え上げ) のとき、版 b と版 a の差の値のうち、x との xor が最大になる値の xor を返す。
+ // a と b は同じ sz_ を持ち、x は [0, sz_) にあること。差が空なら 0 を返す。
+ static T max_xor(const PersistentSegmentTree& a, const PersistentSegmentTree& b, T x) {
+  static_assert(std::is_integral_v<T>, "max_xor は T が整数のときだけ");
+  assert(a.sz_ == b.sz_);
+  int pa= a.root_, pb= b.root_;
+  const int lg= std::countr_zero(unsigned(b.sz_));
+  T res= 0;
+  for(int h= lg - 1; h >= 0; --h) {
+   const int xb= int((x >> h) & 1), want= xb ^ 1;
+   const int c0= int(pool_[pool_[pb].l].v - pool_[pool_[pa].l].v);
+   const int c1= int(pool_[pool_[pb].r].v - pool_[pool_[pa].r].v);
+   const int choose= (want == 0 ? (c0 > 0 ? 0 : 1) : (c1 > 0 ? 1 : 0));
+   if(choose != xb) res|= T(1) << h;
+   if(choose == 0) pa= pool_[pa].l, pb= pool_[pb].l;
+   else pa= pool_[pa].r, pb= pool_[pb].r;
+  }
+  return res;
+ }
  // T が整数 (数え上げ) のとき、版 b と版 a の差の k 番目 (0 始まり) の位置。a と b は同じ sz_ を持つこと。
  // 値の順位を葉に持つ木で、版 i を先頭 i 個を入れた木にすると、range-kth-smallest になる。
  static int kth(const PersistentSegmentTree& a, const PersistentSegmentTree& b, int k) {
