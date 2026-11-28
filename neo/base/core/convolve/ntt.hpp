@@ -1,8 +1,9 @@
 #pragma once
-// 単独の NTT の核 (スカラー、基数 4)。procon-judge の self/ntt で 2 本目として書いたものを、NeoLibrary の既定の NTT として移した。
-// dft は DIF で bit 反転の並べ替えをせず、index の 4 進の桁を逆にした順に評価値を置く (2 の指数が奇数のときは最後に基数 2 の段を 1 つ)。
-// idft は DIT でその逆。1/4 は段ごとに掛けず、最後に 1/n をまとめて掛ける。
-// ひねりは段ごとの表に持ち、内側の繰り返しで ω を掛け直さない。
+// 単独の NTT の核。x86 で AVX2 が使えるとき (__AVX2__) と SIMDe があるとき (SIMDE_ENABLE_NATIVE_ALIASES) は
+// 8 レーンの AVX2 の実装 (Montgomery、基数 4、ひねりは全レーン同じ、葉の 8 次の積) を使い、
+// どちらも無いときだけスカラー基数 4 の実装に落とす。どちらも dft は DIF で bit 反転の並べ替えをせず、
+// index の 4 進の桁を逆にした順に評価値を置く (2 の指数が奇数のときは最後に基数 2 の段を 1 つ)。
+// idft は DIT でその逆。dft と idft の入出力はどちらもふつうの表現 (ZMod の値)。
 // 口は convolve_range<K>(a, n, b, m, lo, hi, out)、dft<P>、idft<P>、dft_doubling<P>、even_dft<P>、odd_dft<P>。
 // 小さい積と、NTT に使えない係数の型 (ntt_friendly でない素数、実行時の法 ZMod<0>、ZMod 以外) は Naive に回す。
 #include <algorithm>
@@ -55,124 +56,9 @@ template <unsigned P> const ZMod<P>& primitive_root() {
  return g;
 }
 
-// 1 の原始 4 乗根 ω^{(P-1)/4} とその逆。基数 4 の段の i の掛け算に使う。
-template <unsigned P> const ZMod<P>& root4() {
- static const ZMod<P> v= pow_mod(primitive_root<P>(), u64(P - 1) / 4);
- return v;
-}
-template <unsigned P> const ZMod<P>& iroot4() {
- static const ZMod<P> v= root4<P>().inv();
- return v;
-}
-
-// 段のひねりの表。長さ len の段では h = len/4 として、tw[j] = ω_len^j、tw[h + j] = ω_len^{2j}、tw[2h + j] = ω_len^{3j}。
-// 同じ段のすべてのブロックで使い回す。大きさは 3 * (n/4) まで。
-template <unsigned P> struct scratch {
- static inline std::vector<ZMod<P>> tw;
-};
-template <unsigned P> ZMod<P>* get_tw(int h) {
- auto& v= scratch<P>::tw;
- if ((int)v.size() < 3 * h) v.resize(3 * h);
- return v.data();
-}
-
-// tw に 3 本の等比数列を詰める。wl は ω_len (逆変換では ω_len^{-1})。
-template <unsigned P> void fill_tw(ZMod<P>* tw, int h, ZMod<P> wl) {
- ZMod<P>* w1= tw;
- ZMod<P>* w2= tw + h;
- ZMod<P>* w3= tw + 2 * h;
- const ZMod<P> wl2= wl * wl, wl3= wl2 * wl;
- w1[0]= w2[0]= w3[0]= ZMod<P>(1);
- for (int j= 1; j < h; ++j) w1[j]= w1[j - 1] * wl, w2[j]= w2[j - 1] * wl2, w3[j]= w3[j - 1] * wl3;
-}
-
-// DIF。a[i] に Σ_j a[j] ω^{j k} が入る。k は位置 i の 4 進の桁を逆にした数 (2 の指数が奇数なら、最後の基数 2 の段で最上位の桁が最下位に来る)。
-template <unsigned P> void dft_impl(ZMod<P>* a, int n) {
- if (n <= 1) return;
- assert((n & (n - 1)) == 0 && (P - 1) % unsigned(n) == 0);
- const ZMod<P> g= primitive_root<P>();
- const auto fi= root4<P>().fixed();
- int len= n;
- for (; len >= 4; len>>= 2) {
-  const int h= len>> 2;
-  ZMod<P>* tw= get_tw<P>(h);
-  fill_tw<P>(tw, h, pow_mod(g, u64(P - 1) / unsigned(len)));
-  for (int i= 0; i < n; i+= len) {
-   ZMod<P>* x0= a + i;
-   ZMod<P>* x1= x0 + h;
-   ZMod<P>* x2= x1 + h;
-   ZMod<P>* x3= x2 + h;
-   for (int j= 0; j < h; ++j) {
-    const ZMod<P> u0= x0[j], u1= x1[j], u2= x2[j], u3= x3[j];
-    const ZMod<P> t0= u0 + u2, t1= u0 - u2, t2= u1 + u3, t3= u1 - u3;
-    const ZMod<P> y= t3 * fi;
-    x0[j]= t0 + t2;
-    x1[j]= (t1 + y) * tw[j];
-    x2[j]= (t0 - t2) * tw[h + j];
-    x3[j]= (t1 - y) * tw[2 * h + j];
-   }
-  }
- }
- if (len == 2) {
-  // 長さ 2 の段 (最後の 1 段)。ひねりは 1。
-  for (int i= 0; i < n; i+= 2) {
-   const ZMod<P> u= a[i], v= a[i + 1];
-   a[i]= u + v, a[i + 1]= u - v;
-  }
- }
-}
-
-// DIT。dft の逆。段ごとの 1/4 (最後の基数 2 の段の 1/2) は掛けず、最後に 1/n を掛ける。
-template <unsigned P> void idft_impl(ZMod<P>* a, int n) {
- if (n <= 1) return;
- assert((n & (n - 1)) == 0 && (P - 1) % unsigned(n) == 0);
- const ZMod<P> g= primitive_root<P>();
- const auto fii= iroot4<P>().fixed();
- if (__builtin_ctz(unsigned(n)) & 1) {
-  // dft の最後の基数 2 の段を先に戻す。
-  for (int i= 0; i < n; i+= 2) {
-   const ZMod<P> u= a[i], v= a[i + 1];
-   a[i]= u + v, a[i + 1]= u - v;
-  }
- }
- // dft の基数 4 の段の長さは、2 の指数が偶数なら 4, 16, ..., n、奇数なら 8, 32, ..., n。逆はその昇順。
- for (int len= (__builtin_ctz(unsigned(n)) & 1) ? 8 : 4; len <= n; len<<= 2) {
-  const int h= len>> 2;
-  ZMod<P>* tw= get_tw<P>(h);
-  fill_tw<P>(tw, h, pow_mod(g, u64(P - 1) - u64(P - 1) / unsigned(len)));
-  for (int i= 0; i < n; i+= len) {
-   ZMod<P>* x0= a + i;
-   ZMod<P>* x1= x0 + h;
-   ZMod<P>* x2= x1 + h;
-   ZMod<P>* x3= x2 + h;
-   for (int j= 0; j < h; ++j) {
-    const ZMod<P> u0= x0[j];
-    const ZMod<P> y1= x1[j] * tw[j];
-    const ZMod<P> y2= x2[j] * tw[h + j];
-    const ZMod<P> y3= x3[j] * tw[2 * h + j];
-    const ZMod<P> t0= u0 + y2, t2= u0 - y2, t1= y1 + y3, t3= (y1 - y3) * fii;
-    x0[j]= t0 + t1;
-    x1[j]= t2 + t3;
-    x2[j]= t0 - t1;
-    x3[j]= t2 - t3;
-   }
-  }
- }
- const ZMod<P> iv= ZMod<P>(unsigned(n)).inv();
- for (int i= 0; i < n; ++i) a[i]*= iv;
-}
-
-// a[0..n) は長さ n の変換。係数に戻して 0 を詰め、長さ 2n の変換を a[0..2n) に作る (素直な形。変換の使い回しはまだ作っていない)。
-template <unsigned P> void dft_doubling_impl(ZMod<P>* a, int n) {
- std::vector<ZMod<P>> c(a, a + n);
- idft_impl<P>(c.data(), n);
- std::fill(a, a + 2 * n, ZMod<P>());
- std::copy(c.begin(), c.end(), a);
- dft_impl<P>(a, 2 * n);
-}
-
 // 長さ n の変換から、偶数次の部分の長さ n/2 の変換を a[0..n/2) に作る。
 // 並びが 4 進の桁の逆なので、対になる評価点は隣どうしではない (長さ n/2 が 4 の冪か、2 * 4 の冪かで変わる)。
+// 段の並びに依らないよう、ふつうの値のまま u64 の剰余で書く (AVX2 の実装でも同じものを使う)。
 template <unsigned P> void even_dft_impl(ZMod<P>* a, int n) {
  const int m= n>> 1;
  const ZMod<P> iv2= ZMod<P>(2).inv();
@@ -230,6 +116,14 @@ template <unsigned P> struct static_ntt_mod<ZMod<P>>: std::bool_constant<ntt_fri
 };
 }  // namespace ntt_internal
 
+// 実装。AVX2 の実装は intrinsics でも SIMDe でも同じソースで通り、arm では SIMDe が使われる。
+// NEO_NTT_SCALAR を定義すると、速さを比べるためにスカラーの実装に落とせる。
+#if !defined(NEO_NTT_SCALAR) && (defined(__AVX2__) || defined(SIMDE_ENABLE_NATIVE_ALIASES))
+#include "neo/base/core/convolve/ntt_avx2_impl.hpp"
+#else
+#include "neo/base/core/convolve/ntt_scalar_impl.hpp"
+#endif
+
 struct Ntt {
  // out[k - lo] = Σ_{i+j=k} a[i] b[j] (lo <= k < hi)。n >= 1、m >= 1、0 <= lo < hi <= n + m - 1。
  template <class K> static void convolve_range(const K* a, int n, const K* b, int m, int lo, int hi, K* out) {
@@ -240,18 +134,7 @@ struct Ntt {
    int l= 1;
    while (l < need) l<<= 1;
    if (std::min(n, m) >= 60 && (P - 1) % unsigned(l) == 0) {
-    std::vector<K> fa(a, a + n), fb;
-    fa.resize(l);
-    if (a == b && n == m) {
-     ntt_internal::dft_impl<P>(fa.data(), l);
-     for (int i= 0; i < l; ++i) fa[i]*= fa[i];
-    } else {
-     fb.assign(b, b + m), fb.resize(l);
-     ntt_internal::dft_impl<P>(fa.data(), l), ntt_internal::dft_impl<P>(fb.data(), l);
-     for (int i= 0; i < l; ++i) fa[i]*= fb[i];
-    }
-    ntt_internal::idft_impl<P>(fa.data(), l);
-    for (int k= lo; k < hi; ++k) out[k - lo]= fa[k];
+    ntt_internal::conv_kernel<P>(a, n, b, m, lo, hi, out);
     return;
    }
   }
