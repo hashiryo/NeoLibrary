@@ -61,7 +61,9 @@ template <class K> Intersection intersection(const Segment<K>& s, const Segment<
  auto cp= cross_points(s, t);
  if(cp.size() == 0) return Intersection::disjoint;
  if(cp.size() == 2) return Intersection::overlap;
- return cp[0] == s.p || cp[0] == s.q || cp[0] == t.p || cp[0] == t.q ? Intersection::touching : Intersection::crossing;
+ // 端点かどうかは距離で見る。浮動小数では、交点が端点と計算誤差だけずれるので、座標の == では足りない。
+ auto at_end= [&](const Point<K>& q) { return !sgn(dist2(cp[0], q)); };
+ return at_end(s.p) || at_end(s.q) || at_end(t.p) || at_end(t.q) ? Intersection::touching : Intersection::crossing;
 }
 template <class K> wide_t<K> dist2(const Segment<K>& s, const Point<K>& p) { return dist2(p, s.closest_point(p)); }
 template <class K> wide_t<K> dist2(const Point<K>& p, const Segment<K>& s) { return dist2(s, p); }

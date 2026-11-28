@@ -58,7 +58,7 @@ public:
  }
  std::size_t vertex_size() const { return ps.size(); }
  std::size_t face_size() const { return cmp.size(); }
- std::span<const int> out_edges(int v) const { return {g.data() + pos[v], pos[v + 1] - pos[v]}; }
+ std::span<const int> out_edges(int v) const { return {g.data() + pos[v], std::size_t(pos[v + 1] - pos[v])}; }
  Point<K> point(int v) const { return ps[v]; }
  int vertex(const Point<K>& p) const { return std::lower_bound(ps.begin(), ps.end(), p) - ps.begin(); }
  int to_v(int e) const { return dst[e]; }
