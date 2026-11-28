@@ -229,7 +229,7 @@ template <class T= long long> class PiecewiseLinearConvex {
  }
 public:
  // f(x) := 0
- PiecewiseLinearConvex()= default;
+ PiecewiseLinearConvex() { n_.reserve(256); }
  // f(x) := sum max(0, a(x-x0))
  explicit PiecewiseLinearConvex(const std::vector<std::pair<T, T>>& ramps) {
   int m= ramps.size();
@@ -419,6 +419,7 @@ public:
   if(!g.mn) return ret;
   // g のノードを ret の配列に移し、添字を付け直す
   const int base= (int)ret.n_.size();
+  ret.n_.reserve(ret.n_.size() + g.n_.size() - 1);
   for(std::size_t i= 1; i < g.n_.size(); ++i) ret.n_.push_back(g.n_[i]);
   const int off= base - 1;
   for(int i= base; i < (int)ret.n_.size(); ++i)
