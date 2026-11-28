@@ -195,10 +195,11 @@ class EulerTourTree {
    a.cnt = t[p].cnt, a.sum = t[p].sum;
    pull(p);
   }
-  [[gnu::always_inline]] void splay(int x) {
-   for (int p; (p = t[x].par);) {
+  // x を、親が goal になるまで回す。goal が 0 なら木の根まで。
+  [[gnu::always_inline]] void splay_to(int x, int goal) {
+   for (int p; (p = t[x].par) != goal;) {
     int g = t[p].par;
-    if (!g) {
+    if (g == goal) {
      push(p), push(x), rotate(x);
      break;
     }
@@ -208,6 +209,7 @@ class EulerTourTree {
    }
    push(x);
   }
+  [[gnu::always_inline]] void splay(int x) { splay_to(x, 0); }
   // x より前を切り離す。x の木は x から始まる。
   [[gnu::always_inline]] int split_before(int x) {
    splay(x);
@@ -373,14 +375,30 @@ class EulerTourTree {
    if (e.u == u) a = e.a, b = e.b;
    else a = e.b, b = e.a;
    reroot(a);  // 列を a から始め、a の次に v の側、その次に b が来る形にする
-   int rest = split_after(a);
-   static_cast<void>(rest);
    splay(b);
-   int mid = split_before(b);  // v の側
-   int suf = split_after(b);   // u の側 (a より前の部分は回したので空)
-   static_cast<void>(mid);
+   int r = a;
+   while (t[r].par != b) r = t[r].par;
+   const bool right = (t[b].ch[1] == r);
+   splay_to(a, b);
+   if (right) {  // [L] b [v の側] a [Q]
+    int l = t[b].ch[0], q = t[a].ch[1], v1 = t[a].ch[0];
+    if (v1) t[v1].par = 0;
+    if (q) t[q].par = 0;
+    if (l) t[l].par = 0;
+    t[a].ch[0] = t[a].ch[1] = 0;
+    t[b].ch[0] = 0, t[b].ch[1] = a;  // {b, a} だけ残して捨てる
+    static_cast<void>(merge(q, l));
+   } else {  // [X] a [Y] b [R]: v の側は R + X、u の側は Y
+    int x = t[a].ch[0], y = t[a].ch[1], rr = t[b].ch[1];
+    if (x) t[x].par = 0;
+    if (y) t[y].par = 0;
+    if (rr) t[rr].par = 0;
+    t[a].ch[0] = t[a].ch[1] = 0;
+    t[b].ch[1] = 0, t[b].ch[0] = a;
+    static_cast<void>(merge(rr, x));
+    static_cast<void>(y);
+   }
    free_edge_node(a), free_edge_node(b);
-   static_cast<void>(suf);
   }
   bool connected(int u, int v) { return root_of(u + 1) == root_of(v + 1); }
   // 頂点 v の木の全体の積。
@@ -404,9 +422,20 @@ class EulerTourTree {
   // 辺 (v, p) について、p を親とした v の部分木の積。v と p は辺で結ばれていること。
   T prod_subtree(int v, int p) {
    auto [a, b] = edge_nodes(v, p);  // a: v->p, b: p->v
-   reroot(b), splay(a);             // p->v から前方が v の側
-   int l = t[a].ch[0];
-   return l ? t[l].sum : M::ti();
+   splay(b);
+   int r = a;
+   while (t[r].par != b) r = t[r].par;
+   const bool right = (t[b].ch[1] == r);
+   splay_to(a, b);
+   if (right) {  // [L] b [v の側] a [Q]
+    int l = t[a].ch[0];
+    return l ? t[l].sum : M::ti();
+   }
+   // [X] a [Y] b [R]: v の側は R + X
+   T s = M::ti();
+   if (int x = t[b].ch[1]; x) s = t[x].sum;
+   if (int x = t[a].ch[0]; x) s = M::op(s, t[x].sum);
+   return s;
   }
   // 辺 (v, p) について、p を親とした v の部分木への作用。
   template <bool A = AC>
@@ -414,9 +443,17 @@ class EulerTourTree {
    static_assert(A, "\"apply_subtree\" is not available");
    if constexpr (A) {
     auto [a, b] = edge_nodes(v, p);  // a: v->p, b: p->v
-    reroot(b), splay(a);
-    apply_to(t[a].ch[0], e);
-    pull(a);
+    splay(b);
+    int r = a;
+    while (t[r].par != b) r = t[r].par;
+    const bool right = (t[b].ch[1] == r);
+    splay_to(a, b);
+    if (right) {
+     apply_to(t[a].ch[0], e);
+    } else {
+     apply_to(t[b].ch[1], e), apply_to(t[a].ch[0], e);
+    }
+    pull(a), pull(b);
    }
   }
 };
