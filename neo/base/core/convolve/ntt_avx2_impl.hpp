@@ -18,6 +18,7 @@
 #else
 #error "AVX2 の intrinsics か SIMDe が要ります (-march=x86-64-v3 か -DSIMDE_ENABLE_NATIVE_ALIASES)"
 #endif
+#include <cstdlib>
 #include "neo/base/core/algebra/ZMod.hpp"
 #include "neo/base/core/convolve/naive.hpp"
 
@@ -38,6 +39,25 @@ using V= __m256i;
 constexpr int dft_tile= 2048;
 // 葉の積をまとめて回すタイルのベクトル数 (要素数では 8 倍)。
 constexpr int tile_vec= 256;
+
+// そろえた配列。表は 32 byte、作業の配列は 64 byte にそろえる (5 本目を測ったときと同じ条件)。
+template <int ALIGN> struct abuf {
+ u32* p= nullptr;
+ int n= 0;
+ abuf()= default;
+ abuf(const abuf&)= delete;
+ abuf& operator=(const abuf&)= delete;
+ ~abuf() { std::free(p); }
+ // 長さを n_ にして先頭を返す。すでにその長さなら何もしない (中身はそのまま)。
+ u32* assign(int n_) {
+  if (n == n_) return p;
+  std::free(p);
+  void* q= nullptr;
+  if (posix_memalign(&q, ALIGN, size_t(n_) * 4)) std::abort();
+  p= static_cast<u32*>(q), n= n_;
+  return p;
+ }
+};
 
 // n は奇数。n^{-1} mod 2^32。
 constexpr u32 inv_mod2_32(u32 n) {
@@ -179,13 +199,13 @@ template <unsigned P> u32 inv_n_scalar(int n) {
 // 前半 3h が w (Montgomery)、後半 3h が wi = w * ni mod 2^32 (商を vpmulld で作るため)。
 // 長さと向きごとに 1 回だけ作って残す (小さい n を何度も変換するときの作り直しを避ける)。
 template <unsigned P> struct scratch {
- static inline thread_local std::vector<u32> tw[2][26];
+ static inline thread_local abuf<32> tw[2][26];
 };
 // inv = false で順変換 (ω_len^j)、true で逆変換 (ω_len^{-j})。
 template <unsigned P> const u32* build_tw(int len, int h, bool inv) {
  auto& tab= scratch<P>::tw[inv ? 1 : 0][__builtin_ctz(unsigned(len))];
- if ((int)tab.size() == 6 * h) return tab.data();
- tab.assign(6 * h, 0);
+ if (tab.n == 6 * h) return tab.p;
+ tab.assign(6 * h);
  const u32 g= groot<P>();
  const u32 wl= smont<P>(spow<P>(g, inv ? u64(P - 1) - u64(P - 1) / unsigned(len) : u64(P - 1) / unsigned(len)));
  const u32 c2= smul<P>(wl, wl), c3= smul<P>(c2, wl);
@@ -196,7 +216,7 @@ template <unsigned P> const u32* build_tw(int len, int h, bool inv) {
  const V r1= vsplat<P>(smul<P>(a1[7], wl));
  const V r2= vsplat<P>(smul<P>(a2[7], c2));
  const V r3= vsplat<P>(smul<P>(a3[7], c3));
- u32* p1= tab.data();
+ u32* p1= tab.p;
  u32* p2= p1 + h;
  u32* p3= p2 + h;
  // 表の値は P 未満に正規化する。vmuls の結果は 2P 未満なので、そのまま入れると
@@ -205,12 +225,12 @@ template <unsigned P> const u32* build_tw(int len, int h, bool inv) {
   vstore<P>(p1 + j, w1), vstore<P>(p2 + j, w2), vstore<P>(p3 + j, w3);
   w1= vcanon<P>(vmuls<P>(w1, r1)), w2= vcanon<P>(vmuls<P>(w2, r2)), w3= vcanon<P>(vmuls<P>(w3, r3));
  }
- u32* q1= tab.data() + 3 * h;
+ u32* q1= tab.p + 3 * h;
  u32* q2= q1 + h;
  u32* q3= q2 + h;
  const u32 niv= mc<P>::ni;
  for (int j= 0; j < h; ++j) q1[j]= u32(p1[j] * niv), q2[j]= u32(p2[j] * niv), q3[j]= u32(p3[j] * niv);
- return tab.data();
+ return tab.p;
 }
 
 // 順変換の 1 段 (len の段、h = len/4 が 8 以上)。
@@ -663,31 +683,31 @@ template <unsigned P> u32 ii_normal() {
 // 段 (ベクトル数 L) のひねり。長さ m の DFT の、L の段の根は η_m^{m/L}。
 // h = L/4 個ずつ、[w1|w2|w3|s1|s2|s3]。
 template <unsigned P> struct stage_tables {
- static inline thread_local std::vector<u32> t[2][26];
+ static inline thread_local abuf<32> t[2][26];
 };
 template <unsigned P> const u32* stage_table(int m, int L, bool inv) {
  auto& tb= stage_tables<P>::t[inv ? 1 : 0][__builtin_ctz(unsigned(L))];
  const int h= L >> 2;
- if ((int)tb.size() != 6 * h) {
-  tb.assign(6 * h, 0);
+ if (tb.n != 6 * h) {
+  tb.assign(6 * h);
   const u32 g= groot<P>();
   const u64 e= u64(P - 1) / unsigned(m) * unsigned(m / L);
   const u32 rl= spow<P>(g, inv ? u64(P - 1) - e : e);
   const u32 c2= u32(u64(rl) * rl % P), c3= u32(u64(c2) * rl % P);
   u32 a1= 1, a2= 1, a3= 1;
-  u32* tp= tb.data();
+  u32* tp= tb.p;
   for (int j= 0; j < h; ++j) {
    tp[j]= a1, tp[h + j]= a2, tp[2 * h + j]= a3;
    tp[3 * h + j]= shoup_q<P>(a1), tp[4 * h + j]= shoup_q<P>(a2), tp[5 * h + j]= shoup_q<P>(a3);
    a1= u32(u64(a1) * rl % P), a2= u32(u64(a2) * c2 % P), a3= u32(u64(a3) * c3 % P);
   }
  }
- return tb.data();
+ return tb.p;
 }
 
 // 葉の重み w = η^{rev(i)} の表 (m 個) と商。
 template <unsigned P> struct leaf_tables {
- static inline thread_local std::vector<u32> t[26];
+ static inline thread_local abuf<32> t[26];
 };
 // i の桁 (4 進、奇数指数では最後が 2 進) を逆にした数。
 template <unsigned P> int rev_index(int i, int e) {
@@ -707,11 +727,11 @@ template <unsigned P> int rev_index(int i, int e) {
 template <unsigned P> const u32* leaf_table(int m) {
  const int e= __builtin_ctz(unsigned(m));
  auto& tb= leaf_tables<P>::t[e];
- if ((int)tb.size() != 2 * m) {
-  tb.assign(2 * m, 0);
+ if (tb.n != 2 * m) {
+  tb.assign(2 * m);
   const u32 g= groot<P>();
   const u32 eta= spow<P>(g, u64(P - 1) / unsigned(m));
-  u32* w= tb.data();
+  u32* w= tb.p;
   u32* q= w + m;
   // w[i] = eta^{rev(i)} を、i を 1 進めるごとの比で作る (1 つずつ pow を取らない)。
   // 比は、i の末尾の最大桁 (4 進の 3、2 進なら 1) の数 s で決まる。
@@ -752,7 +772,7 @@ template <unsigned P> const u32* leaf_table(int m) {
   }
   for (int i= 0; i < m; ++i) q[i]= shoup_q<P>(w[i]);
  }
- return tb.data();
+ return tb.p;
 }
 
 // 段 (ベクトル数 4) はひねりがすべて 1 なので、掛け算を省く。
@@ -978,9 +998,9 @@ template <unsigned P> void rec(u32* fa, u32* fb, int nv, int m, int B, bool squa
 
 // 作業の配列。長さごとに残す (小さい畳み込みを何度も呼ぶ道具のため)。
 template <unsigned P> struct conv_work {
- static inline thread_local std::vector<u32> fa, fb;
+ static inline thread_local abuf<64> fa, fb;
  static void reserve(int l) {
-  if ((int)fa.size() < l) fa.resize(l), fb.resize(l);
+  if (fa.n < l) fa.assign(l), fb.assign(l);
  }
 };
 
@@ -994,8 +1014,8 @@ template <unsigned P> void convolve_entry(const ZMod<P>* a, int n, const ZMod<P>
   const int mv= l >> 3;
   const bool square= (a == b && n == m_);
   conv_work<P>::reserve(l);
-  u32* fa= conv_work<P>::fa.data();
-  u32* fb= conv_work<P>::fb.data();
+  u32* fa= conv_work<P>::fa.p;
+  u32* fb= conv_work<P>::fb.p;
   std::copy(reinterpret_cast<const u32*>(a), reinterpret_cast<const u32*>(a) + n, fa), std::fill(fa + n, fa + l, 0);
   if (!square) std::copy(reinterpret_cast<const u32*>(b), reinterpret_cast<const u32*>(b) + m_, fb), std::fill(fb + m_, fb + l, 0);
   // 葉の積が R^{-1} を 1 回付け、残りの逆の段が m 倍するので、R / m を掛ける (8 R / l)。
