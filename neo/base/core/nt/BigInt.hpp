@@ -191,43 +191,48 @@ inline void knuth_divmod(const u32* a, int n, const u32* b, int m, std::vector<u
 }
 
 // b は正規化済み (m 桁、末尾は BASE/2 以上)。floor(BASE^(m+K) / b) を K + 1 桁で返す。
-// 2 段に分ける。
-// 1. 作業の桁で倍々に詰める。x ≈ BASE^(m+p)/b を、E = BASE^(m+p) - b x (>= 0) として
-//      x <- x BASE^p + floor(E x / BASE^m)
-//    で p = 1, 2, 4, ... と倍にする (掛けるのは m x (p + 1) と (m + p) x (p + 1) で軽い)。
-//    この形の誤差 e は e <- (b/BASE^m) e^2 + 1 で、b/BASE^m が 1/2 以上だと不動点が無く、段を重ねると
-//    少しずつ膨らむ。p が半分まで来たら 2 に移る (絶対の誤差は p 桁の尺度で 1 桁分に収まっている)。
-// 2. 答えの桁で 2 回詰める。I = x BASE^(K-p) から、E = BASE^(m+K) - b I、I += floor(E I / BASE^(m+K))。
-//    切り捨ての 1 が答えの 1 桁分にしかならないので、誤差 e は e <- e^2 / (BASE^(m+K)/b) + 1 になり、
-//    1 段で 1、2 に収まる (1 の相対誤差は BASE^(-p) 以下なので、最初の 1 段でほぼ 0 になる)。
-//    こちらは全体の積を 2 回払うが、2 段で済む。
+// 上位の桁だけでよい: m' = min(m, k + 2) 桁に切り詰めた b' について、
+//   floor(BASE^(m+k) / b) = floor(BASE^(m'+k) / b')
+// が厳密に成り立つ。b = b' BASE^(m-m') + e (0 <= e < BASE^(m-m')) と書くと 1/b と 1/b' の差は
+// e/(b'(b'+e)) <= 1/b'^2 で、BASE^(m'+k)/b'^2 <= 4/BASE^(m'-k) < 1 のため (b' >= BASE^m'/2)。
+// よって倍々の段 p では、使う桁数を min(m, 2p + 2) に抑えられる。切り詰めは各段で厳密なので、
+// 誤差は Newton の式そのもの (1 前後) だけになり、最後の 2 段 (答えの桁) で 1 に収まる。
 inline std::vector<u32> reciprocal(const u32* b, int m, int K) {
- std::vector<u32> dividend(m + 2, 0), x, rr;
- dividend[m + 1]= 1;  // BASE^(m+1)
- knuth_divmod(dividend.data(), m + 2, b, m, x, rr);  // x = floor(BASE^(m+1) / b) (2 桁)
- const std::vector<u32> bb(b, b + m);
+ // 種: x = floor(BASE^(m'+1) / b') (2 桁)。m' = min(m, 3)。
+ const int ms= std::min(m, 3);
+ std::vector<u32> x, rr;
+ {
+  std::vector<u32> dividend(ms + 3, 0);
+  dividend[ms + 1]= 1;  // BASE^(ms+1)
+  knuth_divmod(dividend.data(), ms + 2, b + (m - ms), ms, x, rr);
+ }
  int p= 1;
  while (2 * p < K + 1) {
-  std::vector<u32> E(m + p + 1, 0), prod= mul(bb, x);
-  E[m + p]= 1;
-  sub_abs_inplace(E, prod);  // E = BASE^(m+p) - b x >= 0
+  const int mpp= std::min(m, 2 * p + 2);
+  const std::vector<u32> bs(b + (m - mpp), b + m);
+  std::vector<u32> E(mpp + p + 1, 0), prod= mul(bs, x);
+  E[mpp + p]= 1;
+  sub_abs_inplace(E, prod);  // E = BASE^(m''+p) - b'' x >= 0
   std::vector<u32> T= mul(E, x);
-  T.erase(T.begin(), T.begin() + std::min<int>(m, int(T.size())));
+  T.erase(T.begin(), T.begin() + std::min<int>(mpp, int(T.size())));
   x.insert(x.begin(), p, 0);
   x= add_abs(x, T);
   p*= 2;
  }
+ // 答えの桁で 2 回詰める (こちらも上位 min(m, K + 2) 桁でよい)。
+ const int ma= std::min(m, K + 2);
+ const std::vector<u32> ba(b + (m - ma), b + m);
  std::vector<u32> I= x;
- I.insert(I.begin(), K - p, 0);  // I = x BASE^(K-p) (K >= p)
- std::vector<u32> target(m + K + 1, 0);
- target[m + K]= 1;
+ I.insert(I.begin(), K - p, 0);
+ std::vector<u32> target(ma + K + 1, 0);
+ target[ma + K]= 1;
  for (int it= 0; it < 2; ++it) {
-  std::vector<u32> prod= mul(bb, I);
+  std::vector<u32> prod= mul(ba, I);
   assert(cmp_abs(target, prod) >= 0);  // I は真の値を超えない
   std::vector<u32> E= target;
   sub_abs_inplace(E, prod);
   std::vector<u32> W= mul(E, I);
-  W.erase(W.begin(), W.begin() + std::min<int>(m + K, int(W.size())));
+  W.erase(W.begin(), W.begin() + std::min<int>(ma + K, int(W.size())));
   I= add_abs(I, W);
  }
  trim(I);
