@@ -53,6 +53,18 @@ struct Mo {
   if(q == 0) return;
   int bs= n_ / std::max(1, (int)std::sqrt((double)q));
   if(bs < 1) bs= 1;
+  run_with_block(bs, add_left, add_right, erase_left, erase_right, out);
+ }
+ template <class A, class E, class O>
+ void run(const A& add, const E& erase, const O& out) const {
+  run(add, add, erase, erase, out);
+ }
+ // ブロックの幅を自分で決めたいとき。bs は 1 以上にする。run は n / sqrt(q) を渡す。
+ template <class AL, class AR, class EL, class ER, class Out>
+ void run_with_block(int bs, const AL& add_left, const AR& add_right, const EL& erase_left, const ER& erase_right, const Out& out) const {
+  const int q= (int)ql_.size();
+  if(q == 0) return;
+  if(bs < 1) bs= 1;
   std::vector<int> ord(q), blk(q);
   std::iota(ord.begin(), ord.end(), 0);
   for(int i= 0; i < q; ++i) blk[i]= ql_[i] / bs;
@@ -71,8 +83,8 @@ struct Mo {
   }
  }
  template <class A, class E, class O>
- void run(const A& add, const E& erase, const O& out) const {
-  run(add, add, erase, erase, out);
+ void run_with_block(int bs, const A& add, const E& erase, const O& out) const {
+  run_with_block(bs, add, add, erase, erase, out);
  }
  // ヒルベルト曲線の順。クエリ (l, r) を 2 次元の点と見て、曲線に沿って並べる。lg は max(r) の bit 数。
  template <class AL, class AR, class EL, class ER, class Out>

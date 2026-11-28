@@ -17,11 +17,18 @@ struct Mo {
   void run(const A& add, const E& erase, const O& out) const;
 
   template <class AL, class AR, class EL, class ER, class Out>
+  void run_with_block(int bs, const AL& add_left, const AR& add_right, const EL& erase_left, const ER& erase_right, const Out& out) const;
+  template <class A, class E, class O>
+  void run_with_block(int bs, const A& add, const E& erase, const O& out) const;
+
+  template <class AL, class AR, class EL, class ER, class Out>
   void run_hilbert(const AL& add_left, const AR& add_right, const EL& erase_left, const ER& erase_right, const Out& out) const;
   template <class A, class E, class O>
   void run_hilbert(const A& add, const E& erase, const O& out) const;
 };
 ```
+
+`run` のブロックの幅は `max(r) / sqrt(q)` です。幅を変えて比べたいときは `run_with_block(bs, ...)` に 1 以上の `bs` を渡します。`run_hilbert` はブロックを使わず、ヒルベルト曲線の上の位置で並べます。
 
 `add_left(i)` は区間が左に伸びて `i` を含むとき、`add_right(i)` は右に伸びて含むとき、`erase_left(i)` と `erase_right(i)` は縮んで外すときです。`out(id)` は `query` で `id` 番目に足したクエリの答えを出すときに呼びます。左右で `add` と `erase` が同じなら、2 引数の `run` が使えます。
 
