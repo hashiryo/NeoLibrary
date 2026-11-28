@@ -121,13 +121,13 @@ struct Alloc {
 };
 template <class T>
 using Vec = std::vector<T, Alloc<T>>;
-// 作用があるときだけ遅延を持つ。空のときは節を太らせない。
+struct Empty {};
+// 作用があるときだけ遅延の作用素を持つ。旗は節に直接置く (同じ型の空の節を 2 つ並べられるように分けてある)。
 template <class M, bool AC>
 struct Extra {};
 template <class M>
 struct Extra<M, true> {
  typename ActionOf<M>::type laz{};
- bool laz_f = false;
 };
 template <class M>
 struct Node {
@@ -135,10 +135,11 @@ struct Node {
  using E = typename ActionOf<M>::type;
  static constexpr bool AC = ActionLen<M>;
  T val = M::ti(), sum = M::ti();
+ [[no_unique_address]] Extra<M, AC> ex;  // 8 byte ぞろえなので int の前に置く (あとに置くと 4 byte の隙間ができる)
  int l = 0, r = 0, par = 0;
  int size = 0;  // 部分木の要素の数
  int cnt = 0;   // 部分木の頂点の節の数
- [[no_unique_address]] Extra<M, AC> ex;
+ [[no_unique_address]] std::conditional_t<AC, bool, Empty> laz_f{};
 };
 }  // namespace euler_tour_tree_internal
 
@@ -176,13 +177,13 @@ class EulerTourTree {
     Node& a = t[x];
     if (x <= n) M::mp(a.val, e, 1);
     M::mp(a.sum, e, a.cnt);
-    if (a.ex.laz_f) M::cp(a.ex.laz, e);
-    else a.ex.laz = e, a.ex.laz_f = true;
+    if (a.laz_f) M::cp(a.ex.laz, e);
+    else a.ex.laz = e, a.laz_f = true;
    }
   }
   [[gnu::always_inline]] void push(int x) {
    if constexpr (AC)
-    if (t[x].ex.laz_f) apply_to(t[x].l, t[x].ex.laz), apply_to(t[x].r, t[x].ex.laz), t[x].ex.laz_f = false;
+    if (t[x].laz_f) apply_to(t[x].l, t[x].ex.laz), apply_to(t[x].r, t[x].ex.laz), t[x].laz_f = false;
   }
   // 根まで登って、上から遅延を配る。
   void push_path(int x) {
@@ -301,7 +302,7 @@ class EulerTourTree {
    Node& a = t[x];
    a.l = a.r = a.par = 0, a.size = 1, a.cnt = x <= n ? 1 : 0;
    a.val = M::ti(), a.sum = a.val;
-   if constexpr (AC) a.ex.laz_f = false;
+   if constexpr (AC) a.laz_f = false;
   }
   int alloc_edge_node() {
    if (!free_nodes.empty()) {
@@ -372,7 +373,7 @@ class EulerTourTree {
       }
      }
      if (v == -1) {
-      if (const int in = snode.back(); in != -1) seq.push_back(in);
+      if (const int in = snode.back(); in != -1) reset(in), seq.push_back(in);
       su.pop_back(), sp.pop_back(), se.pop_back(), snode.pop_back();
      } else {
       seen[v] = 1;
