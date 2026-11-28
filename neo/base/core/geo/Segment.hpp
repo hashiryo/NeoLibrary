@@ -71,3 +71,4 @@ template <class K> wide_t<K> dist2(const Segment<K>& s, const Segment<K>& t) { r
 template <class K> long double dist(const Segment<K>& s, const Point<K>& p) { return std::sqrt((long double)dist2(s, p)); }
 template <class K> long double dist(const Point<K>& p, const Segment<K>& s) { return dist(s, p); }
 template <class K> long double dist(const Segment<K>& s, const Segment<K>& t) { return std::sqrt((long double)dist2(s, t)); }
+template <class K> Segment<K> Affine<K>::operator()(const Segment<K>& s) const { return {(*this)(s.p), (*this)(s.q)}; }

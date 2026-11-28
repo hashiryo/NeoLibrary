@@ -94,3 +94,8 @@ template <class K> wide_t<K> dist2(const Polygon<K>& g, const Polygon<K>& h) {
 }
 template <class K> long double dist(const Polygon<K>& g, const Point<K>& p) { return std::sqrt((long double)dist2(g, p)); }
 template <class K> long double dist(const Point<K>& p, const Polygon<K>& g) { return dist(g, p); }
+template <class K> Polygon<K> Affine<K>::operator()(const Polygon<K>& g) const {
+ std::vector<Point<K>> ps;
+ for(const auto& p: g) ps.emplace_back((*this)(p));
+ return Polygon<K>(ps);
+}

@@ -60,5 +60,11 @@ template <class K> struct Convex: Polygon<K> {
   if(!sa && !sb) return sc * side < 0 ? Convex() : *this;
   return cut(Line<K>(a, b, c), side);
  }
+ friend Affine<K>;
 };
 template <class K> std::pair<Point<K>, Point<K>> farthest_pair(const std::vector<Point<K>>& ps) { return Convex<K>(ps).farthest_pair(); }
+template <class K> Convex<K> Affine<K>::operator()(const Convex<K>& c) const {
+ Convex<K> d;
+ for(const auto& p: c) d.dat.emplace_back((*this)(p));
+ return d.build(), d;
+}

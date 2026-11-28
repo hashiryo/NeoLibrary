@@ -85,6 +85,10 @@ template <class K> constexpr wide_t<K> norm2(const Point<K>& p) { return dot(p, 
 template <class K> constexpr wide_t<K> dist2(const Point<K>& p, const Point<K>& q) { return norm2(p - q); }
 template <class K> long double dist(const Point<K>& p, const Point<K>& q) { return std::sqrt((long double)dist2(p, q)); }
 // アフィン変換。p -> A p + b。
+template <class K> struct Line;
+template <class K> struct Segment;
+template <class K> class Polygon;
+template <class K> struct Convex;
 template <class K> struct Affine {
  K a00= 1, a01= 0, a10= 0, a11= 1;
  Point<K> b;
@@ -92,6 +96,10 @@ template <class K> struct Affine {
  constexpr Affine operator*(const Affine& r) const {
   return {a00 * r.a00 + a01 * r.a10, a00 * r.a01 + a01 * r.a11, a10 * r.a00 + a11 * r.a10, a10 * r.a01 + a11 * r.a11, (*this)(r.b)};
  }
+ Line<K> operator()(const Line<K>& l) const;
+ Segment<K> operator()(const Segment<K>& s) const;
+ Polygon<K> operator()(const Polygon<K>& g) const;
+ Convex<K> operator()(const Convex<K>& c) const;
 };
 enum class Ccw : int { counter_clockwise= 0, clockwise= 1, online_back= 2, online_front= 3, on_segment= 4 };
 constexpr const char* ccw_name(Ccw c) {

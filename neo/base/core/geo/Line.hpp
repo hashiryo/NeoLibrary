@@ -50,3 +50,4 @@ template <class K> Affine<K> reflect(const Line<K>& l) {
  a/= d, b/= d, c/= d, d= a - c;
  return {d, b, b, -d, Point<K>{c * 2 * l.p.x - b * l.p.y, a * 2 * l.p.y - b * l.p.x}};
 }
+template <class K> Line<K> Affine<K>::operator()(const Line<K>& l) const { return line_through((*this)(l.p), (*this)(l.p + l.d)); }
