@@ -15,28 +15,37 @@
 // self-kinetic-range-add-range-max / -min で書き比べた beats を写したもの。x, y, nxt, a x + b が 64 bit に収まる範囲で
 // 使う。記録は algo-notes の notes/kinetic.md にある。
 namespace kinetic_segment_tree_internal {
-// 1 MB 以上の確保は 2 MB 境界に寄せ、Linux では huge page を頼む。
-template <class T> struct Alloc {
+// 1 MB 以上の確保は 2 MB 境界に寄せ、Linux では huge page を頼む。同じ大きさの配列を 2 本とも 2 MB 境界に置くと、
+// Xeon 6975P-C で番地の下位 21 bit がそろって遅い (SegmentTree の lz と同じ)。OFF だけずらした別の配列にする。
+template <class T, std::size_t OFF= 0> struct Alloc {
  using value_type= T;
+ template <class U> struct rebind {
+  using other= Alloc<U, OFF>;
+ };
  Alloc()= default;
- template <class U> Alloc(const Alloc<U>&) {}
+ template <class U> Alloc(const Alloc<U, OFF>&) {}
  T* allocate(std::size_t n) {
-  const std::size_t want= n * sizeof(T);
-  if(want < (std::size_t(1) << 20)) return static_cast<T*>(::operator new(want, std::align_val_t(64)));
+  const std::size_t want= n * sizeof(T) + OFF;
+  if(want < (std::size_t(1) << 20)) return reinterpret_cast<T*>(static_cast<char*>(::operator new(want, std::align_val_t(64))) + OFF);
   const std::size_t H= std::size_t(1) << 21, bytes= (want + H - 1) & ~(H - 1);
-  T* p= static_cast<T*>(::operator new(bytes, std::align_val_t(H)));
+  char* p= static_cast<char*>(::operator new(bytes, std::align_val_t(H)));
 #ifdef __linux__
   madvise(p, bytes, MADV_HUGEPAGE);
 #endif
-  return p;
+  return reinterpret_cast<T*>(p + OFF);
  }
  void deallocate(T* p, std::size_t n) {
-  if(n * sizeof(T) < (std::size_t(1) << 20)) ::operator delete(p, std::align_val_t(64));
-  else ::operator delete(p, std::align_val_t(std::size_t(1) << 21));
+  const std::size_t want= n * sizeof(T) + OFF;
+  char* q= reinterpret_cast<char*>(p) - OFF;
+  if(want < (std::size_t(1) << 20)) ::operator delete(q, std::align_val_t(64));
+  else ::operator delete(q, std::align_val_t(std::size_t(1) << 21));
  }
- template <class U> bool operator==(const Alloc<U>&) const { return true; }
+ template <class U> bool operator==(const Alloc<U, OFF>&) const { return true; }
 };
-template <class T> using Vec= std::vector<T, Alloc<T>>;
+inline constexpr std::size_t STAGGER= 2048 + 64;
+template <class T> using Vec= std::vector<T, Alloc<T, 0>>;
+template <class T> using VecS= std::vector<T, Alloc<T, STAGGER>>;
+template <class T> using VecT= std::vector<T, Alloc<T, 2 * STAGGER>>;
 // 印。unsigned char の配列だと、書くたびに gcc がほかのメンバと重なりうるとみなして読み直す。
 enum class Flag: bool { off, on };
 }  // namespace kinetic_segment_tree_internal
@@ -45,6 +54,8 @@ template <bool MAX= true> class KineticSegmentTree {
  using i128= __int128_t;
  using Flag= kinetic_segment_tree_internal::Flag;
  template <class T> using Vec= kinetic_segment_tree_internal::Vec<T>;
+ template <class T> using VecS= kinetic_segment_tree_internal::VecS<T>;
+ template <class T> using VecT= kinetic_segment_tree_internal::VecT<T>;
  static constexpr i64 INF= i64(4) << 60;
  struct Node {
   i64 x= 0, y= 0, nxt= INF;
@@ -52,7 +63,8 @@ template <bool MAX= true> class KineticSegmentTree {
  };
  int n= 0, sz= 1;
  Vec<Node> d;
- Vec<i64> la, lb;  // 子へ配っていない作用 y += la x + lb
+ VecS<i64> la;  // 子へ配っていない作用 y += la x + lb
+ VecT<i64> lb;
  Vec<Flag> has;
  static bool better(const Node& A, const Node& B) {
   if(A.idx < 0) return false;
