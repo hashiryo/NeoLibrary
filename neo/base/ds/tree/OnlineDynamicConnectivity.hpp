@@ -10,13 +10,129 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 #include "neo/base/core/algebra/concepts.hpp"
 
 namespace online_dynamic_connectivity_internal {
+// 2 の冪の大きさの開番地法の表。キーに 0 は使えない。埋まりが半分を超えたら広げ、
+// 消した跡は墓標にして広げ直すときに落とす。
+template <class V>
+class OpenTable {
+ struct Slot {
+  unsigned long long k;
+  V v;
+ };
+ std::vector<Slot> t;
+ std::size_t mask, shift, live, used;
+ static constexpr unsigned long long TOMB = ~0ull;
+ std::size_t home(unsigned long long k) const { return std::size_t((k * 0x9E3779B97F4A7C15ull) >> shift); }
+ void put(unsigned long long k, const V& v) {
+  std::size_t h = home(k);
+  while (t[h].k && t[h].k != TOMB) h = (h + 1) & mask;
+  if (!t[h].k) ++used;
+  t[h].k = k, t[h].v = v, ++live;
+ }
+ void rehash(std::size_t cap, std::size_t new_shift) {
+  std::vector<Slot> old;
+  old.swap(t);
+  t.assign(cap, Slot{});
+  mask = cap - 1, shift = new_shift, live = 0, used = 0;
+  for (const Slot& s : old)
+   if (s.k && s.k != TOMB) put(s.k, s.v);
+ }
+
+ public:
+ OpenTable(): t(16), mask(15), shift(60), live(0), used(0) {}
+ void insert(unsigned long long k, const V& v) {
+  if ((used + 1) * 2 > mask + 1) {
+   if ((live + 1) * 2 <= mask + 1) rehash(mask + 1, shift);
+   else rehash((mask + 1) * 2, shift - 1);
+  }
+  put(k, v);
+ }
+ // 無ければ nullptr。
+ const V* find(unsigned long long k) const {
+  std::size_t h = home(k);
+  while (t[h].k) {
+   if (t[h].k == k) return &t[h].v;
+   h = (h + 1) & mask;
+  }
+  return nullptr;
+ }
+ bool contains(unsigned long long k) const { return find(k) != nullptr; }
+ void erase(unsigned long long k) {
+  std::size_t h = home(k);
+  while (t[h].k != k) h = (h + 1) & mask;
+  t[h].k = TOMB, --live;
+ }
+};
+// 段ごとの非木辺の集合。1 本の辺を両端の頂点の双方向リストに 1 つずつ置き、頂点ごとの本数を持つ。
+// replace が頂点ごとに反復するので、開番地法の表ではなく、リストと本数で持つ。
+class LevelEdges {
+ struct Ent {
+  int to, nxt, prv;
+ };
+ std::vector<int> deg, head;
+ std::vector<Ent> pool;
+ std::vector<int> free_ent;
+ int alloc_ent(int to, int nxt) {
+  if (!free_ent.empty()) {
+   const int i = free_ent.back();
+   free_ent.pop_back();
+   return pool[i] = Ent{to, nxt, -1}, i;
+  }
+  const int i = int(pool.size());
+  pool.push_back(Ent{to, nxt, -1});
+  return i;
+ }
+ void free_ent_(int i) { free_ent.push_back(i); }
+ // s のリストから to == d の要素を外す。無ければ -1。
+ int unlink(int s, int d) {
+  for (int i = head[s]; i != -1; i = pool[i].nxt)
+   if (pool[i].to == d) {
+    if (pool[i].prv != -1) pool[pool[i].prv].nxt = pool[i].nxt;
+    else head[s] = pool[i].nxt;
+    if (pool[i].nxt != -1) pool[pool[i].nxt].prv = pool[i].prv;
+    return i;
+   }
+  return -1;
+ }
+
+ public:
+ explicit LevelEdges(int n): deg(n, 0), head(n, -1) {}
+ int count(int s) const { return deg[s]; }
+ bool has(int s, int d) const {
+  for (int i = head[s]; i != -1; i = pool[i].nxt)
+   if (pool[i].to == d) return true;
+  return false;
+ }
+ // 辺 (s, d) を両端のリストに入れる。すでにあれば何もしない。
+ void insert(int s, int d) {
+  if (has(s, d)) return;
+  const int es = alloc_ent(d, head[s]);
+  if (head[s] != -1) pool[head[s]].prv = es;
+  head[s] = es;
+  const int ed = alloc_ent(s, head[d]);
+  if (head[d] != -1) pool[head[d]].prv = ed;
+  head[d] = ed;
+  ++deg[s], ++deg[d];
+ }
+ // 辺 (s, d) を両端のリストから外す。
+ void erase(int s, int d) {
+  const int es = unlink(s, d), ed = unlink(d, s);
+  assert(es != -1 && ed != -1);
+  free_ent_(es), free_ent_(ed);
+  --deg[s], --deg[d];
+ }
+ // s に接する辺を 1 本 (s, d) として取り出す。無ければ偽。
+ bool pop(int s, int& d) {
+  if (head[s] == -1) return false;
+  d = pool[head[s]].to;
+  erase(s, d);
+  return true;
+ }
+};
 template <class M, bool = Monoid<M> || Action<M>>
 struct ValueOf {
  using type = std::nullptr_t;
@@ -150,7 +266,7 @@ class EulerTourTree {
   nd[ri].flag= (std::uint64_t(d) << 44) | (std::uint64_t(s) << 24);
   return i;
  }
- std::unordered_map<std::uint64_t, node_id> emp;
+ OpenTable<node_id> emp;  // 辺の両端 -> その辺の向きの節
 
  public:
  using T= typename ValueOf<M>::type;
@@ -171,20 +287,20 @@ class EulerTourTree {
  }
  bool edge_exist(vertex_id x, vertex_id y) {
   if (x > y) std::swap(x, y);
-  return emp.count(((long long)x << 32) | y);
+  return emp.contains((unsigned long long)(unsigned)x << 32 | (unsigned)y);
  }
  void link(vertex_id x, vertex_id y, bool hi= true) {
   if (x > y) std::swap(x, y);
   const int ei= new_edge(x, y, hi);
-  emp.insert(std::make_pair(((long long)x << 32) | y, ei));
+  emp.insert((unsigned long long)(unsigned)x << 32 | (unsigned)y, ei);
   x+= n_st, y+= n_st, reroot(x), reroot(y);
   nd[nd[x].par= ei].ch[0]= x, nd[nd[y].par= ei].ch[1]= y;
   update(ei), merge_back(ei, ei + 1);
  }
  void cut(vertex_id x, vertex_id y) {
   if (x > y) std::swap(x, y);
-  int ei= emp[((long long)x << 32) | y]; const int rei= ei + 1;
-  emp.erase(((long long)x << 32) | y);
+  int ei= *emp.find((unsigned long long)(unsigned)x << 32 | (unsigned)y); const int rei= ei + 1;
+  emp.erase((unsigned long long)(unsigned)x << 32 | (unsigned)y);
   auto [pl, pr]= split(ei);
   node_id left, center, right;
   if (pl && same_root(pl, rei)) {
@@ -257,24 +373,23 @@ class OnlineDynamicConnectivity {
  using T= typename online_dynamic_connectivity_internal::ValueOf<M>::type;
  using E= typename online_dynamic_connectivity_internal::EOf<M>::type;
  using Ett= online_dynamic_connectivity_internal::EulerTourTree<M, NODE_SIZE>;
+ using LevelEdges= online_dynamic_connectivity_internal::LevelEdges;
  int N;
  std::vector<Ett> ett;
- std::vector<std::vector<std::unordered_set<int>>> adj;
+ std::vector<LevelEdges> adj;
  void replace(int x, int y, int level) {
   for (int k= 0; k < level; ++k) ett[k].cut(x, y);
   for (int k= level, loop= true; k-- && loop;) {
    if (ett[k].tree_size(x) > ett[k].tree_size(y)) std::swap(x, y);
    ett[k].hilevel_edges(x, [&](int s, int d) { ett[k + 1].link(s, d, true); });
    ett[k].subedges(x, [&](int s) {
-    for (auto itr= adj[k][s].begin(), end= adj[k][s].end(); itr != end;) {
-     auto d= *itr;
-     if (adj[k][s].size() == 1) ett[k].subedge_set(s, 0);
-     if (adj[k][d].size() == 1) ett[k].subedge_set(d, 0);
-     adj[k][d].erase(s), itr= adj[k][s].erase(itr);
+    for (int d; adj[k].pop(s, d);) {
+     if (adj[k].count(s) == 0) ett[k].subedge_set(s, 0);
+     if (adj[k].count(d) == 0) ett[k].subedge_set(d, 0);
      if (ett[k].connected(s, d)) {
-      if (adj[k + 1][s].size() == 0) ett[k + 1].subedge_set(s, 1);
-      if (adj[k + 1][d].size() == 0) ett[k + 1].subedge_set(d, 1);
-      adj[k + 1][s].insert(d), adj[k + 1][d].insert(s);
+      if (adj[k + 1].count(s) == 0) ett[k + 1].subedge_set(s, 1);
+      if (adj[k + 1].count(d) == 0) ett[k + 1].subedge_set(d, 1);
+      adj[k + 1].insert(s, d);
      } else {
       for (int kk= k + 1; kk--;) ett[kk].link(s, d, kk == k);
       return loop= false, true;
@@ -289,18 +404,18 @@ class OnlineDynamicConnectivity {
  explicit OnlineDynamicConnectivity(int n): N(n) { ett.emplace_back(N), adj.emplace_back(N); }
  void link(int x, int y) {
   if (ett[0].connected(x, y)) {
-   if (adj[0][x].size() == 0) ett[0].subedge_set(x, 1);
-   if (adj[0][y].size() == 0) ett[0].subedge_set(y, 1);
-   adj[0][x].insert(y), adj[0][y].insert(x);
+   if (adj[0].count(x) == 0) ett[0].subedge_set(x, 1);
+   if (adj[0].count(y) == 0) ett[0].subedge_set(y, 1);
+   adj[0].insert(x, y);
   } else ett[0].link(x, y, true);
  }
  void cut(int x, int y) {
   const int m= int(ett.size());
   for (int k= 0; k < m; ++k)
-   if (adj[k][x].count(y)) {
-    adj[k][x].erase(y), adj[k][y].erase(x);
-    if (adj[k][x].size() == 0) ett[k].subedge_set(x, 0);
-    if (adj[k][y].size() == 0) ett[k].subedge_set(y, 0);
+   if (adj[k].has(x, y)) {
+    adj[k].erase(x, y);
+    if (adj[k].count(x) == 0) ett[k].subedge_set(x, 0);
+    if (adj[k].count(y) == 0) ett[k].subedge_set(y, 0);
     return;
    }
   for (int k= m; k--;)
