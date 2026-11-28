@@ -10,7 +10,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 #include "neo/base/core/algebra/concepts.hpp"
@@ -19,6 +18,58 @@
 #endif
 
 namespace euler_tour_tree_internal {
+// 2 の冪の大きさの開番地法の表。V は trivially copyable で、値 0 が空の印になること。
+// 埋まりが半分を超えたら広げ、消した跡は墓標にして広げ直すときに落とす。キーに 0 は使えない。
+template <class V>
+class OpenTable {
+ struct Slot {
+  unsigned long long k;
+  V v;
+ };
+ std::vector<Slot> t;
+ std::size_t mask, shift, live, used;
+ static constexpr unsigned long long TOMB = ~0ull;
+ std::size_t home(unsigned long long k) const { return std::size_t((k * 0x9E3779B97F4A7C15ull) >> shift); }
+ void put(unsigned long long k, const V& v) {
+  std::size_t h = home(k);
+  while (t[h].k && t[h].k != TOMB) h = (h + 1) & mask;
+  if (!t[h].k) ++used;
+  t[h].k = k, t[h].v = v, ++live;
+ }
+ void rehash(std::size_t cap, std::size_t new_shift) {
+  std::vector<Slot> old;
+  old.swap(t);
+  t.assign(cap, Slot{});
+  mask = cap - 1, shift = new_shift, live = 0, used = 0;
+  for (const Slot& s : old)
+   if (s.k && s.k != TOMB) put(s.k, s.v);
+ }
+
+ public:
+ OpenTable(): t(16), mask(15), shift(60), live(0), used(0) {}
+ void insert(unsigned long long k, const V& v) {
+  if ((used + 1) * 2 > mask + 1) {
+   if ((live + 1) * 2 <= mask + 1) rehash(mask + 1, shift);
+   else rehash((mask + 1) * 2, shift - 1);
+  }
+  put(k, v);
+ }
+ // 無ければ nullptr。
+ const V* find(unsigned long long k) const {
+  std::size_t h = home(k);
+  while (t[h].k) {
+   if (t[h].k == k) return &t[h].v;
+   h = (h + 1) & mask;
+  }
+  return nullptr;
+ }
+ bool contains(unsigned long long k) const { return find(k) != nullptr; }
+ void erase(unsigned long long k) {
+  std::size_t h = home(k);
+  while (t[h].k != k) h = (h + 1) & mask;
+  t[h].k = TOMB, --live;
+ }
+};
 struct Empty {};
 template <class M, bool = Action<M>>
 struct ActionOf {
@@ -104,7 +155,7 @@ class EulerTourTree {
   static constexpr bool AC = euler_tour_tree_internal::ActionLen<M>;
   euler_tour_tree_internal::Vec<Node> t;
   std::vector<int> free_nodes;
-  std::unordered_map<unsigned long long, Edge> es;
+  euler_tour_tree_internal::OpenTable<Edge> es;
   int n;
   static unsigned long long key(int u, int v) {
    if (u > v) std::swap(u, v);
@@ -234,9 +285,9 @@ class EulerTourTree {
    return x;
   }
   std::pair<int, int> edge_nodes(int v, int p) const {
-   auto it = es.find(key(v, p));
-   assert(it != es.end());
-   const Edge& e = it->second;
+   const Edge* found = es.find(key(v, p));
+   assert(found);
+   const Edge& e = *found;
    if (e.u == v) return {e.a, e.b};
    return {e.b, e.a};
   }
@@ -257,7 +308,7 @@ class EulerTourTree {
   for (int e = 0; e < E; ++e) {
    const int u = edges[e][0], v = edges[e][1];
    add_arc(u, v, e, 0), add_arc(v, u, e, 1);
-   es.emplace(key(u, v), Edge{u, v, base + 2 * e, base + 2 * e + 1});
+   es.insert(key(u, v), Edge{u, v, base + 2 * e, base + 2 * e + 1});
   }
   std::vector<char> seen(n, 0);
   std::vector<int> seq;
@@ -294,7 +345,7 @@ class EulerTourTree {
   }
  }
   int size() const { return n; }
-  bool edge_exists(int u, int v) const { return es.count(key(u, v)); }
+  bool edge_exists(int u, int v) const { return es.contains(key(u, v)); }
   T get(int v) {
    splay(v + 1);
    return t[v + 1].val;
@@ -311,13 +362,13 @@ class EulerTourTree {
    int ru = reroot(u + 1), rv = reroot(v + 1);
    int x = merge(merge(merge(ru, a), rv), b);
    static_cast<void>(x);
-   es.emplace(key(u, v), Edge{u, v, a, b});
+   es.insert(key(u, v), Edge{u, v, a, b});
   }
   void cut(int u, int v) {
-   auto it = es.find(key(u, v));
-   assert(it != es.end());
-   Edge e = it->second;
-   es.erase(it);
+   const Edge* hit = es.find(key(u, v));
+   assert(hit);
+   Edge e = *hit;
+   es.erase(key(u, v));
    int a, b;
    if (e.u == u) a = e.a, b = e.b;
    else a = e.b, b = e.a;
