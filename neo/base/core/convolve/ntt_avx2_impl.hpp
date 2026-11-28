@@ -21,6 +21,14 @@
 #include "neo/base/core/algebra/ZMod.hpp"
 #include "neo/base/core/convolve/naive.hpp"
 
+// GCC の -O2 は段の内側の組み方が甘く、O3 と unroll-loops で self-ntt-convolution が 8% ほど速い
+// (procon-judge の核の 12 本目で測った)。clang はこの pragma を知らないので、そのまま -O2 で組まれる。
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC push_options
+#pragma GCC optimize("O3,unroll-loops")
+#define NEO_NTT_AVX2_PUSHED 1
+#endif
+
 namespace neo_ntt_avx2 {
 using u32= unsigned;
 using u64= unsigned long long;
@@ -1044,3 +1052,8 @@ template <unsigned P> void conv_kernel(const ZMod<P>* a, int n, const ZMod<P>* b
  neo_ntt_avx2::convolve_entry<P>(a, n, b, m, lo, hi, out);
 }
 }  // namespace ntt_internal
+
+#if defined(NEO_NTT_AVX2_PUSHED)
+#pragma GCC pop_options
+#undef NEO_NTT_AVX2_PUSHED
+#endif
