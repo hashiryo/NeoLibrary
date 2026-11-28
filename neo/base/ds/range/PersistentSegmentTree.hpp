@@ -78,6 +78,13 @@ template <class M> class PersistentSegmentTree {
   const int m= (nl + nr) >> 1;
   return M::op(prod_rec(pool_[p].l, nl, m, ql, qr), prod_rec(pool_[p].r, m, nr, ql, qr));
  }
+ // 版 b と版 a の差。覆う節ごとに sub(b の値, a の値) を求め、op でまとめる。
+ template <class Sub> static T prod_diff_rec(int pa, int pb, int nl, int nr, int ql, int qr, const Sub& sub) {
+  if(qr <= nl || nr <= ql) return M::ti();
+  if(ql <= nl && nr <= qr) return sub(pool_[pb].v, pool_[pa].v);
+  const int m= (nl + nr) >> 1;
+  return M::op(prod_diff_rec(pool_[pa].l, pool_[pb].l, nl, m, ql, qr, sub), prod_diff_rec(pool_[pa].r, pool_[pb].r, m, nr, ql, qr, sub));
+ }
  static void gc_roots(const std::vector<int*>& roots) {
   const std::size_t before= pool_.size();
   std::vector<char> alive(before, 0);
@@ -124,6 +131,12 @@ public:
  }
  T prod(int l, int r) const { return prod_rec(root_, 0, sz_, l, r); }
  T all_prod() const { return pool_[root_].v; }
+ // 版 b と版 a の [l, r) の差。sub(版 b の節の値, 版 a の節の値) を覆う節ごとに求め、op でまとめる。
+ // sub は T の引き算 (和や数え上げ)。a と b は同じ sz_ を持つこと。
+ template <class Sub> static T prod_diff(const PersistentSegmentTree& a, const PersistentSegmentTree& b, int l, int r, const Sub& sub) {
+  assert(a.sz_ == b.sz_);
+  return prod_diff_rec(a.root_, b.root_, 0, b.sz_, l, r, sub);
+ }
  // T が整数 (数え上げ) のとき、版 b と版 a の差の k 番目 (0 始まり) の位置。a と b は同じ sz_ を持つこと。
  // 値の順位を葉に持つ木で、版 i を先頭 i 個を入れた木にすると、range-kth-smallest になる。
  static int kth(const PersistentSegmentTree& a, const PersistentSegmentTree& b, int k) {
