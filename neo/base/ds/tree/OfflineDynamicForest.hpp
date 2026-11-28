@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 #include "neo/base/core/algebra/concepts.hpp"
@@ -17,6 +16,42 @@
 namespace offline_dynamic_forest_internal {
 template <class G>
 concept CommutativeGroup = Commutative<G> && requires(typename G::T a) { G::inv(a); };
+
+// 辺の寿命の表。2 の冪の大きさの開番地法で引く (std::unordered_map より軽い)。
+class DeathTable {
+ std::size_t mask = 3, shift = 62;
+ std::vector<unsigned long long> keys{4, 0};
+ std::vector<unsigned> vals{4, 0};
+ static constexpr unsigned long long TOMB = ~0ull;
+ std::size_t slot(unsigned long long k) const { return std::size_t((k * 0x9E3779B97F4A7C15ull) >> shift); }
+
+ public:
+ explicit DeathTable(std::size_t links) {
+  std::size_t cap = 4;
+  while (cap < links * 2) cap <<= 1, --shift;
+  mask = cap - 1;
+  keys.assign(cap, 0);
+  vals.assign(cap, 0);
+ }
+ void insert(unsigned long long k, unsigned v) {
+  std::size_t h = slot(k), tomb = mask + 1;
+  while (keys[h]) {
+   if (keys[h] == TOMB && tomb == mask + 1) tomb = h;
+   h = (h + 1) & mask;
+  }
+  if (tomb <= mask) h = tomb;
+  keys[h] = k, vals[h] = v;
+ }
+ unsigned erase(unsigned long long k) {
+  std::size_t h = slot(k);
+  while (keys[h] != k) {
+   assert(keys[h] != 0);
+   h = (h + 1) & mask;
+  }
+  keys[h] = TOMB;
+  return vals[h];
+ }
+};
 
 template <class G>
 class ExpiryForest {
@@ -157,19 +192,15 @@ class OfflineDynamicForest {
  std::vector<T> solve() {
   const unsigned q = unsigned(ev.size());
   std::vector<unsigned> death(q, q);
-  std::unordered_map<unsigned long long, unsigned> open;
-  open.reserve(q);
+  std::size_t links = 0;
+  for (const Event& e : ev) links += (e.kind == 0);
+  offline_dynamic_forest_internal::DeathTable open(links);
   for (unsigned i = 0; i < q; ++i) {
    const Event& e = ev[i];
    if (e.kind > 1) continue;
    const unsigned long long k = key(e.u, e.v);
-   if (e.kind == 0) open.emplace(k, i);
-   else {
-    auto it = open.find(k);
-    assert(it != open.end());
-    death[it->second] = i;
-    open.erase(it);
-   }
+   if (e.kind == 0) open.insert(k, i);
+   else death[open.erase(k)] = i;
   }
   offline_dynamic_forest_internal::ExpiryForest<G> forest(init, q);
   std::vector<T> ans;
