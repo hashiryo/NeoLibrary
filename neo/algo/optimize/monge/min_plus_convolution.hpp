@@ -1,6 +1,8 @@
 #pragma once
 #include <algorithm>
+#include <limits>
 #include <vector>
+#include "neo/algo/optimize/monge/monotone_minima.hpp"
 // 凸な列どうしの min-plus convolution。c[k] = min_{i+j=k} a[i] + b[j]。
 // 差分の列 a[i+1]-a[i] と b[j+1]-b[j] はどちらも広義単調増加なので、2 つを併合した列の前からの累積和が
 // c の隣り合う差になる。O(n + m)。
@@ -47,5 +49,59 @@ template <class T> std::vector<T> min_plus_convolution_convex(const std::vector<
   rec(rec, hm + 1, h2, bj, w2);
  };
  rec(rec, 0, h, 0, m);
+ return c;
+}
+// a が凹で b が任意の min-plus convolution。c[k] = min_{i+j=k} a[i] + b[j]。
+// 行 k 列 j の有効な列は [max(0, k-(n-1)), min(m-1, k)] の階段になる。この行列は反 Monge なので、行の
+// 最小の列は階段の上では行について単調にならない (a = [-19,-16,-13,-11,-10,-14]、b = [-3,-7,-6,-3] で、
+// 行 4 の最小は列 2 か 3、行 5 は 0 か 1 か 2、行 6 は 1)。そこで、階段を長いほうの辺で半分に切ることを
+// 繰り返し、切り口の階段の端で子の範囲を狭める。範囲が全部有効になった矩形では、列を逆順にすると
+// 反 Monge が Monge になるので、monotone_minima で各行の最小を引ける。Library Checker の
+// min_plus_convolution_concave_arbitrary の想定解 (ac_func.cpp) と同じ形。a[i] + b[j] が T に収まること。
+template <class T> std::vector<T> min_plus_convolution_concave(const std::vector<T>& a, const std::vector<T>& b) {
+ const int n= (int)a.size(), m= (int)b.size();
+ std::vector<T> c;
+ if(n == 0 || m == 0) return c;
+ const int h= n + m - 1;
+ // 行 x の有効な列 [y_min[x], y_max[x]] と、列 y の有効な行 [x_min[y], x_max[y]]。
+ std::vector<int> y_min(h), y_max(h), x_min(m), x_max(m);
+ for(int x= 0; x < h; ++x) y_min[x]= std::max(0, x - (n - 1)), y_max[x]= std::min(m - 1, x);
+ for(int y= 0; y < m; ++y) x_min[y]= y, x_max[y]= y + n - 1;
+ c.assign(h, std::numeric_limits<T>::max());
+ auto rf= [&](auto& rf, int x1, int x2, int y1, int y2) -> void {
+  // 矩形が全部有効なら、列を逆順にして Monge にし、monotone_minima で引く。
+  if(y_max[x1] >= y2 && y1 >= y_min[x2]) {
+   auto value= [&](int i, int jj) -> T {
+    const int y= y2 - jj;
+    return a[(x1 + i) - y] + b[y];
+   };
+   auto best= monotone_minima<T>(x2 - x1 + 1, y2 - y1 + 1, value);
+   for(int i= 0, ie= x2 - x1; i <= ie; ++i)
+    if(const T v= value(i, best[i]); v < c[x1 + i]) c[x1 + i]= v;
+   return;
+  }
+  // 小さい矩形は素朴に見る。
+  if((long long)(x2 - x1) * (y2 - y1) < 1000) {
+   for(int x= x1; x <= x2; ++x)
+    for(int y= std::max(y_min[x], y1), ye= std::min(y_max[x], y2); y <= ye; ++y)
+     if(const T v= a[x - y] + b[y]; v < c[x]) c[x]= v;
+   return;
+  }
+  // 長いほうの辺で半分に切る。切り口の階段の端で、子の範囲を狭める。
+  if(x2 - x1 > y2 - y1) {
+   const int xm= (x1 + x2) / 2;
+   const int ny2= std::min(y_max[xm], y2);
+   if(y1 <= ny2) rf(rf, x1, xm, y1, ny2);
+   const int ny1= std::max(y_min[xm], y1);
+   if(ny1 <= y2) rf(rf, xm + 1, x2, ny1, y2);
+  } else {
+   const int ym= (y1 + y2) / 2;
+   const int nx2= std::min(x_max[ym], x2);
+   if(x1 <= nx2) rf(rf, x1, nx2, y1, ym);
+   const int nx1= std::max(x_min[ym], x1);
+   if(nx1 <= x2) rf(rf, nx1, x2, ym + 1, y2);
+  }
+ };
+ rf(rf, 0, h - 1, 0, m - 1);
  return c;
 }
