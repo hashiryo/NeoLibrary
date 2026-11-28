@@ -19,11 +19,13 @@
 namespace monoid {
 template <class V> struct Min {
  using T= V;
+ using commute= void;
  static constexpr T ti() { return std::numeric_limits<V>::max(); }
  static constexpr T op(T a, T b) { return b < a ? b : a; }
 };
 template <class V> struct Max {
  using T= V;
+ using commute= void;
  static constexpr T ti() { return std::numeric_limits<V>::lowest(); }
  static constexpr T op(T a, T b) { return a < b ? b : a; }
 };

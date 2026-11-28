@@ -14,6 +14,7 @@
 namespace monoid {
 template <class V> struct AddSum {
  using T= V;
+ using commute= void;
  using E= V;
  static constexpr T ti() { return T(); }
  static constexpr T op(T a, T b) { return a + b; }

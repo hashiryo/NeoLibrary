@@ -16,6 +16,7 @@
 // 値は絶対値 2^61 未満で使う (2^61 を番兵にする)。
 namespace monoid {
 template <class V> struct ChminChmaxAddSum {
+ using commute= void;
  static_assert(std::is_integral_v<V> && std::is_signed_v<V> && sizeof(V) <= 8, "V は 64 bit 以下の符号付き整数");
  struct T {
   long long sum;

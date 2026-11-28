@@ -23,6 +23,7 @@
 namespace monoid {
 template <class Z> struct AffineSum {
  using T= Z;
+ using commute= void;
  using E= std::array<Z, 2>;
  static constexpr T ti() { return T(); }
  static constexpr T op(T a, T b) { return a + b; }
