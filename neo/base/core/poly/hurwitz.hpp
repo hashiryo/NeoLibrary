@@ -67,6 +67,27 @@ template <u32 P> struct barrett_q {
  static u32 red_small(u32 x) { return x >= P ? x - P : x; }
 };
 
+// 実行時に決まる法 m の Barrett 還元。mu = floor((2^64 - 1) / m)。x < 2^64 で商の誤差は 2 までなので、
+// 2 回引けば m 未満になる。法がテンプレートの定数のときは % でよいが、ZMod<0> の法のような実行時の値では
+// 割り算のままになるので、こちらを使う (Garner の 1 要素あたりの還元を軽くする)。
+struct barrett_dyn {
+ u64 m= 1, mu= ~0ull;
+ barrett_dyn()= default;
+ explicit barrett_dyn(u32 md): m(md), mu(md ? (~0ull) / md : 0) {}
+ u32 red(u64 x) const {
+  u64 r= x - u64((u128(x) * mu) >> 64) * m;
+  r= r >= m ? r - m : r;
+  return u32(r >= m ? r - m : r);
+ }
+};
+// m を法とする a^e (Garner の W_t の逆元を作るだけに使う)。
+inline u32 pow_mod(u64 a, u64 e, u64 m) {
+ u64 r= 1;
+ for (a%= m; e; e>>= 1, a= a * a % m)
+  if (e & 1) r= r * a % m;
+ return u32(r);
+}
+
 // 二項畳み込みの素朴な形。min(n, m) が小さいときと、素数の積で上界を覆えないときに使う。
 // 二項係数は C(k, j) = C(k-1, j) + C(k-1, j-1) で足し算だけから作る (割り算が要らない)。
 // 表は短い側の長さだけ持ち、長い側の添字 i は C(k, i) = C(k, k-i) で短い側の j = k - i に読み替える。
@@ -129,46 +150,134 @@ template <class Crt, class K> std::vector<K> convolve_composite(const std::vecto
  const int cnt= Crt::count_for(sz, sz, ns, M);
  if (cnt == 0) return convolve_direct(a, b);  // 覆えない (素因数が多い大きい法)。遅い道に落ちる。
  // 1. ppart[k] = ∏_{p∈S} p^{v_p(k)}、strip[k] = k / ppart[k]。k = 0 はどちらも 1。
- std::vector<u32> ppart(sz), strip(sz);
- ppart[0]= strip[0]= 1;
- for (int k= 1; k < sz; ++k) {
-  u32 x= u32(k), q= 1;
-  for (int i= 0; i < ns; ++i)
-   while (x % S[i] == 0) x/= S[i], q*= S[i];
-  strip[k]= x, ppart[k]= q;
+ // 割り算を使わず、素数 p の倍数 j をなめて作る。j が p で割り切れるとき、S の元を全部抜いた値は
+ // strip[j] = strip[j/p]、抜いた積は ppart[j] = ppart[j/p] p になる (j/p < j なので同じ素数の列の中で前が埋まっている)。
+ std::vector<u32> ppart(sz, 1), strip(sz);
+ for (int k= 0; k < sz; ++k) strip[k]= u32(k);
+ strip[0]= 1;
+ for (int i= 0; i < ns; ++i) {
+  const u32 p= S[i];
+  for (u32 j= p; j < u32(sz); j+= p) strip[j]= strip[j / p], ppart[j]= ppart[j / p] * p;
  }
- // 2. u[k] = k! の p を抜いた部分 mod M と、その逆元 (前積を 1 回だけ逆にして配る)。
- std::vector<K> u(sz), iu(sz);
- u[0]= K(1);
- for (int k= 1; k < sz; ++k) u[k]= u[k - 1] * K(strip[k]);
- K acc= K(1);
- for (int k= 0; k < sz; ++k) iu[k]= acc, acc*= u[k];
- acc= acc.inv();
- for (int k= sz - 1; k >= 0; --k) {
-  iu[k]*= acc;
-  acc*= u[k];
+ // 2. u[k] = k! の p を抜いた部分 mod M。u[k] = u[k-1] strip[k] なので、逆元は 1 回の逆元から
+ // u[k-1]^{-1} = u[k]^{-1} strip[k] で後ろへ配れる。どちらも 1 本の鎖にすると乗算の待ちが並ぶので、
+ // 8 つずつの区画に分ける (区画の積は互いに独立、区画の前積は 1/8 の長さ、中は 8 つの鎖が並ぶ)。
+ std::vector<K> u(sz);
+ std::vector<u32> wa(n), wb(m);
+ {
+  constexpr int LU= 8;
+  const size_t nb= size_t(sz + LU - 1) / LU;
+  std::vector<K> bpr(nb), bst(nb);
+  for (size_t bb= 0; bb < nb; ++bb) {
+   K x= K(1);
+   const int e= std::min(sz, int((bb + 1) * LU));
+   for (int j= int(bb) * LU; j < e; ++j) x*= K(strip[j]);
+   bpr[bb]= x;
+  }
+  K acc= K(1);
+  for (size_t bb= 0; bb < nb; ++bb) {
+   const K t= acc;
+   acc*= bpr[bb], bst[bb]= t;
+  }
+  for (size_t bb= 0; bb < nb; ++bb) {
+   K x= bst[bb];
+   const int e= std::min(sz, int((bb + 1) * LU));
+   for (int j= int(bb) * LU; j < e; ++j) x*= K(strip[j]), u[j]= x;
+  }
+  // 3. wa[k] = a_k u_k^{-1} mod M (b も同じ)。素数の下では、これに pv[k] = ∏ p^{-v_p(k!)} を
+  // 掛けるだけで Â_k になる。逆元は後ろの区画から配る。
+  K iv= u[sz - 1].inv();
+  for (size_t bb= nb; bb-- > 0;) {
+   const K t= iv;
+   iv*= bpr[bb], bst[bb]= t;
+  }
+  for (size_t bb= nb; bb-- > 0;) {
+   K x= bst[bb];
+   const int e= std::min(sz, int((bb + 1) * LU));
+   for (int j= e - 1; j >= int(bb) * LU; --j) {
+    if (j < n) wa[j]= (a[j] * x).val();
+    if (j < m) wb[j]= (b[j] * x).val();
+    x*= K(strip[j]);
+   }
+  }
  }
- // 3. 各素数で、両側に ∏ p^{-v_p(k!)} を掛けて畳み込み、∏ p^{v_p(k!)} を掛ける。
- std::vector<u32> res(size_t(cnt) * sz);
+ // 4. 各素数で、両側に p^{-v_p(k!)} を掛けて畳み込み、p^{v_p(k!)} を掛ける。
+ // pv[k] と qv[k] は配列に持たない。pv は後ろから配りながら xa/xb に掛け、qv は畳み込みのあとに
+ // 前から作って掛ける。配列は素数ごとに作らず、使い回す。
+ std::vector<u32> res(size_t(cnt) * sz), xa(n), xb(m), bprod(size_t(sz) / 4 + 2);
+ u32 qs[12];
  Crt::each(cnt, [&]<int T, u32 P>() {
   using B= barrett_q<P>;
-  std::vector<u32> qv(sz), pv(sz), xa(n), xb(m), cv(sz);
-  // qv[k] = ∏_{j<=k} ppart[j] = ∏ p^{v_p(k!)}、pv[k] はその逆 (前積の 1 回の逆から配る)。
-  u32 a0= 1;
-  for (int k= 0; k < sz; ++k) a0= B::mul(a0, ppart[k]), qv[k]= a0;
-  a0= B::inv(qv[sz - 1]);
-  for (int k= sz - 1; k >= 0; --k) pv[k]= a0, a0= B::mul(a0, ppart[k]);
-  for (int k= 0; k < n; ++k) xa[k]= B::mul(B::red_small((a[k] * iu[k]).val()), pv[k]);
-  for (int k= 0; k < m; ++k) xb[k]= B::mul(B::red_small((b[k] * iu[k]).val()), pv[k]);
-  Crt::template conv_at<P>(xa.data(), n, xb.data(), m, sz, cv.data());
-  for (int k= 0; k < sz; ++k) res[size_t(T) * sz + k]= B::mul(cv[k], qv[k]);
+  qs[T]= P;
+  // xa/xb に要るのは k < max(n, m) までなので、pv[max(n, m) - 1] から始める。
+  const int k0= std::max(n, m) - 1;
+  u32 acc= 1;
+  for (int i= 0; i < ns; ++i) {
+   u32 e= 0;
+   for (u32 x= u32(k0); x; x/= S[i]) e+= x / S[i];
+   acc= B::mul(acc, B::pow(S[i], e));
+  }
+  acc= B::inv(acc);
+  for (int k= k0; k >= 0; --k) {
+   if (k < n) xa[k]= B::mul(B::red_small(wa[k]), acc);
+   if (k < m) xb[k]= B::mul(B::red_small(wb[k]), acc);
+   acc= B::mul(acc, ppart[k]);
+  }
+  u32* out= res.data() + size_t(T) * sz;
+  Crt::template conv_at<P>(xa.data(), n, xb.data(), m, sz, out);
+  // qv[k] = ∏_{j<=k} ppart[j] を掛ける。1 本の鎖で配ると Barrett の掛け算の待ちがそのまま並ぶので、
+  // 4 つずつの区画に分ける (区画の積は互いに独立、区画の前積は 1/4 の長さ、中は 4 つの鎖が並ぶ)。
+  constexpr int LB= 4;
+  const int nb= (sz + LB - 1) / LB;
+  for (int b= 0; b < nb; ++b) {
+   u32 x= 1;
+   const int e= std::min(sz, (b + 1) * LB);
+   for (int j= b * LB; j < e; ++j) x= B::mul(x, ppart[j]);
+   bprod[b]= x;
+  }
+  acc= 1;
+  for (int b= 0; b < nb; ++b) {
+   const u32 t= acc;
+   acc= B::mul(acc, bprod[b]), bprod[b]= t;
+  }
+  for (int b= 0; b < nb; ++b) {
+   u32 x= bprod[b];
+   const int e= std::min(sz, (b + 1) * LB);
+   for (int j= b * LB; j < e; ++j) x= B::mul(x, ppart[j]), out[j]= B::mul(out[j], x);
+  }
  });
- // 4. Garner で S_n を戻し、u_n を掛ける。
- u32 r[12];
+ // 5. Garner で S_n を戻し、u_n を掛ける。c_t は前の素数での剰余を引きずらない形で作り、
+ // 要素ごとに t = 0, 1, ... と進めずに素数ごとのパスに分ける (前の素数での値に依存して待ちが続くのを避ける)。
+ // パス t は res の行 t を c_t で上書きする (r_t はパス t でしか使わない)。
+ // 法 q_t が実行時の値でも割り算にならないよう、還元は Barrett で行う。
+ u32 wmt[12][12]= {}, iwt[12]= {}, wt[12]= {};
+ barrett_dyn bq[12];
+ for (int t= 0; t < cnt; ++t) {
+  bq[t]= barrett_dyn(qs[t]);
+  u64 w= 1;
+  for (int s= 0; s < t; ++s) wmt[t][s]= u32(w % qs[t]), w= w * qs[s] % qs[t];
+  iwt[t]= pow_mod(w, u64(qs[t]) - 2, qs[t]);
+ }
+ {
+  u64 w= 1;
+  for (int t= 0; t < cnt; ++t) wt[t]= u32(w % M), w= w * qs[t] % M;
+ }
+ for (int t= 1; t < cnt; ++t) {
+  const u32 qt= qs[t];
+  u32* ct= res.data() + size_t(t) * sz;
+  for (int k= 0; k < sz; ++k) {
+   u64 xq= 0;
+   for (int s= 0; s < t; ++s) xq+= u64(res[size_t(s) * sz + k]) * wmt[t][s];
+   const u32 d= ct[k] + qt - bq[t].red(xq);
+   ct[k]= bq[t].red(u64(d >= qt ? d - qt : d) * iwt[t]);
+  }
+ }
+ const barrett_dyn bm(M);
  std::vector<K> c(sz);
  for (int k= 0; k < sz; ++k) {
-  for (int t= 0; t < cnt; ++t) r[t]= res[size_t(t) * sz + k];
-  c[k]= u[k] * K(Crt::garner(r, cnt, M));
+  u64 acc= 0;
+  for (int t= 0; t < cnt; ++t) acc+= u64(res[size_t(t) * sz + k]) * wt[t];
+  c[k]= u[k] * K(bm.red(acc));
  }
  return c;
 }
