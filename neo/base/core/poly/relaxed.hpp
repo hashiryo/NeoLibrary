@@ -112,37 +112,35 @@ template <class K, class Conv= convolve_internal::Auto> struct Convolution {
 };
 
 // f の先頭 n 項の exp (f[0] = 0)。g = exp f は g' = f' g を満たすので、i 次までの係数から (i + 1) g_{i+1} が決まる。
-// (k f_k) と g のオンライン畳み込み 1 本で、係数を 1 つずつ決めていく。O(n log^2 n)。値は fps::exp と同じ。
+// オフライン側を (k f_k) にした半オンライン畳み込み 1 本で、係数を 1 つずつ決めていく (オフライン側は f から
+// 先に作れるので、両方オンラインの畳み込みより核の呼び出しが半分で済む)。O(n log^2 n)。値は fps::exp と同じ。
 // 1 から n - 1 が K で逆元を持つこと (法が素数で n <= 法なら満たされる)。f は n 項より短くてもよい (0 で埋める)。
 template <class Conv= convolve_internal::Auto, class K> std::vector<K> exp(const std::vector<K>& f, int n) {
  assert(n >= 1);
  assert(f.empty() || f[0] == K());
- std::vector<K> g(n);
+ std::vector<K> g(n), fp(n);
  g[0]= K(1);
  if (n == 1) return g;
- Convolution<K, Conv> cv;
- for (int i= 0; i + 1 < n; ++i) {
-  const K fi1= i + 1 < int(f.size()) ? f[i + 1] : K();
-  g[i + 1]= cv.next(K(i + 1) * fi1, g[i]) / K(i + 1);
- }
+ // 半オンラインの番号 i では f'_i = (i + 1) f_{i+1} を掛ける ((f' g)_i が g_{i+1} の和になる)。
+ for (int i= 0; i + 1 < n && i + 1 < int(f.size()); ++i) fp[i]= K(i + 1) * f[i + 1];
+ SemiRelaxedConvolution<K, Conv> cv(std::move(fp));
+ for (int i= 0; i + 1 < n; ++i) g[i + 1]= cv.next(g[i]) / K(i + 1);
  return g;
 }
 
 // f の先頭 n 項の逆数 g (f g = 1 mod x^n)。f[0] は逆元を持つこと。
-// g_{i+1} = -(1/f_0) Σ_{k=1..i+1} f_k g_{i+1-k} なので、(f_{k+1}) と g のオンライン畳み込み 1 本で係数を決めていける。
-// O(n log^2 n)。値は fps::inv と同じ。
+// g_{i+1} = -(1/f_0) Σ_{k=1..i+1} f_k g_{i+1-k} なので、オフライン側を (f_{k+1}) にした半オンライン畳み込み 1 本で
+// 係数を決めていける。O(n log^2 n)。値は fps::inv と同じ。
 template <class Conv= convolve_internal::Auto, class K> std::vector<K> inv(const std::vector<K>& f, int n) {
  assert(n >= 1);
  assert(!f.empty() && f[0] != K());
- std::vector<K> g(n);
+ std::vector<K> g(n), fp(n);
  const K i0= f[0].inv();
  g[0]= i0;
  if (n == 1) return g;
- Convolution<K, Conv> cv;
- for (int i= 0; i + 1 < n; ++i) {
-  const K fi1= i + 1 < int(f.size()) ? f[i + 1] : K();
-  g[i + 1]= -cv.next(fi1, g[i]) * i0;
- }
+ for (int i= 0; i + 1 < n && i + 1 < int(f.size()); ++i) fp[i]= f[i + 1];
+ SemiRelaxedConvolution<K, Conv> cv(std::move(fp));
+ for (int i= 0; i + 1 < n; ++i) g[i + 1]= -cv.next(g[i]) * i0;
  return g;
 }
 }  // namespace relaxed
