@@ -16,6 +16,8 @@ template <class T> std::vector<T> min_plus_convolution_convex(const std::vector<
 
 中身は [SMAWK](smawk.md) でも作れます。評価回数は SMAWK のほうが少ないですが、計測では 1 候補 1 評価の分割統治のほうが x64 の gcc と clang の両方で 1.6 倍速かったため、分割統治にしています (記録は algo-notes の notes/dp-optimization.md)。
 
+凹と任意の min-plus convolution は、凸と任意のようには作れません。逆順にしても凹は凹のままで、階段状の境界で行最小の単調性も崩れるためです (階段を扱う SMAWK などが要ります)。
+
 ## 使い方
 
 ```cpp
