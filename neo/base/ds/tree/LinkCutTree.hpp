@@ -99,16 +99,9 @@ class LinkCutTree {
  int n;
  [[gnu::always_inline]] void pull(int x) {
   Node& a = t[x];
-  T s = a.val;
-  if (int l = a.ch[0]; l) s = M::op(t[l].sum, s);
-  if (int r = a.ch[1]; r) s = M::op(s, t[r].sum);
-  a.sum = s;
-  if constexpr (NC) {
-   T rs = a.val;
-   if (int r = a.ch[1]; r) rs = M::op(t[r].rsum, rs);
-   if (int l = a.ch[0]; l) rs = M::op(rs, t[l].rsum);
-   a.rsum = rs;
-  }
+  // 0 番の節は ti() なので、子の有無で分けずに op で畳める。
+  a.sum = M::op(M::op(t[a.ch[0]].sum, a.val), t[a.ch[1]].sum);
+  if constexpr (NC) a.rsum = M::op(M::op(t[a.ch[1]].rsum, a.val), t[a.ch[0]].rsum);
  }
  [[gnu::always_inline]] void reverse(int x) {
   if (!x) return;
@@ -235,13 +228,34 @@ public:
   u += 1, v += 1;
   evert_(u), t[u].par = -v;
  }
- // 辺 (u, v) を切る。
+ // 辺 (u, v) を切る。仮想辺のときは、深い側の端が自分の道の根で、その道の親が浅い側の端になって
+ // いるだけなので、道の親を消すだけでよい (回転も集約の計算も要らない)。道の上で隣り合っている
+ // ときは、両端を splay すると深い側が浅い側の子になるので、そこで切り離す (near1111 の 419210)。
+ // 道の親は浅い側に残す。
  void cut(int u, int v) {
   u += 1, v += 1;
-  evert_(u), access(v);
-  assert(t[v].ch[0] == u && t[u].ch[1] == 0);
-  t[v].ch[0] = 0, t[u].par = 0;
-  pull(v);
+  if (t[u].par == -v) {
+   t[u].par = 0;
+   return;
+  }
+  if (t[v].par == -u) {
+   t[v].par = 0;
+   return;
+  }
+  splay(u);
+  if (t[u].par == -v) {
+   t[u].par = 0;
+   return;
+  }
+  splay(v);
+  if (t[v].ch[0] == u) {
+   t[u].par = t[v].par, t[v].par = 0, t[v].ch[0] = 0, pull(v);
+  } else if (t[v].ch[1] == u) {
+   t[u].par = 0, t[v].ch[1] = 0, pull(v);
+  } else {
+   assert(t[v].par == -u);
+   t[v].par = 0;
+  }
  }
  bool connected(int u, int v) { return root_(u + 1) == root_(v + 1); }
  int root(int v) { return root_(v + 1) - 1; }
@@ -506,11 +520,32 @@ public:
   u += 1, v += 1;
   evert_(u), t[u].par = -v;
  }
+ // 辺 (u, v) を切る。仮想辺なら道の親を消すだけ、道の上で隣り合っているなら両端を splay して
+ // 深い側を浅い側から外す (集約が無いので pull は要らない)。
  void cut(int u, int v) {
   u += 1, v += 1;
-  evert_(u), access(v);
-  assert(t[v].ch[0] == u && t[u].ch[1] == 0);
-  t[v].ch[0] = 0, t[u].par = 0;
+  if (t[u].par == -v) {
+   t[u].par = 0;
+   return;
+  }
+  if (t[v].par == -u) {
+   t[v].par = 0;
+   return;
+  }
+  splay(u);
+  if (t[u].par == -v) {
+   t[u].par = 0;
+   return;
+  }
+  splay(v);
+  if (t[v].ch[0] == u) {
+   t[u].par = t[v].par, t[v].par = 0, t[v].ch[0] = 0;
+  } else if (t[v].ch[1] == u) {
+   t[u].par = 0, t[v].ch[1] = 0;
+  } else {
+   assert(t[v].par == -u);
+   t[v].par = 0;
+  }
  }
  bool connected(int u, int v) { return root_(u + 1) == root_(v + 1); }
  int root(int v) { return root_(v + 1) - 1; }

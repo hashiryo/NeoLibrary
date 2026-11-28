@@ -29,4 +29,4 @@ public:
 
 `M= void` のときは節の値を持たないので、`NODE_SIZE` 個の節が 24 byte になります。
 
-今の Library の提出 (`mylib/data_structure/OnlineDynamicConnectivity.hpp`) と同じ作りです。Library Checker の dynamic_graph_vertex_add_component_sum では、オフラインの `OfflineDynamicForest` が 59 ms、このクラスの提出は CI で測っています。記録は algo-notes の notes/dynamic-tree.md にあります。
+今の Library の提出 (`mylib/data_structure/OnlineDynamicConnectivity.hpp`) と同じ作りです。Library Checker の dynamic_graph_vertex_add_component_sum の CI の値 (run 46107376542、x64-gcc、AMD EPYC 7763、最大と合計) は、このクラスの提出が 3143 ms と 6233 ms、メモリ 454 MB、オフラインの `OfflineDynamicForest` が 74 ms と 549 ms、メモリ 29 MB でした。オフラインの方が 40 倍以上速いので、クエリを先読みできるならそちらを使ってください。記録は algo-notes の notes/dynamic-tree.md にあります。

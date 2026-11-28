@@ -61,16 +61,18 @@ long long s = lct.prod(u, v);
 
 節は配列に置き、親を符号つきの int で持ちます。正は splay の親、負は道の親、0 はなしです。頂点の番号は 1 始まりで、0 番を番兵にします。splay は下から回転し、回転の直前に祖父母・親・自分の 3 節だけ push します。
 
-回転では、x の部分木の区間が p の前の部分木と同じになるので、x の集約を p から写してから p だけ求め直します。集約の計算を回転ごとに 2 回しない分だけ速いです。`access` は、道を x の左部分木に積み、各段で x を 1 回回して最後の splay を省く形です (Library Checker の dynamic_tree_vertex_add_path_sum の首位 chaihf の 270626 と同じ)。道の積は `evert(u)`、`access(v)` のあとの左の部分木の和と `v` の値の `op` です。作用があるときは、遅延を配るために `access` の最後で `v` の和を求め直します。
+回転では、x の部分木の区間が p の前の部分木と同じになるので、x の集約を p から写してから p だけ求め直します。集約の計算を回転ごとに 2 回しない分だけ速いです。集約は 0 番の節を `ti()` の番兵として、子の有無で分けずに `op` で畳みます。`access` は、道を x の左部分木に積み、各段で x を 1 回回して最後の splay を省く形です (Library Checker の dynamic_tree_vertex_add_path_sum の首位 chaihf の 270626 と同じ)。道の積は `evert(u)`、`access(v)` のあとの左の部分木の和と `v` の値の `op` です。作用があるときは、遅延を配るために `access` の最後で `v` の和を求め直します。
 
-`SubtreeLinkCutTree` は、splay の部分木の和 (道の上の頂点と、仮想の子の部分木) と、仮想の子の部分木の和 `vir` を持ちます。`access` で右の子を仮想へ移すとき `vir` に足し、仮の道の子を仮想から外すとき `vir` から引きます。部分木の積は `evert(v)`、`access(p)` のあとの `op(val[v], vir[v])` です。
+`cut(u, v)` は、辺が仮想辺のときと道の上にあるときで道を分けます。仮想辺のときは、深い側の端が自分の道の根で、その道の親が浅い側の端になっているだけなので、道の親を消すだけで 2 つの木に分かれます (回転も集約の計算も要りません)。道の上で隣り合っているときは、両端を splay すると深い側が浅い側の子になるので、そこで切り離し、道の親は浅い側に残します (Library Checker の首位 near1111 の 419210 と同じ)。ほかの問題の cut は `evert(u)`、`access(v)` の 2 回の access で切っていましたが、この形は splay 2 回で済みます。
 
-procon-judge の提出 (`problems/_shared/dyntree/lct.hpp` と同じ実装) の値です。run 46102092510 の x64-gcc (Xeon 8573C) で、入出力込みの最大と合計です。
+`SubtreeLinkCutTree` は、splay の部分木の和 (道の上の頂点と、仮想の子の部分木) と、仮想の子の部分木の和 `vir` を持ちます。`access` で右の子を仮想へ移すとき `vir` に足し、仮の道の子を仮想から外すとき `vir` から引きます。部分木の積は `evert(v)`、`access(p)` のあとの `op(val[v], vir[v])` です。こちらの `cut` は仮想辺の近道を使いません。仮想の子の和を浅い側の端の `vir` から外すと、その端の道の親の `vir` が古くなるためです (その端を根まで access し直すことになり、近道になりません)。
 
-| 問題 | 提出 | 最大 | 合計 | Library Checker の首位 |
-| --- | --- | --- | --- | --- |
-| dynamic-tree-vertex-add-path-sum | `lct` | 257 ms | 1248 ms | 174 ms |
-| dynamic-tree-vertex-set-path-composite | `lct` | 315 ms | 1543 ms | 141 ms |
-| dynamic-tree-vertex-add-subtree-sum | `lct_sub` | 285 ms | 2553 ms | 115 ms (オフラインの森) |
+procon-judge の提出 (`problems/_shared/dyntree/lct.hpp` と同じ実装) の値です。run 46107376542 の x64-gcc で、入出力込みの最大と合計です。cut の近道と番兵を使う集約はこの回のあとに変えたので、その値はまだ CI で測っていません。
+
+| 問題 | 提出 | CPU | 最大 | 合計 | Library Checker の首位 |
+| --- | --- | --- | --- | --- | --- |
+| dynamic-tree-vertex-add-path-sum | `lct` | Xeon 6975P-C | 237 ms | 1069 ms | 174 ms |
+| dynamic-tree-vertex-set-path-composite | `lct` | EPYC 7763 | 387 ms | 1625 ms | 141 ms |
+| dynamic-tree-vertex-add-subtree-sum | `lct_sub` | Xeon 6975P-C | 225 ms | 2003 ms | 115 ms (オフラインの森) |
 
 部分木の和は、オフラインでよいなら期限付きの最大全域森の方が速いです。記録は algo-notes の notes/dynamic-tree.md にあります。

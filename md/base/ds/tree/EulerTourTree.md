@@ -53,4 +53,4 @@ auto s = ett.prod_subtree(v, p);
 
 splay の回転では、x の部分木の区間が p の前の部分木と同じになるので、x の集約を p から写してから p だけ求め直します。push は回転に参加する 3 節だけにします。
 
-procon-judge の提出 (`problems/_shared/dyntree/ett.hpp` と同じ実装) の値です。run 46102092510 の x64-gcc (Xeon 8573C) で、dynamic-tree-subtree-add-subtree-sum の最大 817 ms、合計 7370 ms、メモリ 65 MB でした。同問題の Library Checker の首位は 192 ms (オフラインのクラスタ木) です。部分木の加算と和は、クエリを先読みできるならオフラインの構造の方が速いです。記録は algo-notes の notes/dynamic-tree.md にあります。
+procon-judge の提出 (`problems/_shared/dyntree/ett.hpp` と同じ実装) の値です。run 46107376542 の x64-gcc (AMD EPYC 7763) で、辺の列から O(N) で組む提出が dynamic-tree-subtree-add-subtree-sum の最大 850 ms、合計 7493 ms、メモリ 58 MB、link で組む提出が 989 ms、8695 ms、メモリ 62 MB でした。同問題の Library Checker の首位は 192 ms (オフラインのクラスタ木) です。部分木の加算と和は、クエリを先読みできるならオフラインの構造の方が速いです。記録は algo-notes の notes/dynamic-tree.md にあります。
