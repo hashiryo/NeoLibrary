@@ -229,7 +229,9 @@ template <class T= long long> class PiecewiseLinearConvex {
  }
 public:
  // f(x) := 0
- PiecewiseLinearConvex() { n_.reserve(256); }
+ PiecewiseLinearConvex() {}
+ // (既定で reserve しない。木の DP は PLC を 1 頂点につき 1 個作って移すので、確保を
+ // 先に取ると捨てるぶんが積み上がる。chain 2 万で reserve(256) が 8 倍の代金だった。)
  // f(x) := sum max(0, a(x-x0))
  explicit PiecewiseLinearConvex(const std::vector<std::pair<T, T>>& ramps) {
   int m= ramps.size();
