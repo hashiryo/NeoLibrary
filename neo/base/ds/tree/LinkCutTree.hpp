@@ -88,7 +88,7 @@ struct Node {
 };
 }  // namespace link_cut_tree_internal
 
-template <class M>
+template <class M = void>
 class LinkCutTree {
  using T = typename M::T;
  using E = typename link_cut_tree_internal::ActionOf<M>::type;
@@ -417,4 +417,106 @@ public:
   evert_(x), access(y);
   return M::op(t[x].val, t[x].vir);
  }
+};
+
+// 値を持たない森 (M = void)。連結性、根、親、lca と辺の切り貼りだけを使う。
+template <>
+class LinkCutTree<void> {
+ struct Node {
+  int ch[2] = {0, 0};
+  int par = 0;
+  bool rev = false;
+ };
+ link_cut_tree_internal::Vec<Node> t;
+ int n;
+ [[gnu::always_inline]] void reverse(int x) {
+  if (!x) return;
+  std::swap(t[x].ch[0], t[x].ch[1]), t[x].rev ^= 1;
+ }
+ [[gnu::always_inline]] void push(int x) {
+  if (t[x].rev) reverse(t[x].ch[0]), reverse(t[x].ch[1]), t[x].rev = false;
+ }
+ [[gnu::always_inline]] void rotate(int x) {
+  Node& a = t[x];
+  int p = a.par, g = t[p].par, d = t[p].ch[1] == x, b = a.ch[d ^ 1];
+  t[p].ch[d] = b;
+  if (b) t[b].par = p;
+  a.ch[d ^ 1] = p, t[p].par = x, a.par = g;
+  if (g > 0) t[g].ch[t[g].ch[1] == p] = x;
+ }
+ [[gnu::always_inline]] void splay(int x) {
+  for (int p; (p = t[x].par) > 0;) {
+   int g = t[p].par;
+   if (g <= 0) {
+    push(p), push(x), rotate(x);
+    break;
+   }
+   push(g), push(p), push(x);
+   if ((t[g].ch[1] == p) == (t[p].ch[1] == x)) rotate(p), rotate(x);
+   else rotate(x), rotate(x);
+  }
+  push(x);
+ }
+ [[gnu::always_inline]] void access(int x) {
+  int last = 0;
+  for (int y = x; y; last = y, y = -t[y].par) {
+   splay(y);
+   int r = t[y].ch[1];
+   if (r) t[r].par = -y;
+   t[y].ch[1] = last;
+   if (last) t[last].par = y;
+  }
+  splay(x);
+ }
+ [[gnu::always_inline]] void evert_(int x) { access(x), reverse(x); }
+ int root_(int x) {
+  access(x);
+  for (int y = x;;) {
+   push(y);
+   if (!t[y].ch[0]) return splay(y), y;
+   y = t[y].ch[0];
+  }
+ }
+ int parent_(int v) {
+  access(v);
+  if (!t[v].ch[0]) return -1;
+  int y = t[v].ch[0];
+  push(y);
+  while (t[y].ch[1]) y = t[y].ch[1], push(y);
+  splay(y);
+  return y;
+ }
+ int lca_(int u, int v) {
+  if (u == v) return u;
+  access(u);
+  for (int y = v;;) {
+   splay(y);
+   if (t[y].par == 0) return y;
+   y = -t[y].par;
+  }
+ }
+
+public:
+ explicit LinkCutTree(int n_): t(std::size_t(n_) + 2), n(n_) {}
+ int size() const { return n; }
+ // 初期の木を親の向きで張る (v の親 p)。すべて仮想辺なので splay しない。
+ void init_parent(int v, int p) { t[v + 1].par = -(p + 1); }
+ void evert(int v) { evert_(v + 1); }
+ void link(int u, int v) {
+  u += 1, v += 1;
+  evert_(u), t[u].par = -v;
+ }
+ void cut(int u, int v) {
+  u += 1, v += 1;
+  evert_(u), access(v);
+  assert(t[v].ch[0] == u && t[u].ch[1] == 0);
+  t[v].ch[0] = 0, t[u].par = 0;
+ }
+ bool connected(int u, int v) { return root_(u + 1) == root_(v + 1); }
+ int root(int v) { return root_(v + 1) - 1; }
+ int parent(int v) {
+  int r = parent_(v + 1);
+  return r < 0 ? -1 : r - 1;
+ }
+ int lca(int u, int v) { return lca_(u + 1, v + 1) - 1; }
 };

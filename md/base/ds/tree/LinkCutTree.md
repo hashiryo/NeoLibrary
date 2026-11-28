@@ -6,7 +6,7 @@ documentation_of: ../../neo/base/ds/tree/LinkCutTree.hpp
 森の辺を切り貼りしながら、道の積と道への作用を答える Link-Cut Tree です。道の積は u から v への順で、可換でないモノイドでもよいです。辺 (v, p) について p を親とした v の部分木の積を答える `SubtreeLinkCutTree` も同じヘッダにあります。
 
 ```cpp
-template <class M> class LinkCutTree {
+template <class M = void> class LinkCutTree {
 public:
  explicit LinkCutTree(int n);
  int size() const;
@@ -36,6 +36,8 @@ public:
 ```
 
 `M` は SegmentTree と同じモノイドです (`using T`、`static T ti()`、`static T op(T, T)`)。`using commute= void` があれば可換として扱い、逆向きの積を持ちません。作用は `using E`、`mp(T&, E)`、`cp(E&, E)` で受けます。作用はモノイドの `op` に分配する必要があります。和のモノイドに「各頂点に足す」作用を載せるには、要素数を持つモノイドにするか、長さを受ける作用にしてください。
+
+`M = void` のときは値を待たない森で、`link`、`cut`、`connected`、`evert`、`root`、`parent`、`lca`、`init_parent` だけを使えます。値の関数 (`get`、`set`、`mul`、`prod`、`apply`) はありません。
 
 `SubtreeLinkCutTree` は可換群 (`commute` と `static T inv(T)`) を受けます。部分木は子の順が決まらないので、可換でない `op` では使えません。`prod_subtree(v, p)` は v と p が辺で結ばれていることを前提にします。
 
