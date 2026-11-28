@@ -5,6 +5,7 @@
 // 作用は区間の頂点の数を受ける mp(T&, E, int) と cp(E&, E) を持つもの (部分木への加算のような使い方)。
 // 記録は algo-notes の notes/dynamic-tree.md。
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -220,6 +221,18 @@ class EulerTourTree {
    free_nodes.push_back(x);
   }
   // v から p へ向かう節と p から v へ向かう節。辺は (u,v) の向きで覚えてある。
+  // 列の [l, r) から平衡な splay 木を組む。根を返す。
+  int build_balanced(const std::vector<int>& seq, int l, int r) {
+   if (l >= r) return 0;
+   const int m = (l + r) >> 1, x = seq[m];
+   const int L = build_balanced(seq, l, m), R = build_balanced(seq, m + 1, r);
+   t[x].ch[0] = L, t[x].ch[1] = R;
+   if (L) t[L].par = x;
+   if (R) t[R].par = x;
+   t[x].par = 0;
+   pull(x);
+   return x;
+  }
   std::pair<int, int> edge_nodes(int v, int p) const {
    auto it = es.find(key(v, p));
    assert(it != es.end());
@@ -232,6 +245,54 @@ class EulerTourTree {
   explicit EulerTourTree(int n_): t(std::size_t(3 * n_ + 8)), n(n_) {
    for (int v = 1; v <= n; ++v) t[v].cnt = 1;
   }
+ // 辺の列 (森でもよい) と頂点の値から O(N) で組む。頂点の節は 1..N、辺の節は N+1 から。
+ EulerTourTree(int n_, const std::vector<std::array<int, 2>>& edges, const std::vector<T>& a) {
+  n = n_;
+  const int E = int(edges.size()), base = n + 1;
+  t.resize(std::size_t(n + 2 * E + 2));
+  for (int v = 1; v <= n; ++v) t[v].cnt = 1, t[v].val = a[v - 1], t[v].sum = a[v - 1];
+  std::vector<int> head(n, -1), to(2 * E), nxt(2 * E), eid(2 * E), dir(2 * E);
+  int ec = 0;
+  auto add_arc = [&](int u, int v, int e, int d) { to[ec] = v, nxt[ec] = head[u], eid[ec] = e, dir[ec] = d, head[u] = ec++; };
+  for (int e = 0; e < E; ++e) {
+   const int u = edges[e][0], v = edges[e][1];
+   add_arc(u, v, e, 0), add_arc(v, u, e, 1);
+   es.emplace(key(u, v), Edge{u, v, base + 2 * e, base + 2 * e + 1});
+  }
+  std::vector<char> seen(n, 0);
+  std::vector<int> seq;
+  seq.reserve(std::size_t(n + 2 * E));
+  std::vector<int> su, sp, se, snode;
+  for (int root = 0; root < n; ++root) {
+   if (seen[root]) continue;
+   const int start = int(seq.size());
+   seen[root] = 1, seq.push_back(root + 1);
+   su.push_back(root), sp.push_back(-1), se.push_back(head[root]), snode.push_back(-1);
+   while (!su.empty()) {
+    const int u = su.back(), p = sp.back();
+    int& e = se.back();
+    int v = -1, ee = -1, dd = -1;
+    while (e != -1) {
+     const int idx = e;
+     e = nxt[idx];
+     if (to[idx] != p) {
+      v = to[idx], ee = eid[idx], dd = dir[idx];
+      break;
+     }
+    }
+    if (v == -1) {
+     if (const int in = snode.back(); in != -1) seq.push_back(in);
+     su.pop_back(), sp.pop_back(), se.pop_back(), snode.pop_back();
+    } else {
+     seen[v] = 1;
+     const int node = base + 2 * ee + dd;
+     seq.push_back(node), seq.push_back(v + 1);
+     su.push_back(v), sp.push_back(u), se.push_back(head[v]), snode.push_back(base + 2 * ee + (dd ^ 1));
+    }
+   }
+   build_balanced(seq, start, int(seq.size()));
+  }
+ }
   int size() const { return n; }
   bool edge_exists(int u, int v) const { return es.count(key(u, v)); }
   T get(int v) {

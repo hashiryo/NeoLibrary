@@ -9,6 +9,7 @@ documentation_of: ../../neo/base/ds/tree/EulerTourTree.hpp
 template <class M> class EulerTourTree {
 public:
  explicit EulerTourTree(int n);
+ EulerTourTree(int n, const std::vector<std::array<int, 2>>& edges, const std::vector<T>& a);  // 辺の列から O(N)
  int size() const;                          // 頂点の数
  bool edge_exists(int u, int v) const;
  T get(int v); void set(int v, T x);
@@ -25,6 +26,8 @@ public:
 `M` はモノイド (`using T`、`static T ti()`、`static T op(T, T)`) です。作用は `using E`、`cp(E&, E)` と、区間の頂点の数を受ける `mp(T&, E, int)` で受けます。辺の節は頂点として数えないので、区間の長さを受ける形が要ります。
 
 `prod_subtree(v, p)` と `apply_subtree(v, p, e)` は、v と p が辺で結ばれていることを前提にします。p を親とした v の部分木は、p から v へ向かう節の直後から、v から p へ向かう節の直前までの区間です。
+
+辺の列が先に分かっているときは、`EulerTourTree(n, edges, a)` で O(N) に組めます。各成分の根から反復 DFS で巡回列を作り、区間の中央を根にした平衡な splay 木を組みます。
 
 ## 使い方
 
