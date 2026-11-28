@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <limits>
 #include <numeric>
 #include <utility>
 #include <vector>
@@ -10,15 +11,16 @@
 // x - y が最大のものを Fenwick で探して候補の辺にする。候補の辺を距離で並べ、Kruskal で MST を作る。
 // 候補の辺の本数は 4n 本なので、全体は O(n log n)。
 namespace manhattan_mst_internal {
+// Fenwick に載せる値は x - y。座標の差が K に収まることを前提にする (座標が 1e9 までなら long long で足りる)。
+// 128 bit で持つと要素が 24 byte になり、x64 で Fenwick の読み書きが重くなる。
 template <class K> struct MaxPoint {
  using T= MaxPoint;
- bool has= false;
- wide_t<K> v= 0;
+ K v= 0;
  int id= -1;
- static constexpr T ti() { return {}; }
+ static constexpr T ti() { return {std::numeric_limits<K>::lowest(), -1}; }
  static constexpr T op(T a, T b) {
-  if(!b.has) return a;
-  if(!a.has) return b;
+  if(a.id == -1) return b;
+  if(b.id == -1) return a;
   return a.v < b.v ? b : a;
  }
 };
@@ -50,7 +52,7 @@ template <class K> ManhattanMst<K> manhattan_mst(std::vector<Point<K>> ps) {
    int xi= std::lower_bound(xs.begin(), xs.end(), ps[id].x) - xs.begin();
    auto ma= fw.prod(xi + 1);
    if(ma.id != -1) cand.emplace_back(id, ma.id);
-   fw.add(xi, {true, wide_t<K>(ps[id].x) - ps[id].y, id});
+   fw.add(xi, {ps[id].x - ps[id].y, id});
   }
   for(auto& p: ps) std::swap(p.x, p.y);
   if(ph == 1)
