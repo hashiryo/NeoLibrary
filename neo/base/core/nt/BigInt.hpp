@@ -197,10 +197,11 @@ inline void knuth_divmod(const u32* a, int n, const u32* b, int m, std::vector<u
 //    で p = 1, 2, 4, ... と倍にする (掛けるのは m x (p + 1) と (m + p) x (p + 1) で軽い)。
 //    この形の誤差 e は e <- (b/BASE^m) e^2 + 1 で、b/BASE^m が 1/2 以上だと不動点が無く、段を重ねると
 //    少しずつ膨らむ。p が半分まで来たら 2 に移る (絶対の誤差は p 桁の尺度で 1 桁分に収まっている)。
-// 2. 答えの桁で 2 回詰める。I = x BASE^(K-p) から、E = BASE^(m+K) - b I、I += floor(E I / BASE^(m+K))。
-//    切り捨ての 1 が答えの 1 桁分にしかならないので、誤差 e は e <- e^2 / (BASE^(m+K)/b) + 1 になり、
-//    1 段で 1、2 に収まる (1 の相対誤差は BASE^(-p) 以下なので、最初の 1 段でほぼ 0 になる)。
-//    こちらは全体の積を 2 回払うが、2 段で済む。
+// 2. 答えの桁で 1 回詰める。I = x BASE^(K-p) から、E = BASE^(m+K) - b I、I += floor(E I / BASE^(m+K))。
+//    倍々の段のあとの相対誤差は BASE^(-p) (p は (K+1)/2 以上) なので、1 回の Newton で絶対の誤差が
+//    1 桁分に落ちる。商は 1 だけ小さくなりうるが、divmod_pos の最後の補正 (q に 1 を足して B を引く) が直す。
+//    2 回にすると全体の積がいちばん大きい形でもう 1 回増える (2026-11-28 に 1 回にして、yosupo の
+//    26 ケースと乱択で確かめた)。
 inline std::vector<u32> reciprocal(const u32* b, int m, int K) {
  std::vector<u32> dividend(m + 2, 0), x, rr;
  dividend[m + 1]= 1;  // BASE^(m+1)
@@ -221,11 +222,10 @@ inline std::vector<u32> reciprocal(const u32* b, int m, int K) {
  I.insert(I.begin(), K - p, 0);  // I = x BASE^(K-p) (K >= p)
  std::vector<u32> target(m + K + 1, 0);
  target[m + K]= 1;
- for (int it= 0; it < 2; ++it) {
+ {
   std::vector<u32> prod= mul(bb, I);
-  assert(cmp_abs(target, prod) >= 0);  // I は真の値を超えない
   std::vector<u32> E= target;
-  sub_abs_inplace(E, prod);
+  sub_abs_inplace(E, prod);  // E = BASE^(m+K) - b I (>= 0。倍々の段が下から詰めている)
   std::vector<u32> W= mul(E, I);
   W.erase(W.begin(), W.begin() + std::min<int>(m + K, int(W.size())));
   I= add_abs(I, W);
