@@ -376,10 +376,8 @@ class EulerTourTree {
    else a = e.b, b = e.a;
    reroot(a);  // 列を a から始め、a の次に v の側、その次に b が来る形にする
    splay(b);
-   int r = a;
-   while (t[r].par != b) r = t[r].par;
-   const bool right = (t[b].ch[1] == r);
    splay_to(a, b);
+   const bool right = (t[b].ch[1] == a);
    if (right) {  // [L] b [v の側] a [Q]
     int l = t[b].ch[0], q = t[a].ch[1], v1 = t[a].ch[0];
     if (v1) t[v1].par = 0;
@@ -423,10 +421,8 @@ class EulerTourTree {
   T prod_subtree(int v, int p) {
    auto [a, b] = edge_nodes(v, p);  // a: v->p, b: p->v
    splay(b);
-   int r = a;
-   while (t[r].par != b) r = t[r].par;
-   const bool right = (t[b].ch[1] == r);
    splay_to(a, b);
+   const bool right = (t[b].ch[1] == a);
    if (right) {  // [L] b [v の側] a [Q]
     int l = t[a].ch[0];
     return l ? t[l].sum : M::ti();
