@@ -110,7 +110,7 @@ template <unsigned P> void idft_impl(ZMod<P>* a, int n) {
  for (int i= 0; i < n; ++i) a[i]*= iv;
 }
 
-// a[0..n) は長さ n の変換。係数に戻して 0 を詰め、長さ 2n の変換を a[0..2n) に作る (素直な形。変換の使い回しはまだ作っていない)。
+// a[0..n) は長さ n の変換。係数に戻して 0 を詰め、長さ 2n の変換を a[0..2n) に作る (素直な形。変換の使い回しは、4 進の並びでは散らす手間が勝つので作っていない)。
 template <unsigned P> void dft_doubling_impl(ZMod<P>* a, int n) {
  std::vector<ZMod<P>> c(a, a + n);
  idft_impl<P>(c.data(), n);

@@ -1024,7 +1024,7 @@ template <unsigned P> void idft_impl(ZMod<P>* a, int n) {
  neo_ntt_avx2::scale_by<P>(d, n, neo_ntt_avx2::inv_n_scalar<P>(n));
 }
 
-// a[0..n) は長さ n の変換。係数に戻して 0 を詰め、長さ 2n の変換を a[0..2n) に作る。
+// a[0..n) は長さ n の変換。係数に戻して 0 を詰め、長さ 2n の変換を a[0..2n) に作る (素直な形。変換の使い回しは、4 進の並びでは散らす手間が勝つので作っていない)。
 // 途中は Montgomery のまま持つ: 逆変換の段のあとに Montgomery の 1/n を掛けて係数の表現にし、0 を詰めて順変換の段を回す。
 template <unsigned P> void dft_doubling_impl(ZMod<P>* a, int n) {
  std::vector<ZMod<P>> c(a, a + n);
