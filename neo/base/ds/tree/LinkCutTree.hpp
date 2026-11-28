@@ -159,16 +159,20 @@ class LinkCutTree {
   push(x);
  }
  [[gnu::always_inline]] int access(int x) {
-  int last = 0;
-  for (int y = x; y; last = y, y = -t[y].par) {
-   splay(y);
-   int r = t[y].ch[1];
-   if (r) t[r].par = -y;
-   t[y].ch[1] = last;
-   if (last) t[last].par = y;
-   pull(y);
+  splay(x);
+  if (int r = t[x].ch[1]; r) t[r].par = -x;
+  t[x].ch[1] = 0;
+  int last = x;
+  while (int p = -t[x].par) {
+   splay(p);
+   if (int r = t[p].ch[1]; r) t[r].par = -p;
+   t[p].ch[1] = x;
+   t[x].par = p;
+   rotate(x);
+   last = p;
   }
-  return splay(x), last;
+  if constexpr (AC) pull(x);
+  return last;
  }
  [[gnu::always_inline]] void evert_(int x) { access(x), reverse(x); }
  int root_(int x) {
@@ -252,7 +256,9 @@ public:
  T prod(int u, int v) {
   u += 1, v += 1;
   evert_(u), access(v);
-  return t[v].sum;  // v の右の子は空で、和は u から v への道の順
+  if constexpr (AC) return t[v].sum;
+  T s = t[v].ch[0] ? t[t[v].ch[0]].sum : M::ti();
+  return M::op(s, t[v].val);
  }
  // 道 u-v への作用。
  template <bool A = AC>
@@ -317,19 +323,21 @@ class SubtreeLinkCutTree {
   push(x);
  }
  [[gnu::always_inline]] int access(int x) {
-  int last = 0;
-  for (int y = x; y; last = y, y = -t[y].par) {
-   splay(y);
-   int r = t[y].ch[1];
-   if (r != last) {
-    if (r) t[r].par = -y, t[y].vir = M::op(t[y].vir, t[r].sum);
-    if (last) t[y].vir = M::op(t[y].vir, M::inv(t[last].sum));
-   }
-   t[y].ch[1] = last;
-   if (last) t[last].par = y;
-   pull(y);
+  splay(x);
+  if (int r = t[x].ch[1]; r) t[r].par = -x, t[x].vir = M::op(t[x].vir, t[r].sum);
+  t[x].ch[1] = 0;
+  int last = x;
+  while (int p = -t[x].par) {
+   splay(p);
+   if (int r = t[p].ch[1]; r) t[r].par = -p, t[p].vir = M::op(t[p].vir, t[r].sum);
+   t[p].vir = M::op(t[p].vir, M::inv(t[x].sum));
+   t[p].ch[1] = x;
+   t[x].par = p;
+   rotate(x);
+   last = p;
   }
-  return splay(x), last;
+  pull(x);
+  return last;
  }
  [[gnu::always_inline]] void evert_(int x) { access(x), reverse(x); }
  int root_(int x) {
@@ -450,15 +458,19 @@ class LinkCutTree<void> {
   push(x);
  }
  [[gnu::always_inline]] int access(int x) {
-  int last = 0;
-  for (int y = x; y; last = y, y = -t[y].par) {
-   splay(y);
-   int r = t[y].ch[1];
-   if (r) t[r].par = -y;
-   t[y].ch[1] = last;
-   if (last) t[last].par = y;
+  splay(x);
+  if (int r = t[x].ch[1]; r) t[r].par = -x;
+  t[x].ch[1] = 0;
+  int last = x;
+  while (int p = -t[x].par) {
+   splay(p);
+   if (int r = t[p].ch[1]; r) t[r].par = -p;
+   t[p].ch[1] = x;
+   t[x].par = p;
+   rotate(x);
+   last = p;
   }
-  return splay(x), last;
+  return last;
  }
  [[gnu::always_inline]] void evert_(int x) { access(x), reverse(x); }
  int root_(int x) {
