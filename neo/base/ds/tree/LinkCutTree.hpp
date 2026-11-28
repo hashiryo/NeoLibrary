@@ -68,6 +68,25 @@ struct Alloc {
 template <class T>
 using Vec = std::vector<T, Alloc<T>>;
 
+// 要る枚だけを持つ。使わないときは空になる。空のメンバを同じ型で 3 個並べると、同じ型の部分オブジェクトは
+// 同じ番地を持てないので、節が 40 byte に膨らむ。1 個の構造体にまとめて 32 byte に収める。
+template <class M, bool NC, bool AC>
+struct Extra {};
+template <class M>
+struct Extra<M, true, false> {
+ typename M::T rsum = M::ti();
+};
+template <class M>
+struct Extra<M, false, true> {
+ typename ActionOf<M>::type laz{};
+ bool lazf = false;
+};
+template <class M>
+struct Extra<M, true, true> {
+ typename M::T rsum = M::ti();
+ typename ActionOf<M>::type laz{};
+ bool lazf = false;
+};
 template <class M>
 struct Node {
  using T = typename M::T;
@@ -78,13 +97,7 @@ struct Node {
  int par = 0;
  bool rev = false;
  T val = M::ti(), sum = M::ti();
- [[no_unique_address]] std::conditional_t<NC, T, Empty> rsum;
- [[no_unique_address]] std::conditional_t<AC, E, Empty> laz;
- [[no_unique_address]] std::conditional_t<AC, bool, Empty> lazf;
- Node() {
-  if constexpr (NC) rsum = M::ti();
-  if constexpr (AC) lazf = false;
- }
+ [[no_unique_address]] Extra<M, NC, AC> ex;
 };
 }  // namespace link_cut_tree_internal
 
@@ -101,12 +114,11 @@ class LinkCutTree {
   Node& a = t[x];
   // 0 番の節は ti() なので、子の有無で分けずに op で畳める。
   a.sum = M::op(M::op(t[a.ch[0]].sum, a.val), t[a.ch[1]].sum);
-  if constexpr (NC) a.rsum = M::op(M::op(t[a.ch[1]].rsum, a.val), t[a.ch[0]].rsum);
+  if constexpr (NC) a.ex.rsum = M::op(M::op(t[a.ch[1]].ex.rsum, a.val), t[a.ch[0]].ex.rsum);
  }
+ // 反転は旗だけ立て、ch の入れ替えは push で行う。
  [[gnu::always_inline]] void reverse(int x) {
-  if (!x) return;
-  std::swap(t[x].ch[0], t[x].ch[1]);
-  if constexpr (NC) std::swap(t[x].sum, t[x].rsum);
+  if constexpr (NC) std::swap(t[x].sum, t[x].ex.rsum);
   t[x].rev ^= 1;
  }
  template <bool A = AC>
@@ -115,27 +127,31 @@ class LinkCutTree {
    if (!x) return;
    Node& a = t[x];
    M::mp(a.val, e), M::mp(a.sum, e);
-   if constexpr (NC) M::mp(a.rsum, e);
-   if (a.lazf) M::cp(a.laz, e);
-   else a.laz = e, a.lazf = true;
+   if constexpr (NC) M::mp(a.ex.rsum, e);
+   if (a.ex.lazf) M::cp(a.ex.laz, e);
+   else a.ex.laz = e, a.ex.lazf = true;
   }
  }
  [[gnu::always_inline]] void push(int x) {
   Node& a = t[x];
-  if (a.rev) reverse(a.ch[0]), reverse(a.ch[1]), a.rev = false;
+  if (a.rev) {
+   std::swap(a.ch[0], a.ch[1]);
+   reverse(a.ch[0]), reverse(a.ch[1]);
+   a.rev = false;
+  }
   if constexpr (AC)
-   if (a.lazf) apply_to(a.ch[0], a.laz), apply_to(a.ch[1], a.laz), a.lazf = false;
+   if (a.ex.lazf) apply_to(a.ch[0], a.ex.laz), apply_to(a.ch[1], a.ex.laz), a.ex.lazf = false;
  }
  // x は splay の親を持つ。回転しても x の部分木の区間は p の前の部分木と同じなので、集約は p から写す。
  [[gnu::always_inline]] void rotate(int x) {
   Node& a = t[x];
   int p = a.par, g = t[p].par, d = t[p].ch[1] == x, b = a.ch[d ^ 1];
   t[p].ch[d] = b;
-  if (b) t[b].par = p;
+  t[a.ch[d ^ 1]].par = p;
   a.ch[d ^ 1] = p, t[p].par = x, a.par = g;
   if (g > 0) t[g].ch[t[g].ch[1] == p] = x;
   a.sum = t[p].sum;
-  if constexpr (NC) a.rsum = t[p].rsum;
+  if constexpr (NC) a.ex.rsum = t[p].ex.rsum;
   pull(p);
  }
  [[gnu::always_inline]] void splay(int x) {
@@ -153,12 +169,12 @@ class LinkCutTree {
  }
  [[gnu::always_inline]] int access(int x) {
   splay(x);
-  if (int r = t[x].ch[1]; r) t[r].par = -x;
+  t[t[x].ch[1]].par = -x;
   t[x].ch[1] = 0;
   int last = x;
   while (int p = -t[x].par) {
    splay(p);
-   if (int r = t[p].ch[1]; r) t[r].par = -p;
+   t[t[p].ch[1]].par = -p;
    t[p].ch[1] = x;
    t[x].par = p;
    rotate(x);
@@ -212,13 +228,14 @@ public:
   int y = v + 1;
   splay(y);
   t[y].val = M::op(t[y].val, d);
-  pull(y);
+  if constexpr (Commutative<M>) t[y].sum = M::op(t[y].sum, d);
+  else pull(y);
  }
  // 初期の値を置く (splay しない)。
  void init_value(int v, T x) {
   int y = v + 1;
   t[y].val = x, t[y].sum = x;
-  if constexpr (NC) t[y].rsum = x;
+  if constexpr (NC) t[y].ex.rsum = x;
  }
  // 初期の木を親の向きで張る。すべて仮想辺なので splay しない (v の親 p)。
  void init_parent(int v, int p) { t[v + 1].par = -(p + 1); }
@@ -271,8 +288,7 @@ public:
   u += 1, v += 1;
   evert_(u), access(v);
   if constexpr (AC) return t[v].sum;
-  T s = t[v].ch[0] ? t[t[v].ch[0]].sum : M::ti();
-  return M::op(s, t[v].val);
+  return M::op(t[t[v].ch[0]].sum, t[v].val);
  }
  // 道 u-v への作用。
  template <bool A = AC>
@@ -443,18 +459,16 @@ class LinkCutTree<void> {
  };
  link_cut_tree_internal::Vec<Node> t;
  int n;
- [[gnu::always_inline]] void reverse(int x) {
-  if (!x) return;
-  std::swap(t[x].ch[0], t[x].ch[1]), t[x].rev ^= 1;
- }
+ // 反転は旗だけ立て、ch の入れ替えは push で行う。
+ [[gnu::always_inline]] void reverse(int x) { t[x].rev ^= 1; }
  [[gnu::always_inline]] void push(int x) {
-  if (t[x].rev) reverse(t[x].ch[0]), reverse(t[x].ch[1]), t[x].rev = false;
+  if (t[x].rev) std::swap(t[x].ch[0], t[x].ch[1]), reverse(t[x].ch[0]), reverse(t[x].ch[1]), t[x].rev = false;
  }
  [[gnu::always_inline]] void rotate(int x) {
   Node& a = t[x];
   int p = a.par, g = t[p].par, d = t[p].ch[1] == x, b = a.ch[d ^ 1];
   t[p].ch[d] = b;
-  if (b) t[b].par = p;
+  t[a.ch[d ^ 1]].par = p;
   a.ch[d ^ 1] = p, t[p].par = x, a.par = g;
   if (g > 0) t[g].ch[t[g].ch[1] == p] = x;
  }
@@ -473,12 +487,12 @@ class LinkCutTree<void> {
  }
  [[gnu::always_inline]] int access(int x) {
   splay(x);
-  if (int r = t[x].ch[1]; r) t[r].par = -x;
+  t[t[x].ch[1]].par = -x;
   t[x].ch[1] = 0;
   int last = x;
   while (int p = -t[x].par) {
    splay(p);
-   if (int r = t[p].ch[1]; r) t[r].par = -p;
+   t[t[p].ch[1]].par = -p;
    t[p].ch[1] = x;
    t[x].par = p;
    rotate(x);
