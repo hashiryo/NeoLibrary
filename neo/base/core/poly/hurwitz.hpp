@@ -210,6 +210,7 @@ template <class Conv= convolve_internal::Auto, class Crt= convolve_internal::Aut
   const int m2= std::min(2 * m, n), cnt= m2 - m;
   const int fl= std::min(int(f.size()), m2);
   std::vector<K> fg= convolve<Conv, Crt>(std::vector<K>(f.begin(), f.begin() + fl), g);
+  fg.resize(std::max(int(fg.size()), m2));  // f が短いとき、足りない次数は 0
   std::vector<K> e(m2);
   for (int i= 0; i < cnt; ++i) e[m + i]= fg[m + i];
   std::vector<K> ge= convolve<Conv, Crt>(g, e);
@@ -230,7 +231,8 @@ template <class Conv= convolve_internal::Auto, class Crt= convolve_internal::Aut
  std::vector<K> df(dl);
  for (int i= 0; i < dl; ++i) df[i]= f[i + 1];
  std::vector<K> iv= inv<Conv, Crt>(f, n - 1);
- std::vector<K> t= convolve<Conv, Crt>(df, iv);
+ std::vector<K> t= dl > 0 ? convolve<Conv, Crt>(df, iv) : std::vector<K>();
+ t.resize(std::max(int(t.size()), n - 1));  // f が定数のとき、∂f = 0 なので log = 0
  for (int k= 1; k < n; ++k) g[k]= t[k - 1];
  return g;
 }
