@@ -158,7 +158,7 @@ class LinkCutTree {
   }
   push(x);
  }
- [[gnu::always_inline]] void access(int x) {
+ [[gnu::always_inline]] int access(int x) {
   int last = 0;
   for (int y = x; y; last = y, y = -t[y].par) {
    splay(y);
@@ -168,7 +168,7 @@ class LinkCutTree {
    if (last) t[last].par = y;
    pull(y);
   }
-  splay(x);
+  return splay(x), last;
  }
  [[gnu::always_inline]] void evert_(int x) { access(x), reverse(x); }
  int root_(int x) {
@@ -191,11 +191,7 @@ class LinkCutTree {
  int lca_(int u, int v) {
   if (u == v) return u;
   access(u);
-  for (int y = v;;) {
-   splay(y);
-   if (t[y].par == 0) return y;
-   y = -t[y].par;
-  }
+  return access(v);
  }
 
 public:
@@ -320,7 +316,7 @@ class SubtreeLinkCutTree {
   }
   push(x);
  }
- [[gnu::always_inline]] void access(int x) {
+ [[gnu::always_inline]] int access(int x) {
   int last = 0;
   for (int y = x; y; last = y, y = -t[y].par) {
    splay(y);
@@ -333,7 +329,7 @@ class SubtreeLinkCutTree {
    if (last) t[last].par = y;
    pull(y);
   }
-  splay(x);
+  return splay(x), last;
  }
  [[gnu::always_inline]] void evert_(int x) { access(x), reverse(x); }
  int root_(int x) {
@@ -356,11 +352,7 @@ class SubtreeLinkCutTree {
  int lca_(int u, int v) {
   if (u == v) return u;
   access(u);
-  for (int y = v;;) {
-   splay(y);
-   if (t[y].par == 0) return y;
-   y = -t[y].par;
-  }
+  return access(v);
  }
 
 public:
@@ -457,7 +449,7 @@ class LinkCutTree<void> {
   }
   push(x);
  }
- [[gnu::always_inline]] void access(int x) {
+ [[gnu::always_inline]] int access(int x) {
   int last = 0;
   for (int y = x; y; last = y, y = -t[y].par) {
    splay(y);
@@ -466,7 +458,7 @@ class LinkCutTree<void> {
    t[y].ch[1] = last;
    if (last) t[last].par = y;
   }
-  splay(x);
+  return splay(x), last;
  }
  [[gnu::always_inline]] void evert_(int x) { access(x), reverse(x); }
  int root_(int x) {
@@ -489,11 +481,7 @@ class LinkCutTree<void> {
  int lca_(int u, int v) {
   if (u == v) return u;
   access(u);
-  for (int y = v;;) {
-   splay(y);
-   if (t[y].par == 0) return y;
-   y = -t[y].par;
-  }
+  return access(v);
  }
 
 public:
