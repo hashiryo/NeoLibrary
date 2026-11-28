@@ -282,9 +282,9 @@ class EulerTourTree {
     pull(x);
    }
   }
-  // x を先頭に回した列の根を返す。
-  int reroot(int x) {
-   const int root = root_of(x), k = rank(x);
+  // x を先頭に回した列の根を返す。root は x の木の根 (root_of(x))。
+  int reroot(int x, int root) {
+   const int k = rank(x);
    int a, b;
    split(root, k, a, b);
    const int m = merge(b, a);
@@ -402,9 +402,11 @@ class EulerTourTree {
    for (int z = y; z; z = t[z].par) pull(z);
   }
   void link(int u, int v) {
-   assert(u != v && !edge_exists(u, v) && !connected(u, v));
+   assert(u != v && !edge_exists(u, v));
+   const int r0u = root_of(u + 1), r0v = root_of(v + 1);
+   assert(r0u != r0v);  // 同じ成分の 2 頂点をつなぐと巡回列が二重になる
    const int a = alloc_edge_node(), b = alloc_edge_node();
-   const int ru = reroot(u + 1), rv = reroot(v + 1);
+   const int ru = reroot(u + 1, r0u), rv = reroot(v + 1, r0v);
    const int x = merge(merge(merge(ru, a), rv), b);
    t[x].par = 0;
    es.insert(key(u, v), Edge{u, v, a, b});
