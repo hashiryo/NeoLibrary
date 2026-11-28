@@ -31,7 +31,7 @@ template <class M> class PersistentSegmentTree {
  }();
  static inline std::size_t gc_at_= std::size_t(1) << 22;
  int n_= 0, sz_= 1, root_= 0;
- static int new_node(const Node& x) {
+ static int new_node(Node x) {
   const int i= pool_.size();
   pool_.push_back(x);
   return i;
