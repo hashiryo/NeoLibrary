@@ -191,32 +191,44 @@ inline void knuth_divmod(const u32* a, int n, const u32* b, int m, std::vector<u
 }
 
 // b は正規化済み (m 桁、末尾は BASE/2 以上)。floor(BASE^(m+K) / b) を K + 1 桁で返す。
-// I ≈ BASE^(m+K)/b を下から押さえる近似として、1 段で
-//   E = BASE^(m+K) - b I (>= 0)、I += floor(E I / BASE^(m+K))
-// と倍々に詰める (E の上の方だけが要るが、まず素直に全体を掛ける)。
-// 誤差 e = BASE^(m+K)/b - I の漸化式は e <- e^2 / (BASE^(m+K)/b) + 1 で、切り捨ての 1 が答えの
-// 1 桁分なので 1、2 に収まる。掛けるたびに切る桁を 1 段の精度 (BASE^(m+p)) にすると、切り捨ての 1 が
-// 答えの BASE^(K-p) 倍になり、e <- (b/BASE^m) e^2 + 1 になって収束しない (b/BASE^m が 1/2 以上だと不動点が無い)。
+// 2 段に分ける。
+// 1. 作業の桁で倍々に詰める。x ≈ BASE^(m+p)/b を、E = BASE^(m+p) - b x (>= 0) として
+//      x <- x BASE^p + floor(E x / BASE^m)
+//    で p = 1, 2, 4, ... と倍にする (掛けるのは m x (p + 1) と (m + p) x (p + 1) で軽い)。
+//    この形の誤差 e は e <- (b/BASE^m) e^2 + 1 で、b/BASE^m が 1/2 以上だと不動点が無く、段を重ねると
+//    少しずつ膨らむ。p が半分まで来たら 2 に移る (絶対の誤差は p 桁の尺度で 1 桁分に収まっている)。
+// 2. 答えの桁で 2 回詰める。I = x BASE^(K-p) から、E = BASE^(m+K) - b I、I += floor(E I / BASE^(m+K))。
+//    切り捨ての 1 が答えの 1 桁分にしかならないので、誤差 e は e <- e^2 / (BASE^(m+K)/b) + 1 になり、
+//    1 段で 1、2 に収まる (1 の相対誤差は BASE^(-p) 以下なので、最初の 1 段でほぼ 0 になる)。
+//    こちらは全体の積を 2 回払うが、2 段で済む。
 inline std::vector<u32> reciprocal(const u32* b, int m, int K) {
- std::vector<u32> dividend(m + 2, 0), I, rr;
+ std::vector<u32> dividend(m + 2, 0), x, rr;
  dividend[m + 1]= 1;  // BASE^(m+1)
- knuth_divmod(dividend.data(), m + 2, b, m, I, rr);  // I = floor(BASE^(m+1) / b) (2 桁)
- const std::vector<u32> bb(b, b + m), target= [&] {
-  std::vector<u32> t(m + K + 1, 0);
-  t[m + K]= 1;
-  return t;
- }();
- I.insert(I.begin(), K - 1, 0);  // I = I BASE^(K-1)
+ knuth_divmod(dividend.data(), m + 2, b, m, x, rr);  // x = floor(BASE^(m+1) / b) (2 桁)
+ const std::vector<u32> bb(b, b + m);
  int p= 1;
- while (p < K + 1) {
+ while (2 * p < K + 1) {
+  std::vector<u32> E(m + p + 1, 0), prod= mul(bb, x);
+  E[m + p]= 1;
+  sub_abs_inplace(E, prod);  // E = BASE^(m+p) - b x >= 0
+  std::vector<u32> T= mul(E, x);
+  T.erase(T.begin(), T.begin() + std::min<int>(m, int(T.size())));
+  x.insert(x.begin(), p, 0);
+  x= add_abs(x, T);
+  p*= 2;
+ }
+ std::vector<u32> I= x;
+ I.insert(I.begin(), K - p, 0);  // I = x BASE^(K-p) (K >= p)
+ std::vector<u32> target(m + K + 1, 0);
+ target[m + K]= 1;
+ for (int it= 0; it < 2; ++it) {
   std::vector<u32> prod= mul(bb, I);
+  assert(cmp_abs(target, prod) >= 0);  // I は真の値を超えない
   std::vector<u32> E= target;
-  assert(cmp_abs(E, prod) >= 0);  // I は真の値を超えない
-  sub_abs_inplace(E, prod);       // E = BASE^(m+K) - b I
+  sub_abs_inplace(E, prod);
   std::vector<u32> W= mul(E, I);
   W.erase(W.begin(), W.begin() + std::min<int>(m + K, int(W.size())));
   I= add_abs(I, W);
-  p*= 2;
  }
  trim(I);
  return I;
