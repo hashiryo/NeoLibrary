@@ -27,6 +27,9 @@ public:
    std::vector<int> l;
    for(int i= n; i--;)
     if(s.on(ps[i])) l.push_back(i);
+   // 端点は必ず入れる。EPS でまとめた代表点は、正規化した sgn の on の判定から外れることがある。
+   l.push_back(vertex(s.p)), l.push_back(vertex(s.q));
+   std::sort(l.begin(), l.end()), l.erase(std::unique(l.begin(), l.end()), l.end());
    std::sort(l.begin(), l.end(), [&](int i, int j) { return ps[i] < ps[j]; });
    for(int i= l.size(); --i;) {
     auto [u, v]= std::minmax(l[i], l[i - 1]);
@@ -46,6 +49,9 @@ public:
   auto cm= [&](int i, int j) { return ac(qs[i], qs[j]); };
   std::vector<int> nxi(m), pri(m);
   for(int v= n; v--;) {
+   // 辺の無い頂点は飛ばす。ここで g[pos[v] - 1] を触ると、直前の頂点の並びを壊して
+   // e の巡回が閉じなくなる。
+   if(pos[v] == pos[v + 1]) continue;
    std::sort(g.begin() + pos[v], g.begin() + pos[v + 1], cm);
    for(int i= pos[v] + 1; i < pos[v + 1]; ++i) nxi[g[i - 1]]= g[i], pri[g[i]]= g[i - 1];
    nxi[g[pos[v + 1] - 1]]= g[pos[v]], pri[g[pos[v]]]= g[pos[v + 1] - 1];
