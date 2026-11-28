@@ -18,16 +18,16 @@
 // 計算量は O((N + Q) sqrt(Q) T) で、T は add か erase 1 回の計算量。ヒルベルト順も同じ程度で、定数が小さいことが多い。
 namespace mo_internal {
 // ヒルベルト曲線の順序。x と y は [0, 2^lg) の整数で、lg は座標の bit 数。曲線に沿って並べたときの位置を返す。
-// 標準の xy2d (Hilbert curve) をそのまま使う。s は今見ている bit、n は座標の上限 2^lg。
+// 標準の xy2d (Hilbert curve) をそのまま使う。s は今見ている bit、side は座標の上限 2^lg。
 [[gnu::always_inline]] inline unsigned long long hilbert_order(unsigned x, unsigned y, int lg) {
  if(lg <= 0) return 0;
- const unsigned n= 1u << (lg - 1);
+ const unsigned side= 1u << lg;
  unsigned long long d= 0;
- for(unsigned s= n; s; s>>= 1) {
+ for(unsigned s= side >> 1; s; s>>= 1) {
   unsigned rx= (x & s) != 0, ry= (y & s) != 0;
   d+= (unsigned long long)s * s * ((3 * rx) ^ ry);
   if(ry == 0) {
-   if(rx) x= (n << 1) - 1 - x, y= (n << 1) - 1 - y;
+   if(rx) x= side - 1 - x, y= side - 1 - y;
    std::swap(x, y);
   }
  }
