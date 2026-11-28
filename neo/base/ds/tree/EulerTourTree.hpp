@@ -198,7 +198,7 @@ class EulerTourTree {
    if (t[a].size > t[b].size) {
     push(a);
     const int r = merge(t[a].r, b);
-    t[a].r = r, t[r].par = a;  // r = 0 のときは 0 番の節に書く (0 番の par は読まない)
+    t[a].r = r, t[r].par = a;  // b は空でないので r は必ず非 0
     pull(a);
     if (t[a].l && t[t[a].l].size * 4 >= t[r].size) return a;
     push(r);
@@ -334,7 +334,8 @@ class EulerTourTree {
   }
 
  public:
-  explicit EulerTourTree(int n_): t(std::size_t(3 * n_ + 8)), n(n_) {
+  explicit EulerTourTree(int n_): t(std::size_t(n_ + 1)), n(n_) {
+   t.reserve(std::size_t(3 * n_ + 8));  // 森なら辺の節は 2(n-1) 個まで
    for (int v = 1; v <= n; ++v) reset(v);
   }
   // 辺の列 (森でもよい) と頂点の値から O(N) で組む。頂点の節は 1..N、辺の節は N+1 から。
@@ -376,6 +377,7 @@ class EulerTourTree {
       if (const int in = snode.back(); in != -1) reset(in), seq.push_back(in);
       su.pop_back(), sp.pop_back(), se.pop_back(), snode.pop_back();
      } else {
+      assert(!seen[v]);  // 入力は森 (閉路も重複辺も無い)
       seen[v] = 1;
       const int node = base + 2 * ee + dd;
       reset(node);
@@ -400,7 +402,7 @@ class EulerTourTree {
    for (int z = y; z; z = t[z].par) pull(z);
   }
   void link(int u, int v) {
-   assert(u != v && !edge_exists(u, v));
+   assert(u != v && !edge_exists(u, v) && !connected(u, v));
    const int a = alloc_edge_node(), b = alloc_edge_node();
    const int ru = reroot(u + 1), rv = reroot(v + 1);
    const int x = merge(merge(merge(ru, a), rv), b);
@@ -418,18 +420,18 @@ class EulerTourTree {
    const int root = root_of(a);
    const int ra = rank(a), rb = rank(b);
    int p1, p2, p3, p4, p5, mid;
-   if (ra > rb) {  // [.. b .. v の側 .. a ..]
-    split(root, rb, p1, p2);          // p1: u の側の前, p2: b から
-    split(p2, 1, mid, p3);            // mid = b
-    split(p3, ra - rb - 1, mid, p4);  // mid = v の側
-    split(p4, 1, mid, p5);            // mid = a
-    static_cast<void>(merge(p5, p1));
-   } else {  // [.. a .. u の側 .. b ..] で、v の側は折り返し
+   if (ra > rb) {  // [.. b .. u の側 .. a ..] で、v の側は p1 と p5 に分かれる
+    split(root, rb, p1, p2);           // p1: v の側の前半, p2: b から
+    split(p2, 1, mid, p3);             // mid = b
+    split(p3, ra - rb - 1, mid, p4);   // mid = u の側 (切れて 1 つの木になる)
+    split(p4, 1, mid, p5);             // mid = a
+    static_cast<void>(merge(p5, p1));  // v の側を継ぎ直す
+   } else {  // [.. a .. v の側 .. b ..] で、u の側は p1 と p5 に分かれる
     split(root, ra, p1, p2);
-    split(p2, 1, mid, p3);            // mid = a
-    split(p3, rb - ra - 1, mid, p4);  // mid = u の側
-    split(p4, 1, mid, p5);            // mid = b
-    static_cast<void>(merge(p5, p1));
+    split(p2, 1, mid, p3);             // mid = a
+    split(p3, rb - ra - 1, mid, p4);   // mid = v の側 (切れて 1 つの木になる)
+    split(p4, 1, mid, p5);             // mid = b
+    static_cast<void>(merge(p5, p1));  // u の側を継ぎ直す
    }
    free_edge_node(a), free_edge_node(b);
   }
