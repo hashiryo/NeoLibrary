@@ -9,6 +9,11 @@
 namespace half_plane_intersection_internal {
 // 向きの半周。atan2 の (-pi, pi] の代わりに、[0, 2pi) の順に並べるための 0/1。
 template <class K> int half(const Point<K>& d) { return sgn(d.y) < 0 || (sgn(d.y) == 0 && sgn(d.x) < 0); }
+// 向きの順。同じ半周なら cross > 0 が前。
+template <class K> bool angle_less(const Point<K>& a, const Point<K>& b) {
+ if(int ha= half(a), hb= half(b); ha != hb) return ha < hb;
+ return sgn(cross(a, b)) > 0;
+}
 // 同じ向きか (平行で、向きが逆でない)。
 template <class K> bool same_direction(const Line<K>& l, const Line<K>& m) { return !sgn(cross(l.d, m.d)) && sgn(dot(l.d, m.d)) > 0; }
 // 直線 l の右側にあるか。
@@ -20,30 +25,36 @@ template <class K> Point<K> cross_point(const Line<K>& l, const Line<K>& m) {
  K a= cross(l.d, m.d), b= cross(m.p - l.p, m.d);
  return l.p + b / a * l.d;
 }
-}
-template <class K> Convex<K> half_plane_intersection(std::vector<Line<K>> ls) {
- using P= Point<K>;
- using L= Line<K>;
- std::sort(ls.begin(), ls.end(), [](const L& a, const L& b) {
-  if(int ha= half_plane_intersection_internal::half(a.d), hb= half_plane_intersection_internal::half(b.d); ha != hb) return ha < hb;
-  return sgn(cross(a.d, b.d)) > 0;
- });
- std::vector<L> us;
- for(const L& l: ls) {
-  if(!us.empty() && half_plane_intersection_internal::same_direction(us.back(), l)) {
-   if(half_plane_intersection_internal::tighter(l, us.back())) us.back()= l;
+// 向きの順に並んだ半平面。隣り合う同じ向きはきつい方だけ残す。
+template <class K> std::vector<Line<K>> merge_same_direction(std::vector<Line<K>> ls) {
+ std::vector<Line<K>> us;
+ for(const auto& l: ls) {
+  if(!us.empty() && same_direction(us.back(), l)) {
+   if(tighter(l, us.back())) us.back()= l;
   } else us.push_back(l);
  }
+ return us;
+}
+// 向きの順に並んだ半平面の共通部分。両端から要らない半平面を落とす。
+template <class K> Convex<K> solve(std::vector<Line<K>> ls) {
+ using P= Point<K>;
+ using L= Line<K>;
+ ls= merge_same_direction(std::move(ls));
  std::deque<L> q;
- for(const L& l: us) {
-  while(q.size() >= 2 && half_plane_intersection_internal::on_right(l, half_plane_intersection_internal::cross_point(q[q.size() - 2], q.back()))) q.pop_back();
-  while(q.size() >= 2 && half_plane_intersection_internal::on_right(l, half_plane_intersection_internal::cross_point(q[0], q[1]))) q.pop_front();
+ for(const L& l: ls) {
+  while(q.size() >= 2 && on_right(l, cross_point(q[q.size() - 2], q.back()))) q.pop_back();
+  while(q.size() >= 2 && on_right(l, cross_point(q[0], q[1]))) q.pop_front();
   q.push_back(l);
  }
- while(q.size() >= 3 && half_plane_intersection_internal::on_right(q[0], half_plane_intersection_internal::cross_point(q[q.size() - 2], q.back()))) q.pop_back();
- while(q.size() >= 3 && half_plane_intersection_internal::on_right(q.back(), half_plane_intersection_internal::cross_point(q[0], q[1]))) q.pop_front();
+ while(q.size() >= 3 && on_right(q[0], cross_point(q[q.size() - 2], q.back()))) q.pop_back();
+ while(q.size() >= 3 && on_right(q.back(), cross_point(q[0], q[1]))) q.pop_front();
  if(q.size() < 3) return Convex<K>();
  std::vector<P> ps;
- for(int i= q.size(); i--;) ps.emplace_back(half_plane_intersection_internal::cross_point(q[i], q[(i + 1) % q.size()]));
+ for(int i= q.size(); i--;) ps.emplace_back(cross_point(q[i], q[(i + 1) % q.size()]));
  return Convex<K>(ps);
+}
+}
+template <class K> Convex<K> half_plane_intersection(std::vector<Line<K>> ls) {
+ std::sort(ls.begin(), ls.end(), [](const Line<K>& a, const Line<K>& b) { return half_plane_intersection_internal::angle_less(a.d, b.d); });
+ return half_plane_intersection_internal::solve(std::move(ls));
 }
