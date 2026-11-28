@@ -1,9 +1,9 @@
 #pragma once
 // 森の辺を切り貼りしながら、連結成分の積と、辺 (v, p) について p を親とした v の部分木の積を答える (Euler Tour Tree)。
-// 木を、頂点の節と辺ごとの 2 つの向きの節を並べた巡回列で持ち、splay 木で分ける。部分木は p->v の節から
-// v->p の節までで、その区間に作用を遅延で当てる。M はモノイド (using T、static T ti()、static T op(T, T)) で、
-// 作用は区間の頂点の数を受ける mp(T&, E, int) と cp(E&, E) を持つもの (部分木への加算のような使い方)。
-// 記録は algo-notes の notes/dynamic-tree.md。
+// 木を、頂点の節と辺ごとの 2 つの向きの節を並べた巡回列で持ち、大きさで釣り合いを取る木 (WBT) で分ける。優先度は
+// 持たず、継ぐときは大きい側の木へ降りる。部分木は p->v の節から v->p の節までで、その区間に作用を遅延で当てる。
+// M はモノイド (using T、static T ti()、static T op(T, T)) で、作用は区間の頂点の数を受ける mp(T&, E, int) と
+// cp(E&, E) を持つもの (部分木への加算のような使い方)。記録は algo-notes の notes/dynamic-tree.md。
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -70,7 +70,6 @@ class OpenTable {
   t[h].k = TOMB, --live;
  }
 };
-struct Empty {};
 template <class M, bool = Action<M>>
 struct ActionOf {
  struct type {};
@@ -122,21 +121,24 @@ struct Alloc {
 };
 template <class T>
 using Vec = std::vector<T, Alloc<T>>;
-
+// 作用があるときだけ遅延を持つ。空のときは節を太らせない。
+template <class M, bool AC>
+struct Extra {};
+template <class M>
+struct Extra<M, true> {
+ typename ActionOf<M>::type laz{};
+ bool laz_f = false;
+};
 template <class M>
 struct Node {
  using T = typename M::T;
  using E = typename ActionOf<M>::type;
  static constexpr bool AC = ActionLen<M>;
- int ch[2] = {0, 0};
- int par = 0;
- int cnt = 0;  // splay の部分木にある頂点の節の数
  T val = M::ti(), sum = M::ti();
- [[no_unique_address]] std::conditional_t<AC, E, Empty> laz;
- [[no_unique_address]] std::conditional_t<AC, bool, Empty> lazf;
- Node() {
-  if constexpr (AC) lazf = false;
- }
+ int l = 0, r = 0, par = 0;
+ int size = 0;  // 部分木の要素の数
+ int cnt = 0;   // 部分木の頂点の節の数
+ [[no_unique_address]] Extra<M, AC> ex;
 };
 }  // namespace euler_tour_tree_internal
 
@@ -163,12 +165,9 @@ class EulerTourTree {
   }
   [[gnu::always_inline]] void pull(int x) {
    Node& a = t[x];
-   int l = a.ch[0], r = a.ch[1];
-   a.cnt = (l ? t[l].cnt : 0) + (x <= n ? 1 : 0) + (r ? t[r].cnt : 0);
-   T s = a.val;
-   if (l) s = M::op(t[l].sum, s);
-   if (r) s = M::op(s, t[r].sum);
-   a.sum = s;
+   a.size = t[a.l].size + 1 + t[a.r].size;
+   a.cnt = t[a.l].cnt + (x <= n ? 1 : 0) + t[a.r].cnt;
+   a.sum = M::op(M::op(t[a.l].sum, a.val), t[a.r].sum);
   }
   template <bool A = AC>
   [[gnu::always_inline]] void apply_to(int x, const E& e) {
@@ -177,94 +176,141 @@ class EulerTourTree {
     Node& a = t[x];
     if (x <= n) M::mp(a.val, e, 1);
     M::mp(a.sum, e, a.cnt);
-    if (a.lazf) M::cp(a.laz, e);
-    else a.laz = e, a.lazf = true;
+    if (a.ex.laz_f) M::cp(a.ex.laz, e);
+    else a.ex.laz = e, a.ex.laz_f = true;
    }
   }
   [[gnu::always_inline]] void push(int x) {
    if constexpr (AC)
-    if (t[x].lazf) apply_to(t[x].ch[0], t[x].laz), apply_to(t[x].ch[1], t[x].laz), t[x].lazf = false;
+    if (t[x].ex.laz_f) apply_to(t[x].l, t[x].ex.laz), apply_to(t[x].r, t[x].ex.laz), t[x].ex.laz_f = false;
   }
-  [[gnu::always_inline]] void rotate(int x) {
-   Node& a = t[x];
-   int p = a.par, g = t[p].par, d = t[p].ch[1] == x, b = a.ch[d ^ 1];
-   t[p].ch[d] = b;
-   if (b) t[b].par = p;
-   a.ch[d ^ 1] = p, t[p].par = x, a.par = g;
-   if (g) t[g].ch[t[g].ch[1] == p] = x;
-   a.cnt = t[p].cnt, a.sum = t[p].sum;
-   pull(p);
-  }
-  // x を、親が goal になるまで回す。goal が 0 なら木の根まで。
-  [[gnu::always_inline]] void splay_to(int x, int goal) {
-   for (int p; (p = t[x].par) != goal;) {
-    int g = t[p].par;
-    if (g == goal) {
-     push(p), push(x), rotate(x);
-     break;
-    }
-    push(g), push(p), push(x);
-    if ((t[g].ch[1] == p) == (t[p].ch[1] == x)) rotate(p), rotate(x);
-    else rotate(x), rotate(x);
-   }
+  // 根まで登って、上から遅延を配る。
+  void push_path(int x) {
+   if (const int p = t[x].par; p) push_path(p);
    push(x);
   }
-  [[gnu::always_inline]] void splay(int x) { splay_to(x, 0); }
-  // x より前を切り離す。x の木は x から始まる。
-  [[gnu::always_inline]] int split_before(int x) {
-   splay(x);
-   int l = t[x].ch[0];
-   if (l) t[l].par = 0;
-   t[x].ch[0] = 0;
-   pull(x);
-   return l;
-  }
-  [[gnu::always_inline]] int split_after(int x) {
-   splay(x);
-   int r = t[x].ch[1];
-   if (r) t[r].par = 0;
-   t[x].ch[1] = 0;
-   pull(x);
-   return r;
-  }
-  // a の列の後ろに b の列を継ぐ。a と b は別の木。
-  [[gnu::always_inline]] int merge(int a, int b) {
+  // 二つの列を継ぐ。a と b はそれぞれの木の根で、大きい側の木へ降りる。釣り合いは、降りなかった側の子と
+  // 継いだ側を比べ、継いだ側が 4 倍を超えたら継いだ側の根を持ち上げる回転 1 回で直す (列の WBT の join と同じ)。
+  int merge(int a, int b) {
    if (!a) return b;
    if (!b) return a;
-   int x = a;
+   if (t[a].size > t[b].size) {
+    push(a);
+    const int r = merge(t[a].r, b);
+    t[a].r = r, t[r].par = a;  // r = 0 のときは 0 番の節に書く (0 番の par は読まない)
+    pull(a);
+    if (t[a].l && t[t[a].l].size * 4 >= t[r].size) return a;
+    push(r);
+    const int b2 = t[r].l;
+    t[a].r = b2;
+    if (b2) t[b2].par = a;
+    t[r].par = t[a].par, t[a].par = r;
+    pull(a), t[r].l = a, pull(r);
+    return r;
+   }
+   push(b);
+   const int l = merge(a, t[b].l);
+   t[b].l = l, t[l].par = b;
+   pull(b);
+   if (t[b].r && t[t[b].r].size * 4 >= t[l].size) return b;
+   push(l);
+   const int b2 = t[l].r;
+   t[b].l = b2;
+   if (b2) t[b2].par = b;
+   t[l].par = t[b].par, t[b].par = l;
+   pull(b), t[l].r = b, pull(l);
+   return l;
+  }
+  // 列 x を、先頭の k 個と残りに分ける。
+  void split(int x, int k, int& a, int& b) {
+   if (!x) return a = 0, b = 0, void();
    push(x);
-   while (t[x].ch[1]) x = t[x].ch[1], push(x);
-   splay(x);
-   t[x].ch[1] = b, t[b].par = x;
-   pull(x);
+   const int ls = t[t[x].l].size;
+   if (k <= ls) {
+    split(t[x].l, k, a, t[x].l);
+    if (t[x].l) t[t[x].l].par = x;
+    t[x].par = 0;
+    b = x;
+    pull(x);
+   } else {
+    split(t[x].r, k - ls - 1, t[x].r, b);
+    if (t[x].r) t[t[x].r].par = x;
+    t[x].par = 0;
+    a = x;
+    pull(x);
+   }
+  }
+  // 列の先頭から x より前の要素の数。
+  int rank(int x) const {
+   int r = t[t[x].l].size;
+   for (int y = x; t[y].par;) {
+    const int p = t[y].par;
+    if (t[p].r == y) r += t[t[p].l].size + 1;
+    y = p;
+   }
+   return r;
+  }
+  int root_of(int x) const {
+   while (t[x].par) x = t[x].par;
    return x;
   }
-  // 巡回列を x から始まる形に回す。
-  [[gnu::always_inline]] int reroot(int x) {
-   int l = split_before(x);
-   return merge(x, l);
+  // 部分木 x の中の位置 [l, r) の積。
+  T range_sum(int x, int l, int r) {
+   if (!x || l >= r) return M::ti();
+   if (l == 0 && r == t[x].size) return t[x].sum;
+   push(x);
+   const int ls = t[t[x].l].size;
+   T s = M::ti();
+   if (l < ls) s = range_sum(t[x].l, l, std::min(r, ls));
+   if (l <= ls && ls < r) s = M::op(s, t[x].val);
+   if (r > ls + 1) s = M::op(s, range_sum(t[x].r, std::max(l, ls + 1) - ls - 1, r - ls - 1));
+   return s;
   }
-  int root_of(int x) {
-   splay(x);
-   int y = x;
-   push(y);
-   while (t[y].ch[0]) y = t[y].ch[0], push(y);
-   splay(y);
-   return y;
+  // 部分木 x の中の位置 [l, r) に作用を当てる。
+  template <bool A = AC>
+  void range_apply(int x, int l, int r, const E& e) {
+   if constexpr (A) {
+    if (!x || l >= r) return;
+    if (l == 0 && r == t[x].size) return apply_to(x, e), void();
+    push(x);
+    const int ls = t[t[x].l].size;
+    if (l < ls) range_apply(t[x].l, l, std::min(r, ls), e);
+    if (l <= ls && ls < r)
+     if (x <= n) M::mp(t[x].val, e, 1);
+    if (r > ls + 1) range_apply(t[x].r, std::max(l, ls + 1) - ls - 1, r - ls - 1, e);
+    pull(x);
+   }
   }
-  [[gnu::always_inline]] void reset(int x) {
+  // x を先頭に回した列の根を返す。
+  int reroot(int x) {
+   const int root = root_of(x), k = rank(x);
+   int a, b;
+   split(root, k, a, b);
+   const int m = merge(b, a);
+   t[m].par = 0;
+   return m;
+  }
+  // v から p へ向かう節と p から v へ向かう節。辺は (u,v) の向きで覚えてある。
+  std::pair<int, int> edge_nodes(int v, int p) const {
+   const Edge* found = es.find(key(v, p));
+   assert(found);
+   if (found->u == v) return {found->a, found->b};
+   return {found->b, found->a};
+  }
+  void reset(int x) {
    Node& a = t[x];
-   a.ch[0] = a.ch[1] = a.par = 0, a.cnt = 0, a.val = M::ti(), a.sum = M::ti();
-   if constexpr (AC) a.lazf = false;
+   a.l = a.r = a.par = 0, a.size = 1, a.cnt = x <= n ? 1 : 0;
+   a.val = M::ti(), a.sum = a.val;
+   if constexpr (AC) a.ex.laz_f = false;
   }
   int alloc_edge_node() {
    if (!free_nodes.empty()) {
-    int x = free_nodes.back();
+    const int x = free_nodes.back();
     free_nodes.pop_back();
     reset(x);
     return x;
    }
-   int x = int(t.size());
+   const int x = int(t.size());
    t.emplace_back();
    reset(x);
    return x;
@@ -273,165 +319,144 @@ class EulerTourTree {
    reset(x);
    free_nodes.push_back(x);
   }
-  // v から p へ向かう節と p から v へ向かう節。辺は (u,v) の向きで覚えてある。
-  // 列の [l, r) から平衡な splay 木を組む。根を返す。
+  // seq の [l, r) から、区間の中央を根にした釣り合った木を組む。根を返す。
   int build_balanced(const std::vector<int>& seq, int l, int r) {
    if (l >= r) return 0;
    const int m = (l + r) >> 1, x = seq[m];
    const int L = build_balanced(seq, l, m), R = build_balanced(seq, m + 1, r);
-   t[x].ch[0] = L, t[x].ch[1] = R;
+   t[x].l = L, t[x].r = R;
    if (L) t[L].par = x;
    if (R) t[R].par = x;
    t[x].par = 0;
    pull(x);
    return x;
   }
-  std::pair<int, int> edge_nodes(int v, int p) const {
-   const Edge* found = es.find(key(v, p));
-   assert(found);
-   const Edge& e = *found;
-   if (e.u == v) return {e.a, e.b};
-   return {e.b, e.a};
-  }
 
  public:
   explicit EulerTourTree(int n_): t(std::size_t(3 * n_ + 8)), n(n_) {
-   for (int v = 1; v <= n; ++v) t[v].cnt = 1;
+   for (int v = 1; v <= n; ++v) reset(v);
   }
- // 辺の列 (森でもよい) と頂点の値から O(N) で組む。頂点の節は 1..N、辺の節は N+1 から。
- EulerTourTree(int n_, const std::vector<std::array<int, 2>>& edges, const std::vector<T>& a) {
-  n = n_;
-  const int E = int(edges.size()), base = n + 1;
-  t.resize(std::size_t(n + 2 * E + 2));
-  for (int v = 1; v <= n; ++v) t[v].cnt = 1, t[v].val = a[v - 1], t[v].sum = a[v - 1];
-  std::vector<int> head(n, -1), to(2 * E), nxt(2 * E), eid(2 * E), dir(2 * E);
-  int ec = 0;
-  auto add_arc = [&](int u, int v, int e, int d) { to[ec] = v, nxt[ec] = head[u], eid[ec] = e, dir[ec] = d, head[u] = ec++; };
-  for (int e = 0; e < E; ++e) {
-   const int u = edges[e][0], v = edges[e][1];
-   add_arc(u, v, e, 0), add_arc(v, u, e, 1);
-   es.insert(key(u, v), Edge{u, v, base + 2 * e, base + 2 * e + 1});
-  }
-  std::vector<char> seen(n, 0);
-  std::vector<int> seq;
-  seq.reserve(std::size_t(n + 2 * E));
-  std::vector<int> su, sp, se, snode;
-  for (int root = 0; root < n; ++root) {
-   if (seen[root]) continue;
-   const int start = int(seq.size());
-   seen[root] = 1, seq.push_back(root + 1);
-   su.push_back(root), sp.push_back(-1), se.push_back(head[root]), snode.push_back(-1);
-   while (!su.empty()) {
-    const int u = su.back(), p = sp.back();
-    int& e = se.back();
-    int v = -1, ee = -1, dd = -1;
-    while (e != -1) {
-     const int idx = e;
-     e = nxt[idx];
-     if (to[idx] != p) {
-      v = to[idx], ee = eid[idx], dd = dir[idx];
-      break;
+  // 辺の列 (森でもよい) と頂点の値から O(N) で組む。頂点の節は 1..N、辺の節は N+1 から。
+  EulerTourTree(int n_, const std::vector<std::array<int, 2>>& edges, const std::vector<T>& a) {
+   n = n_;
+   const int E = int(edges.size()), base = n + 1;
+   t.resize(std::size_t(n + 2 * E + 2));
+   for (int v = 1; v <= n; ++v) reset(v), t[v].val = a[v - 1], t[v].sum = a[v - 1];
+   std::vector<int> head(n, -1), to(2 * E), nxt(2 * E), eid(2 * E), dir(2 * E);
+   int ec = 0;
+   auto add_arc = [&](int u, int v, int e, int d) { to[ec] = v, nxt[ec] = head[u], eid[ec] = e, dir[ec] = d, head[u] = ec++; };
+   for (int e = 0; e < E; ++e) {
+    const int u = edges[e][0], v = edges[e][1];
+    add_arc(u, v, e, 0), add_arc(v, u, e, 1);
+    es.insert(key(u, v), Edge{u, v, base + 2 * e, base + 2 * e + 1});
+   }
+   std::vector<char> seen(n, 0);
+   std::vector<int> seq;
+   seq.reserve(std::size_t(n + 2 * E));
+   std::vector<int> su, sp, se, snode;
+   for (int root = 0; root < n; ++root) {
+    if (seen[root]) continue;
+    const int start = int(seq.size());
+    seen[root] = 1, seq.push_back(root + 1);
+    su.push_back(root), sp.push_back(-1), se.push_back(head[root]), snode.push_back(-1);
+    while (!su.empty()) {
+     const int u = su.back(), p = sp.back();
+     int& e = se.back();
+     int v = -1, ee = -1, dd = -1;
+     while (e != -1) {
+      const int idx = e;
+      e = nxt[idx];
+      if (to[idx] != p) {
+       v = to[idx], ee = eid[idx], dd = dir[idx];
+       break;
+      }
+     }
+     if (v == -1) {
+      if (const int in = snode.back(); in != -1) seq.push_back(in);
+      su.pop_back(), sp.pop_back(), se.pop_back(), snode.pop_back();
+     } else {
+      seen[v] = 1;
+      const int node = base + 2 * ee + dd;
+      reset(node);
+      seq.push_back(node), seq.push_back(v + 1);
+      su.push_back(v), sp.push_back(u), se.push_back(head[v]), snode.push_back(base + 2 * ee + (dd ^ 1));
      }
     }
-    if (v == -1) {
-     if (const int in = snode.back(); in != -1) seq.push_back(in);
-     su.pop_back(), sp.pop_back(), se.pop_back(), snode.pop_back();
-    } else {
-     seen[v] = 1;
-     const int node = base + 2 * ee + dd;
-     seq.push_back(node), seq.push_back(v + 1);
-     su.push_back(v), sp.push_back(u), se.push_back(head[v]), snode.push_back(base + 2 * ee + (dd ^ 1));
-    }
+    build_balanced(seq, start, int(seq.size()));
    }
-   build_balanced(seq, start, int(seq.size()));
   }
- }
   int size() const { return n; }
   bool edge_exists(int u, int v) const { return es.contains(key(u, v)); }
   T get(int v) {
-   splay(v + 1);
-   return t[v + 1].val;
+   const int x = v + 1;
+   push_path(x);
+   return t[x].val;
   }
   void set(int v, T x) {
-   int y = v + 1;
-   splay(y);
+   const int y = v + 1;
+   push_path(y);
    t[y].val = x;
-   pull(y);
+   for (int z = y; z; z = t[z].par) pull(z);
   }
   void link(int u, int v) {
    assert(u != v && !edge_exists(u, v));
-   int a = alloc_edge_node(), b = alloc_edge_node();
-   int ru = reroot(u + 1), rv = reroot(v + 1);
-   int x = merge(merge(merge(ru, a), rv), b);
-   static_cast<void>(x);
+   const int a = alloc_edge_node(), b = alloc_edge_node();
+   const int ru = reroot(u + 1), rv = reroot(v + 1);
+   const int x = merge(merge(merge(ru, a), rv), b);
+   t[x].par = 0;
    es.insert(key(u, v), Edge{u, v, a, b});
   }
   void cut(int u, int v) {
-   const Edge* hit = es.find(key(u, v));
-   assert(hit);
-   Edge e = *hit;
+   const Edge* found = es.find(key(u, v));
+   assert(found);
+   const Edge e = *found;
    es.erase(key(u, v));
    int a, b;
    if (e.u == u) a = e.a, b = e.b;
    else a = e.b, b = e.a;
-   reroot(a);  // 列を a から始め、a の次に v の側、その次に b が来る形にする
-   splay(b);
-   splay_to(a, b);
-   const bool right = (t[b].ch[1] == a);
-   if (right) {  // [L] b [v の側] a [Q]
-    int l = t[b].ch[0], q = t[a].ch[1], v1 = t[a].ch[0];
-    if (v1) t[v1].par = 0;
-    if (q) t[q].par = 0;
-    if (l) t[l].par = 0;
-    t[a].ch[0] = t[a].ch[1] = 0;
-    t[b].ch[0] = 0, t[b].ch[1] = a;  // {b, a} だけ残して捨てる
-    static_cast<void>(merge(q, l));
-   } else {  // [X] a [Y] b [R]: v の側は R + X、u の側は Y
-    int x = t[a].ch[0], y = t[a].ch[1], rr = t[b].ch[1];
-    if (x) t[x].par = 0;
-    if (y) t[y].par = 0;
-    if (rr) t[rr].par = 0;
-    t[a].ch[0] = t[a].ch[1] = 0;
-    t[b].ch[1] = 0, t[b].ch[0] = a;
-    static_cast<void>(merge(rr, x));
-    static_cast<void>(y);
+   const int root = root_of(a);
+   const int ra = rank(a), rb = rank(b);
+   int p1, p2, p3, p4, p5, mid;
+   if (ra > rb) {  // [.. b .. v の側 .. a ..]
+    split(root, rb, p1, p2);          // p1: u の側の前, p2: b から
+    split(p2, 1, mid, p3);            // mid = b
+    split(p3, ra - rb - 1, mid, p4);  // mid = v の側
+    split(p4, 1, mid, p5);            // mid = a
+    static_cast<void>(merge(p5, p1));
+   } else {  // [.. a .. u の側 .. b ..] で、v の側は折り返し
+    split(root, ra, p1, p2);
+    split(p2, 1, mid, p3);            // mid = a
+    split(p3, rb - ra - 1, mid, p4);  // mid = u の側
+    split(p4, 1, mid, p5);            // mid = b
+    static_cast<void>(merge(p5, p1));
    }
    free_edge_node(a), free_edge_node(b);
   }
   bool connected(int u, int v) { return root_of(u + 1) == root_of(v + 1); }
   // 頂点 v の木の全体の積。
   T prod_tree(int v) {
-   int x = v + 1;
-   splay(x);
+   const int x = root_of(v + 1);
    return t[x].sum;
   }
   // 木の全体の頂点の数。
   int tree_size(int v) {
-   int x = v + 1;
-   splay(x);
+   const int x = root_of(v + 1);
    return t[x].cnt;
   }
   // 木の全体への作用。
   template <bool A = AC>
   void apply_tree(int v, const E& e) {
    static_assert(A, "\"apply_tree\" is not available");
-   if constexpr (A) splay(v + 1), apply_to(v + 1, e);
+   if constexpr (A) apply_to(root_of(v + 1), e);
   }
   // 辺 (v, p) について、p を親とした v の部分木の積。v と p は辺で結ばれていること。
   T prod_subtree(int v, int p) {
    auto [a, b] = edge_nodes(v, p);  // a: v->p, b: p->v
-   splay(b);
-   splay_to(a, b);
-   const bool right = (t[b].ch[1] == a);
-   if (right) {  // [L] b [v の側] a [Q]
-    int l = t[a].ch[0];
-    return l ? t[l].sum : M::ti();
-   }
-   // [X] a [Y] b [R]: v の側は R + X
-   T s = M::ti();
-   if (int x = t[b].ch[1]; x) s = t[x].sum;
-   if (int x = t[a].ch[0]; x) s = M::op(s, t[x].sum);
-   return s;
+   const int root = root_of(b);
+   const int ra = rank(a), rb = rank(b);
+   if (ra > rb) return range_sum(root, rb + 1, ra);
+   T s = range_sum(root, rb + 1, t[root].size);
+   return M::op(s, range_sum(root, 0, ra));
   }
   // 辺 (v, p) について、p を親とした v の部分木への作用。
   template <bool A = AC>
@@ -439,17 +464,10 @@ class EulerTourTree {
    static_assert(A, "\"apply_subtree\" is not available");
    if constexpr (A) {
     auto [a, b] = edge_nodes(v, p);  // a: v->p, b: p->v
-    splay(b);
-    int r = a;
-    while (t[r].par != b) r = t[r].par;
-    const bool right = (t[b].ch[1] == r);
-    splay_to(a, b);
-    if (right) {
-     apply_to(t[a].ch[0], e);
-    } else {
-     apply_to(t[b].ch[1], e), apply_to(t[a].ch[0], e);
-    }
-    pull(a), pull(b);
+    const int root = root_of(b);
+    const int ra = rank(a), rb = rank(b);
+    if (ra > rb) range_apply(root, rb + 1, ra, e);
+    else range_apply(root, rb + 1, t[root].size, e), range_apply(root, 0, ra, e);
    }
   }
 };
